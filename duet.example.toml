@@ -1,0 +1,24 @@
+[orchestration]
+default_lead = "claude"
+max_revisions = 1
+agent_timeout_seconds = 600
+max_parallel_tasks = 2
+max_tasks = 6
+
+[budgets]
+run_wall_clock_seconds = 3600
+max_agent_turns = 12
+claude_max_usd_per_turn = 0.75
+claude_max_usd_per_run = 2.0
+codex_max_input_tokens = 400000
+codex_max_output_tokens = 40000
+
+[verification]
+timeout_seconds = 300
+commands = [
+  ["npm", "test"],
+  ["npm", "run", "build"],
+]
+
+[verification.env]
+CI = "true"
