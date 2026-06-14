@@ -364,7 +364,7 @@ export class DuetService {
       if (
         after > 0 &&
         bounds.minimum !== undefined &&
-        after < bounds.minimum
+        after < bounds.minimum - 1
       ) {
         if (request.headers.accept?.includes("text/event-stream")) {
           response.writeHead(200, {
@@ -660,7 +660,7 @@ export class DuetService {
       this.streams.delete(response);
     };
     const flush = () => {
-      if (backpressured) return;
+      if (cleaned || backpressured) return;
       for (const event of this.options.store.listEvents({ afterSeq: cursor, runId })) {
         let writable: boolean;
         try {
@@ -682,7 +682,6 @@ export class DuetService {
         }
       }
     };
-    flush();
     poll = setInterval(flush, 500);
     heartbeat = setInterval(() => {
       try {
@@ -691,7 +690,10 @@ export class DuetService {
         cleanup();
       }
     }, 15_000);
+    response.on("error", cleanup);
+    response.on("close", cleanup);
     request.on("close", cleanup);
+    flush();
   }
 
   private async sendArtifact(
@@ -702,7 +704,7 @@ export class DuetService {
     const source = this.options.store.getArtifactSource(id);
     let content: Buffer;
     if (source.filePath) {
-      const root = path.resolve(artifactsRoot());
+      const root = await realpath(path.resolve(artifactsRoot()));
       await stat(path.resolve(source.filePath));
       const candidate = await realpath(path.resolve(source.filePath));
       const relative = path.relative(root, candidate);
