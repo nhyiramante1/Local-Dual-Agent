@@ -337,7 +337,7 @@ test("artifact containment check resolves symlinks in root before comparison", a
   const realHome = path.join(directory, "real-home");
   const symlinkHome = path.join(directory, "link-home");
   await mkdir(path.join(realHome, "artifacts"), { recursive: true });
-  await symlink(realHome, symlinkHome);
+  await symlink(realHome, symlinkHome, "junction");
   const artifactContent = "symlink artifact content";
   const artifactFile = path.join(realHome, "artifacts", "artifact.log");
   await writeFile(artifactFile, artifactContent);
@@ -359,6 +359,94 @@ test("artifact containment check resolves symlinks in root before comparison", a
       const resp = await fetch(`${base}/api/v1/artifacts/${artifacts[0].id}`, { headers: auth });
       assert.equal(resp.status, 200, "artifact behind symlinked root must not be rejected as path traversal");
       assert.equal(await resp.text(), artifactContent);
+    } finally {
+      await service.close();
+      store.close();
+    }
+  } finally {
+    if (prevDuetHome === undefined) delete process.env.DUET_HOME;
+    else process.env.DUET_HOME = prevDuetHome;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("SSE forced disconnect cleans up intervals and stream tracking", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-sse-close-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const { run, task } = fixture(directory);
+  store.createRun(run, [task]);
+  const secret = "sse-close-secret";
+  const service = new DuetService({ store, secret, instanceId: "sse-close", idleTimeoutMs: 60_000 });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  const auth = { authorization: `Bearer ${secret}` };
+  try {
+    const controller = new AbortController();
+    const stream = await fetch(`${base}/api/v1/events`, {
+      headers: { ...auth, accept: "text/event-stream" },
+      signal: controller.signal,
+    });
+    assert.equal(stream.status, 200);
+    // Consume first chunk to confirm the stream is live
+    await stream.body!.getReader().read();
+    assert.equal(
+      (service as unknown as { activeStreams: number }).activeStreams,
+      1,
+      "stream must be tracked while open",
+    );
+    // Force-disconnect the client
+    controller.abort();
+    // Allow the close event to propagate through the event loop
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      (service as unknown as { activeStreams: number }).activeStreams,
+      0,
+      "activeStreams must be 0 after forced disconnect",
+    );
+    assert.equal(
+      (service as unknown as { streams: Set<unknown> }).streams.size,
+      0,
+      "streams set must be empty after forced disconnect",
+    );
+    // Service must still respond normally — no crashed intervals
+    const health = await fetch(`${base}/api/v1/health`, { headers: auth });
+    assert.equal(health.status, 200);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("artifact containment rejects symlink escaping managed storage root", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-escape-"));
+  const realHome = path.join(directory, "home");
+  const outside = path.join(directory, "outside");
+  await mkdir(path.join(realHome, "artifacts"), { recursive: true });
+  await mkdir(outside);
+  await writeFile(path.join(outside, "secret.txt"), "secret content");
+  // Create a junction/symlink inside the artifacts root pointing to the outside directory
+  const escapeLink = path.join(realHome, "artifacts", "escape");
+  await symlink(outside, escapeLink, "junction");
+  const prevDuetHome = process.env.DUET_HOME;
+  process.env.DUET_HOME = realHome;
+  try {
+    const store = new Store(path.join(directory, "state.sqlite"));
+    const { run, task } = fixture(directory);
+    store.createRun(run, [task]);
+    // Artifact path traverses through the symlink to a file outside the root
+    store.addFileArtifact(run.id, "log", path.join(realHome, "artifacts", "escape", "secret.txt"));
+    const artifacts = store.listArtifacts(run.id);
+    const secret = "escape-test-secret";
+    const service = new DuetService({ store, secret, instanceId: "escape-test", idleTimeoutMs: 60_000 });
+    const port = await service.listen();
+    const base = `http://127.0.0.1:${port}`;
+    const auth = { authorization: `Bearer ${secret}` };
+    try {
+      const resp = await fetch(`${base}/api/v1/artifacts/${artifacts[0].id}`, { headers: auth });
+      assert.equal(resp.status, 400, "symlink escaping the artifacts root must be rejected");
+      const body = (await resp.json()) as { error: { code: string } };
+      assert.equal(body.error.code, "PATH_TRAVERSAL");
     } finally {
       await service.close();
       store.close();
