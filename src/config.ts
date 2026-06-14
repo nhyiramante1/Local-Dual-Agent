@@ -91,6 +91,46 @@ export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
   };
 }
 
+export function validateConfig(value: unknown): DuetConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DuetError("Configuration must be an object.", "INVALID_CONFIG");
+  }
+  const config = normalizeConfig(value as PartialDuetConfig);
+  const numbers: Array<[string, number, number, number?]> = [
+    ["max_revisions", config.orchestration.maxRevisions, 0, 3],
+    ["agent_timeout_seconds", config.orchestration.agentTimeoutSeconds, 1],
+    ["max_parallel_tasks", config.orchestration.maxParallelTasks, 1, 2],
+    ["max_tasks", config.orchestration.maxTasks, 1, 6],
+    ["run_wall_clock_seconds", config.budgets.runWallClockSeconds, 1],
+    ["max_agent_turns", config.budgets.maxAgentTurns, 1],
+    ["claude_max_usd_per_turn", config.budgets.claudeMaxUsdPerTurn, 0.01],
+    ["claude_max_usd_per_run", config.budgets.claudeMaxUsdPerRun, 0.01],
+    ["codex_max_input_tokens", config.budgets.codexMaxInputTokens, 1],
+    ["codex_max_output_tokens", config.budgets.codexMaxOutputTokens, 1],
+    ["verification_timeout_seconds", config.verification.timeoutSeconds, 1],
+  ];
+  for (const [name, number, minimum, maximum] of numbers) {
+    if (
+      typeof number !== "number" ||
+      !Number.isFinite(number) ||
+      number < minimum ||
+      (maximum !== undefined && number > maximum)
+    ) {
+      throw new DuetError(
+        `Invalid configuration value for ${name}.`,
+        "INVALID_CONFIG",
+      );
+    }
+  }
+  if (!["claude", "codex"].includes(config.orchestration.defaultLead)) {
+    throw new DuetError("Invalid default lead provider.", "INVALID_CONFIG");
+  }
+  parseCommands(config.verification.setupCommands, []);
+  parseCommands(config.verification.commands, []);
+  parseEnvironment(config.verification.env);
+  return config;
+}
+
 interface RawConfig {
   orchestration?: Record<string, unknown>;
   budgets?: Record<string, unknown>;

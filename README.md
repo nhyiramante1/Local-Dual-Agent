@@ -18,7 +18,7 @@ only after explicit merge approval.
 
 ## Requirements
 
-- Node.js 24 or newer
+- Node.js 24 (Node 25 is rejected until validated)
 - Git
 - Claude Code authenticated locally
 - Codex CLI authenticated through `duet auth codex`
@@ -64,6 +64,34 @@ npm run dev -- approve RUN_ID --stage merge
 npm run dev -- merge RUN_ID
 ```
 
+The default CLI starts and connects to the per-user `duetd` service. Long
+commands wait for their durable operation by default; add `--detach` to return
+the operation ID immediately. Use `--embedded` for CI, tests, and local
+recovery when the service is stopped.
+
+Service and dashboard commands:
+
+```powershell
+npm run dev -- service start
+npm run dev -- service status
+npm run dev -- dashboard RUN_ID
+npm run dev -- service stop
+```
+
+The dashboard is read-only. It displays runs, tasks, events, budgets,
+verification, reviews, diffs, logs, artifacts, conflicts, and approval state.
+Its launch URL contains a one-minute, single-use fragment ticket that is
+exchanged for a same-site HTTP-only session. The service rejects every
+dashboard-session mutation instead of relying on the page to hide controls.
+
+Plan and merge approvals display a SHA-256 fingerprint and require typed
+confirmation in an interactive terminal. Approval fingerprints bind the plan,
+configuration, repository base, scopes, reviewed trees, commits, and patch
+hashes. A confirmed action also consumes a short-lived, single-use durable
+ticket bound to that fingerprint and run version. These controls prevent
+accidental agent escalation; they are not a security boundary against an agent
+with unrestricted same-user shell access.
+
 Recovery and operations:
 
 ```powershell
@@ -101,8 +129,14 @@ nested markers. This favors safe, deterministic failure over guessing which
 part of an agent response controls the run.
 
 SQLite uses WAL, foreign keys, a five-second busy timeout, immediate
-transactions, normalized attempts/tasks/leases, and durable raw/control
-artifacts.
+transactions, normalized attempts/tasks/leases, durable operations,
+seven-day idempotency records, one-time action tickets, and a transactional
+event outbox. Logical retries reuse stable idempotency keys. `duetd` owns the
+only writable connection. Provider output streams asynchronously to managed
+artifact files instead of growing SQLite rows without bound.
+
+SSE clients can reconnect with `Last-Event-ID`. Terminal-run events older than
+30 days are compacted while the newest 10,000 events are retained.
 
 ## Security Boundary
 
@@ -114,6 +148,9 @@ untrusted repositories or untrusted test commands.
 
 No remote push, automatic conflict resolver, UI automation, credential
 rotation, or usage-limit bypass is implemented.
+
+MCP integration and interface-agent conversation handoffs are intentionally
+deferred to later phases.
 
 ## Development
 

@@ -6,11 +6,27 @@ export function appRoot(): string {
 }
 
 export function duetDataRoot(): string {
-  return path.join(appRoot(), ".duet");
+  return process.env.DUET_HOME ?? path.join(appRoot(), ".duet");
 }
 
 export function stateDatabasePath(): string {
   return path.join(duetDataRoot(), "state.sqlite");
+}
+
+export function serviceInfoPath(): string {
+  return path.join(duetDataRoot(), "service.json");
+}
+
+export function serviceLockPath(): string {
+  return path.join(duetDataRoot(), "service.lock");
+}
+
+export function serviceSecretPath(): string {
+  return path.join(duetDataRoot(), "service.secret");
+}
+
+export function serviceLogPath(): string {
+  return path.join(duetDataRoot(), "duetd.jsonl");
 }
 
 export function codexHomePath(): string {

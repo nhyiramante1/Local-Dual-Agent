@@ -1,11 +1,16 @@
 import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { DatabaseSync } from "node:sqlite";
 
 import type {
   AgentResult,
+  ArtifactRecord,
+  DuetEvent,
   LeaseRecord,
+  OperationRecord,
+  OperationStatus,
   ProviderName,
   ReviewResult,
   ReviewedArtifact,
@@ -39,6 +44,7 @@ interface RunRow {
   cancellation_requested: number;
   created_at: string;
   updated_at: string;
+  version: number;
 }
 
 interface TaskRow {
@@ -62,6 +68,7 @@ interface TaskRow {
   cancellation_requested: number;
   created_at: string;
   updated_at: string;
+  version: number;
 }
 
 export interface AttemptRecord {
@@ -92,6 +99,7 @@ function opposite(provider: ProviderName): ProviderName {
 
 export class Store {
   private readonly db: DatabaseSync;
+  private transactionDepth = 0;
 
   constructor(databasePath = stateDatabasePath()) {
     mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -107,7 +115,9 @@ export class Store {
   }
 
   transaction<T>(action: () => T): T {
+    if (this.transactionDepth > 0) return action();
     this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth += 1;
     try {
       const result = action();
       this.db.exec("COMMIT");
@@ -115,6 +125,8 @@ export class Store {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.transactionDepth -= 1;
     }
   }
 
@@ -288,12 +300,69 @@ export class Store {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS operations (
+          id TEXT PRIMARY KEY,
+          run_id TEXT,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          service_instance_id TEXT NOT NULL,
+          input_hash TEXT NOT NULL,
+          result_json TEXT,
+          error_json TEXT,
+          started_at TEXT,
+          heartbeat_at TEXT,
+          finished_at TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          type TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          run_id TEXT,
+          task_id TEXT,
+          operation_id TEXT,
+          payload_json TEXT NOT NULL,
+          occurred_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS api_idempotency (
+          client_id TEXT NOT NULL,
+          method TEXT NOT NULL,
+          route TEXT NOT NULL,
+          key TEXT NOT NULL,
+          input_hash TEXT NOT NULL,
+          status_code INTEGER NOT NULL,
+          response_json TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(client_id, method, route, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS action_tickets (
+          token_hash TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          action TEXT NOT NULL,
+          binding_hash TEXT NOT NULL,
+          run_version INTEGER NOT NULL,
+          expires_at TEXT NOT NULL,
+          consumed_at TEXT,
+          created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tasks_run_status
           ON tasks(run_id, status, ordinal);
         CREATE INDEX IF NOT EXISTS idx_attempts_run_status
           ON attempts(run_id, status);
         CREATE INDEX IF NOT EXISTS idx_usage_run_provider
           ON usage_events(run_id, provider);
+        CREATE INDEX IF NOT EXISTS idx_events_run_seq
+          ON events(run_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_operations_run_status
+          ON operations(run_id, status);
+        CREATE INDEX IF NOT EXISTS idx_action_tickets_expiry
+          ON action_tickets(expires_at);
       `);
 
       this.addColumn(
@@ -314,8 +383,39 @@ export class Store {
         "cost_known INTEGER NOT NULL DEFAULT 0",
       );
       this.addColumn("verification_results", "task_id TEXT");
-      this.db.exec("PRAGMA user_version = 2");
+      this.addColumn("runs", "version INTEGER NOT NULL DEFAULT 1");
+      this.addColumn("tasks", "version INTEGER NOT NULL DEFAULT 1");
+      this.addColumn("approvals", "binding_hash TEXT");
+      this.addColumn("approvals", "actor TEXT NOT NULL DEFAULT 'local-human'");
+      this.db.exec("PRAGMA user_version = 3");
     });
+  }
+
+  private appendEvent(options: {
+    type: string;
+    severity?: DuetEvent["severity"];
+    runId?: string;
+    taskId?: string;
+    operationId?: string;
+    payload?: unknown;
+  }): void {
+    this.db
+      .prepare(`
+        INSERT INTO events (
+          id, type, severity, run_id, task_id, operation_id,
+          payload_json, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        randomUUID(),
+        options.type,
+        options.severity ?? "info",
+        options.runId ?? null,
+        options.taskId ?? null,
+        options.operationId ?? null,
+        JSON.stringify(options.payload ?? {}),
+        now(),
+      );
   }
 
   createRun(run: RunRecord, tasks: TaskRecord[] = []): void {
@@ -354,6 +454,11 @@ export class Store {
           run.updatedAt,
         );
       for (const task of tasks) this.insertTask(task);
+      this.appendEvent({
+        type: "run.created",
+        runId: run.id,
+        payload: { status: run.status, goal: run.goal },
+      });
     });
   }
 
@@ -371,6 +476,11 @@ export class Store {
           now(),
           runId,
         );
+      this.appendEvent({
+        type: "run.plan_ready",
+        runId,
+        payload: { taskCount: tasks.length },
+      });
     });
   }
 
@@ -437,7 +547,16 @@ export class Store {
       cancellationRequested: boolean;
       configJson: string;
     }>,
+    expectedVersion?: number,
   ): void {
+    this.transaction(() => {
+    const current = this.getRun(id);
+    if (
+      expectedVersion !== undefined &&
+      (current.version ?? 1) !== expectedVersion
+    ) {
+      throw new DuetError("Run version changed.", "VERSION_CONFLICT");
+    }
     const entries: Array<[string, string | number | null]> = [];
     if (fields.status !== undefined) entries.push(["status", fields.status]);
     if (fields.integrationWorktreePath !== undefined) {
@@ -463,8 +582,15 @@ export class Store {
     if (fields.configJson !== undefined) {
       entries.push(["config_json", fields.configJson]);
     }
+    entries.push(["version", (current.version ?? 1) + 1]);
     entries.push(["updated_at", now()]);
     this.update("runs", "id", id, entries);
+    this.appendEvent({
+      type: "run.updated",
+      runId: id,
+      payload: fields,
+    });
+    });
   }
 
   listTasks(runId: string): TaskRecord[] {
@@ -505,7 +631,16 @@ export class Store {
       error: string | null;
       cancellationRequested: boolean;
     }>,
+    expectedVersion?: number,
   ): void {
+    this.transaction(() => {
+    const current = this.getTask(runId, taskId);
+    if (
+      expectedVersion !== undefined &&
+      (current.version ?? 1) !== expectedVersion
+    ) {
+      throw new DuetError("Task version changed.", "VERSION_CONFLICT");
+    }
     const entries: Array<[string, string | number | null]> = [];
     if (fields.status !== undefined) entries.push(["status", fields.status]);
     if (fields.baseCommit !== undefined) {
@@ -543,6 +678,7 @@ export class Store {
         fields.cancellationRequested ? 1 : 0,
       ]);
     }
+    entries.push(["version", (current.version ?? 1) + 1]);
     entries.push(["updated_at", now()]);
     const assignments = entries.map(([name]) => `${name} = ?`).join(", ");
     this.db
@@ -550,18 +686,40 @@ export class Store {
         `UPDATE tasks SET ${assignments} WHERE run_id = ? AND id = ?`,
       )
       .run(...entries.map(([, value]) => value), runId, taskId);
+    this.appendEvent({
+      type: "task.updated",
+      runId,
+      taskId,
+      payload: fields,
+    });
+    });
   }
 
-  approve(runId: string, stage: "plan" | "merge"): void {
+  approve(
+    runId: string,
+    stage: "plan" | "merge",
+    bindingHash?: string,
+    actor = "local-human",
+  ): void {
     this.transaction(() => {
       this.db
         .prepare(`
-          INSERT OR IGNORE INTO approvals (run_id, stage, approved_at)
-          VALUES (?, ?, ?)
+          INSERT INTO approvals (
+            run_id, stage, approved_at, binding_hash, actor
+          ) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(run_id, stage) DO UPDATE SET
+            approved_at = excluded.approved_at,
+            binding_hash = excluded.binding_hash,
+            actor = excluded.actor
         `)
-        .run(runId, stage, now());
+        .run(runId, stage, now(), bindingHash ?? null, actor);
       this.updateRun(runId, {
         status: stage === "plan" ? "approved" : "merge_approved",
+      });
+      this.appendEvent({
+        type: "approval.recorded",
+        runId,
+        payload: { stage, bindingHash, actor },
       });
     });
   }
@@ -574,6 +732,58 @@ export class Store {
         )
         .get(runId, stage),
     );
+  }
+
+  getApprovalBinding(
+    runId: string,
+    stage: "plan" | "merge",
+  ): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT binding_hash FROM approvals WHERE run_id = ? AND stage = ?",
+      )
+      .get(runId, stage) as { binding_hash: string | null } | undefined;
+    return row?.binding_hash ?? undefined;
+  }
+
+  bindLegacyApproval(
+    runId: string,
+    stage: "plan" | "merge",
+    bindingHash: string,
+  ): void {
+    this.transaction(() => {
+      const result = this.db
+        .prepare(`
+          UPDATE approvals SET binding_hash = ?
+          WHERE run_id = ? AND stage = ? AND binding_hash IS NULL
+        `)
+        .run(bindingHash, runId, stage);
+      if (result.changes === 1) {
+        this.appendEvent({
+          type: "approval.legacy_bound",
+          runId,
+          payload: { stage, bindingHash },
+        });
+      }
+    });
+  }
+
+  invalidateApproval(
+    runId: string,
+    stage: "plan" | "merge",
+    reason: string,
+  ): void {
+    this.transaction(() => {
+      this.db
+        .prepare("DELETE FROM approvals WHERE run_id = ? AND stage = ?")
+        .run(runId, stage);
+      this.appendEvent({
+        type: "approval.invalidated",
+        runId,
+        severity: "warning",
+        payload: { stage, reason },
+      });
+    });
   }
 
   reserveAgentAttempt(options: {
@@ -608,6 +818,16 @@ export class Store {
           stamp,
           stamp,
         );
+      this.appendEvent({
+        type: "provider.attempt_started",
+        runId: options.runId,
+        taskId: options.taskId,
+        payload: {
+          attemptId: Number(result.lastInsertRowid),
+          role: options.role,
+          provider: options.provider,
+        },
+      });
       return Number(result.lastInsertRowid);
     });
   }
@@ -652,6 +872,10 @@ export class Store {
     status: "completed" | "failed" | "cancelled",
     fields: { sessionId?: string; checkpoint?: string; error?: string } = {},
   ): void {
+    this.transaction(() => {
+    const attempt = this.db
+      .prepare("SELECT run_id, task_id FROM attempts WHERE id = ?")
+      .get(attemptId) as { run_id: string; task_id: string | null } | undefined;
     this.db
       .prepare(`
         UPDATE attempts SET status = ?, session_id = COALESCE(?, session_id),
@@ -667,6 +891,16 @@ export class Store {
         now(),
         attemptId,
       );
+    if (attempt) {
+      this.appendEvent({
+        type: "provider.attempt_finished",
+        runId: attempt.run_id,
+        taskId: attempt.task_id ?? undefined,
+        severity: status === "failed" ? "error" : "info",
+        payload: { attemptId, status, checkpoint: fields.checkpoint },
+      });
+    }
+    });
   }
 
   listRunningAttempts(runId: string, taskId?: string): AttemptRecord[] {
@@ -730,22 +964,6 @@ export class Store {
         );
       this.addArtifact(
         runId,
-        `${role}.${result.provider}.raw.stdout`,
-        result.stdout,
-        undefined,
-        taskId,
-      );
-      if (result.stderr.trim()) {
-        this.addArtifact(
-          runId,
-          `${role}.${result.provider}.raw.stderr`,
-          result.stderr,
-          undefined,
-          taskId,
-        );
-      }
-      this.addArtifact(
-        runId,
         `${role}.${result.provider}.control`,
         result.finalText,
         undefined,
@@ -757,6 +975,16 @@ export class Store {
           checkpoint: "agent_completed",
         });
       }
+      this.appendEvent({
+        type: "provider.turn_completed",
+        runId,
+        taskId,
+        payload: {
+          role,
+          provider: result.provider,
+          durationMs: result.durationMs,
+        },
+      });
     });
   }
 
@@ -785,6 +1013,7 @@ export class Store {
     provider?: ProviderName,
     taskId?: string,
   ): void {
+    this.transaction(() => {
     this.db
       .prepare(`
         INSERT INTO messages (
@@ -792,6 +1021,13 @@ export class Store {
         ) VALUES (?, ?, ?, ?, ?, ?)
       `)
       .run(runId, taskId ?? null, kind, provider ?? null, body, now());
+    this.appendEvent({
+      type: "message.created",
+      runId,
+      taskId,
+      payload: { kind, provider },
+    });
+    });
   }
 
   addArtifact(
@@ -802,6 +1038,7 @@ export class Store {
     taskId?: string,
     sha256?: string,
   ): void {
+    this.transaction(() => {
     this.db
       .prepare(`
         INSERT INTO artifacts (
@@ -817,6 +1054,97 @@ export class Store {
         sha256 ?? null,
         now(),
       );
+    this.appendEvent({
+      type: "artifact.created",
+      runId,
+      taskId,
+      payload: { kind, sha256 },
+    });
+    });
+  }
+
+  addFileArtifact(
+    runId: string,
+    kind: string,
+    filePath: string,
+    taskId?: string,
+  ): void {
+    this.transaction(() => {
+      this.db
+        .prepare(`
+          INSERT INTO artifacts (
+            run_id, task_id, kind, path, content, sha256, created_at
+          ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
+        `)
+        .run(runId, taskId ?? null, kind, filePath, now());
+      this.appendEvent({
+        type: "artifact.created",
+        runId,
+        taskId,
+        payload: { kind, storage: "file" },
+      });
+    });
+  }
+
+  listArtifacts(runId: string): ArtifactRecord[] {
+    const rows = this.db
+      .prepare(`
+        SELECT id, run_id, task_id, kind, sha256, created_at
+        FROM artifacts WHERE run_id = ? ORDER BY id
+      `)
+      .all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      runId: String(row.run_id),
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      kind: String(row.kind),
+      sha256: row.sha256 ? String(row.sha256) : undefined,
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  getArtifact(id: number): ArtifactRecord {
+    const row = this.db
+      .prepare(`
+        SELECT id, run_id, task_id, kind, content, sha256, created_at
+        FROM artifacts WHERE id = ?
+      `)
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) throw new DuetError(`Unknown artifact: ${id}`, "ARTIFACT_NOT_FOUND");
+    return {
+      id: Number(row.id),
+      runId: String(row.run_id),
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      kind: String(row.kind),
+      content: row.content === null ? undefined : String(row.content),
+      sha256: row.sha256 ? String(row.sha256) : undefined,
+      createdAt: String(row.created_at),
+    };
+  }
+
+  getArtifactSource(id: number): {
+    record: ArtifactRecord;
+    filePath?: string;
+  } {
+    const row = this.db
+      .prepare(`
+        SELECT id, run_id, task_id, kind, path, content, sha256, created_at
+        FROM artifacts WHERE id = ?
+      `)
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) throw new DuetError(`Unknown artifact: ${id}`, "ARTIFACT_NOT_FOUND");
+    return {
+      record: {
+        id: Number(row.id),
+        runId: String(row.run_id),
+        taskId: row.task_id ? String(row.task_id) : undefined,
+        kind: String(row.kind),
+        content: row.content === null ? undefined : String(row.content),
+        sha256: row.sha256 ? String(row.sha256) : undefined,
+        createdAt: String(row.created_at),
+      },
+      filePath: row.path ? String(row.path) : undefined,
+    };
   }
 
   getLatestArtifact(
@@ -857,6 +1185,7 @@ export class Store {
     attempt: number,
     result: VerificationResult,
   ): void {
+    this.transaction(() => {
     this.db
       .prepare(`
         INSERT INTO verification_results (
@@ -876,6 +1205,48 @@ export class Store {
         result.passed ? 1 : 0,
         now(),
       );
+    this.appendEvent({
+      type: "verification.completed",
+      runId,
+      taskId,
+      severity: result.passed ? "info" : "error",
+      payload: {
+        attempt,
+        command: result.command,
+        passed: result.passed,
+        durationMs: result.durationMs,
+      },
+    });
+    });
+  }
+
+  listVerificationResults(runId: string): Array<{
+    id: number;
+    taskId?: string;
+    attempt: number;
+    command: string[];
+    exitCode: number | null;
+    passed: boolean;
+    durationMs: number;
+    createdAt: string;
+  }> {
+    const rows = this.db
+      .prepare(`
+        SELECT id, task_id, attempt, command_json, exit_code,
+          passed, duration_ms, created_at
+        FROM verification_results WHERE run_id = ? ORDER BY id
+      `)
+      .all(runId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      attempt: Number(row.attempt),
+      command: JSON.parse(String(row.command_json)) as string[],
+      exitCode: row.exit_code === null ? null : Number(row.exit_code),
+      passed: Number(row.passed) === 1,
+      durationMs: Number(row.duration_ms),
+      createdAt: String(row.created_at),
+    }));
   }
 
   getUsageSummary(runId: string): UsageSummary {
@@ -1081,6 +1452,17 @@ export class Store {
         status: "integrated",
         integratedCommit: options.resultingCommit,
       });
+      this.appendEvent({
+        type: "integration.completed",
+        runId: options.runId,
+        taskId: options.taskId,
+        payload: {
+          sourceCommit: options.sourceCommit,
+          resultingCommit: options.resultingCommit,
+          treeId: options.treeId,
+          patchHash: options.patchHash,
+        },
+      });
     });
   }
 
@@ -1113,6 +1495,369 @@ export class Store {
       body: row.body,
       createdAt: row.created_at,
     }));
+  }
+
+  createOperation(operation: OperationRecord): void {
+    this.transaction(() => {
+      this.db
+        .prepare(`
+          INSERT INTO operations (
+            id, run_id, kind, status, service_instance_id, input_hash,
+            result_json, error_json, started_at, heartbeat_at, finished_at,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          operation.id,
+          operation.runId ?? null,
+          operation.kind,
+          operation.status,
+          operation.serviceInstanceId,
+          operation.inputHash,
+          operation.resultJson ?? null,
+          operation.errorJson ?? null,
+          operation.startedAt ?? null,
+          operation.heartbeatAt ?? null,
+          operation.finishedAt ?? null,
+          operation.createdAt,
+        );
+      this.appendEvent({
+        type: "operation.created",
+        runId: operation.runId,
+        operationId: operation.id,
+        payload: { kind: operation.kind, status: operation.status },
+      });
+    });
+  }
+
+  getOperation(id: string): OperationRecord {
+    const row = this.db
+      .prepare("SELECT * FROM operations WHERE id = ?")
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new DuetError(`Unknown operation: ${id}`, "OPERATION_NOT_FOUND");
+    }
+    return this.mapOperation(row);
+  }
+
+  listActiveOperations(runId?: string): OperationRecord[] {
+    const rows = (
+      runId
+        ? this.db
+            .prepare(`
+              SELECT * FROM operations
+              WHERE run_id = ? AND status IN ('queued', 'running')
+              ORDER BY created_at
+            `)
+            .all(runId)
+        : this.db
+            .prepare(`
+              SELECT * FROM operations
+              WHERE status IN ('queued', 'running')
+              ORDER BY created_at
+            `)
+            .all()
+    ) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapOperation(row));
+  }
+
+  updateOperation(
+    id: string,
+    fields: Partial<{
+      runId: string;
+      status: OperationStatus;
+      resultJson: string;
+      errorJson: string;
+      startedAt: string;
+      heartbeatAt: string;
+      finishedAt: string;
+    }>,
+  ): void {
+    this.transaction(() => {
+      const entries: Array<[string, string | null]> = [];
+      if (fields.runId !== undefined) entries.push(["run_id", fields.runId]);
+      if (fields.status !== undefined) entries.push(["status", fields.status]);
+      if (fields.resultJson !== undefined) {
+        entries.push(["result_json", fields.resultJson]);
+      }
+      if (fields.errorJson !== undefined) {
+        entries.push(["error_json", fields.errorJson]);
+      }
+      if (fields.startedAt !== undefined) {
+        entries.push(["started_at", fields.startedAt]);
+      }
+      if (fields.heartbeatAt !== undefined) {
+        entries.push(["heartbeat_at", fields.heartbeatAt]);
+      }
+      if (fields.finishedAt !== undefined) {
+        entries.push(["finished_at", fields.finishedAt]);
+      }
+      if (entries.length > 0) this.update("operations", "id", id, entries);
+      if (Object.keys(fields).some((key) => key !== "heartbeatAt")) {
+        const operation = this.getOperation(id);
+        this.appendEvent({
+          type: "operation.updated",
+          runId: operation.runId,
+          operationId: id,
+          severity: operation.status === "failed" ? "error" : "info",
+          payload: fields,
+        });
+      }
+    });
+  }
+
+  interruptActiveOperations(serviceInstanceId: string): number {
+    return this.transaction(() => {
+      const stamp = now();
+      const rows = this.db
+        .prepare(`
+          SELECT id, run_id FROM operations
+          WHERE service_instance_id != ?
+            AND status IN ('queued', 'running')
+        `)
+        .all(serviceInstanceId) as unknown as Array<{
+        id: string;
+        run_id: string | null;
+      }>;
+      for (const row of rows) {
+        this.db
+          .prepare(`
+            UPDATE operations SET status = 'interrupted',
+              error_json = ?, finished_at = ? WHERE id = ?
+          `)
+          .run(
+            JSON.stringify({
+              code: "SERVICE_RESTARTED",
+              message: "Service restarted before operation completion.",
+            }),
+            stamp,
+            row.id,
+          );
+        this.appendEvent({
+          type: "operation.interrupted",
+          runId: row.run_id ?? undefined,
+          operationId: row.id,
+          severity: "warning",
+        });
+      }
+      return rows.length;
+    });
+  }
+
+  listEvents(options: {
+    afterSeq?: number;
+    runId?: string;
+    limit?: number;
+  } = {}): DuetEvent[] {
+    const limit = Math.min(Math.max(options.limit ?? 500, 1), 2_000);
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM events
+        WHERE seq > ? AND (? IS NULL OR run_id = ?)
+        ORDER BY seq LIMIT ?
+      `)
+      .all(
+        options.afterSeq ?? 0,
+        options.runId ?? null,
+        options.runId ?? null,
+        limit,
+      ) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      seq: Number(row.seq),
+      id: String(row.id),
+      type: String(row.type),
+      severity: row.severity as DuetEvent["severity"],
+      runId: row.run_id ? String(row.run_id) : undefined,
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      operationId: row.operation_id ? String(row.operation_id) : undefined,
+      occurredAt: String(row.occurred_at),
+      payload: JSON.parse(String(row.payload_json)),
+    }));
+  }
+
+  getEventBounds(runId?: string): { minimum?: number; maximum?: number } {
+    const row = this.db
+      .prepare(`
+        SELECT MIN(seq) AS minimum, MAX(seq) AS maximum
+        FROM events WHERE (? IS NULL OR run_id = ?)
+      `)
+      .get(runId ?? null, runId ?? null) as {
+      minimum: number | null;
+      maximum: number | null;
+    };
+    return {
+      minimum: row.minimum ?? undefined,
+      maximum: row.maximum ?? undefined,
+    };
+  }
+
+  compactEvents(retentionDays = 30, minimumNewest = 10_000): number {
+    return this.transaction(() => {
+      const cutoff = new Date(
+        Date.now() - retentionDays * 24 * 60 * 60 * 1_000,
+      ).toISOString();
+      const result = this.db
+        .prepare(`
+          DELETE FROM events
+          WHERE occurred_at < ?
+            AND seq < COALESCE(
+              (SELECT MIN(seq) FROM (
+                SELECT seq FROM events ORDER BY seq DESC LIMIT ?
+              )),
+              0
+            )
+            AND (
+              run_id IS NULL OR run_id IN (
+                SELECT id FROM runs WHERE status IN (
+                  'merged', 'failed', 'cancelled'
+                )
+              )
+            )
+        `)
+        .run(cutoff, minimumNewest);
+      return Number(result.changes);
+    });
+  }
+
+  getIdempotentResponse(options: {
+    clientId: string;
+    method: string;
+    route: string;
+    key: string;
+    inputHash: string;
+  }): { statusCode: number; responseJson: string } | undefined {
+    const row = this.db
+      .prepare(`
+        SELECT input_hash, status_code, response_json, expires_at
+        FROM api_idempotency
+        WHERE client_id = ? AND method = ? AND route = ? AND key = ?
+      `)
+      .get(
+        options.clientId,
+        options.method,
+        options.route,
+        options.key,
+      ) as
+      | {
+          input_hash: string;
+          status_code: number;
+          response_json: string;
+          expires_at: string;
+        }
+      | undefined;
+    if (!row || Date.parse(row.expires_at) <= Date.now()) return undefined;
+    if (row.input_hash !== options.inputHash) {
+      throw new DuetError(
+        "Idempotency key was reused with a different request.",
+        "IDEMPOTENCY_CONFLICT",
+      );
+    }
+    return { statusCode: row.status_code, responseJson: row.response_json };
+  }
+
+  saveIdempotentResponse(options: {
+    clientId: string;
+    method: string;
+    route: string;
+    key: string;
+    inputHash: string;
+    statusCode: number;
+    responseJson: string;
+    ttlMs?: number;
+  }): void {
+    const stamp = now();
+    this.db
+      .prepare(`
+        INSERT INTO api_idempotency (
+          client_id, method, route, key, input_hash, status_code,
+          response_json, expires_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(client_id, method, route, key) DO NOTHING
+      `)
+      .run(
+        options.clientId,
+        options.method,
+        options.route,
+        options.key,
+        options.inputHash,
+        options.statusCode,
+        options.responseJson,
+        new Date(Date.now() + (options.ttlMs ?? 7 * 86_400_000)).toISOString(),
+        stamp,
+      );
+  }
+
+  createActionTicket(options: {
+    tokenHash: string;
+    runId: string;
+    action: "approve_plan" | "approve_merge" | "merge";
+    bindingHash: string;
+    runVersion: number;
+    expiresAt: string;
+  }): void {
+    this.db
+      .prepare(`
+        INSERT INTO action_tickets (
+          token_hash, run_id, action, binding_hash, run_version,
+          expires_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        options.tokenHash,
+        options.runId,
+        options.action,
+        options.bindingHash,
+        options.runVersion,
+        options.expiresAt,
+        now(),
+      );
+  }
+
+  consumeActionTicket(options: {
+    tokenHash: string;
+    runId: string;
+    action: "approve_plan" | "approve_merge" | "merge";
+    bindingHash: string;
+    runVersion: number;
+  }): void {
+    this.transaction(() => {
+      const ticket = this.db
+        .prepare(`
+          SELECT binding_hash, run_version, expires_at, consumed_at
+          FROM action_tickets
+          WHERE token_hash = ? AND run_id = ? AND action = ?
+        `)
+        .get(options.tokenHash, options.runId, options.action) as
+        | {
+            binding_hash: string;
+            run_version: number;
+            expires_at: string;
+            consumed_at: string | null;
+          }
+        | undefined;
+      if (
+        !ticket ||
+        ticket.consumed_at ||
+        ticket.binding_hash !== options.bindingHash ||
+        ticket.run_version !== options.runVersion ||
+        Date.parse(ticket.expires_at) <= Date.now()
+      ) {
+        throw new DuetError(
+          "Action ticket is invalid, expired, consumed, or stale.",
+          "ACTION_TICKET_INVALID",
+        );
+      }
+      this.db
+        .prepare(
+          "UPDATE action_tickets SET consumed_at = ? WHERE token_hash = ?",
+        )
+        .run(now(), options.tokenHash);
+      this.appendEvent({
+        type: "action_ticket.consumed",
+        runId: options.runId,
+        payload: { action: options.action },
+      });
+    });
   }
 
   private update(
@@ -1169,6 +1914,7 @@ export class Store {
       error: row.error ?? undefined,
       configJson: row.config_json,
       cancellationRequested: row.cancellation_requested === 1,
+      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1198,6 +1944,7 @@ export class Store {
       integratedCommit: row.integrated_commit ?? undefined,
       error: row.error ?? undefined,
       cancellationRequested: row.cancellation_requested === 1,
+      version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1220,6 +1967,23 @@ export class Store {
       heartbeatAt: String(row.heartbeat_at),
       finishedAt: row.finished_at ? String(row.finished_at) : undefined,
       error: row.error ? String(row.error) : undefined,
+    };
+  }
+
+  private mapOperation(row: Record<string, unknown>): OperationRecord {
+    return {
+      id: String(row.id),
+      runId: row.run_id ? String(row.run_id) : undefined,
+      kind: String(row.kind),
+      status: row.status as OperationStatus,
+      serviceInstanceId: String(row.service_instance_id),
+      inputHash: String(row.input_hash),
+      resultJson: row.result_json ? String(row.result_json) : undefined,
+      errorJson: row.error_json ? String(row.error_json) : undefined,
+      startedAt: row.started_at ? String(row.started_at) : undefined,
+      heartbeatAt: row.heartbeat_at ? String(row.heartbeat_at) : undefined,
+      finishedAt: row.finished_at ? String(row.finished_at) : undefined,
+      createdAt: String(row.created_at),
     };
   }
 }

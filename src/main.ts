@@ -1,4 +1,6 @@
 import { loginCodex } from "./auth.js";
+import { createInterface } from "node:readline/promises";
+import { approvalBinding } from "./application/integrity.js";
 import { loadConfig } from "./config.js";
 import type {
   ProviderName,
@@ -62,6 +64,31 @@ function printTask(task: TaskRecord): void {
   if (task.error) console.log(`    error: ${task.error}`);
 }
 
+async function confirmEmbedded(
+  run: RunRecord,
+  tasks: TaskRecord[],
+  stage: "plan" | "merge",
+): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new DuetError(
+      `${stage} approval requires an interactive terminal.`,
+      "INTERACTIVE_APPROVAL_REQUIRED",
+    );
+  }
+  console.log(
+    `${stage.toUpperCase()} fingerprint: ${approvalBinding(run, tasks, stage)}`,
+  );
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await prompt.question(`Type "${stage}" to confirm: `);
+    if (answer.trim() !== stage) {
+      throw new DuetError("Approval cancelled.", "APPROVAL_CANCELLED");
+    }
+  } finally {
+    prompt.close();
+  }
+}
+
 function printRun(run: RunRecord, store: Store): void {
   console.log(`Run: ${run.id}`);
   console.log(`Status: ${run.status}`);
@@ -94,7 +121,7 @@ function printRun(run: RunRecord, store: Store): void {
   }
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     printUsage();
@@ -173,6 +200,11 @@ async function main(): Promise<void> {
           "INVALID_ARGUMENT",
         );
       }
+      await confirmEmbedded(
+        store.getRun(runId),
+        store.listTasks(runId),
+        stage,
+      );
       printRun(orchestrator.approve(runId, stage), store);
       return;
     }
@@ -359,6 +391,11 @@ async function main(): Promise<void> {
       if (!runId || args.length) {
         throw new DuetError("Usage: duet merge RUN_ID", "INVALID_ARGUMENT");
       }
+      await confirmEmbedded(
+        store.getRun(runId),
+        store.listTasks(runId),
+        "merge",
+      );
       printRun(await orchestrator.merge(runId), store);
       return;
     }
@@ -368,14 +405,3 @@ async function main(): Promise<void> {
     store.close();
   }
 }
-
-main().catch((error: unknown) => {
-  if (error instanceof DuetError) {
-    console.error(`${error.code}: ${error.message}`);
-  } else {
-    console.error(
-      error instanceof Error ? error.stack ?? error.message : String(error),
-    );
-  }
-  process.exitCode = 1;
-});

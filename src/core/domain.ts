@@ -101,6 +101,7 @@ export interface RunRecord {
   error?: string;
   configJson: string;
   cancellationRequested: boolean;
+  version?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -124,8 +125,54 @@ export interface TaskRecord {
   integratedCommit?: string;
   error?: string;
   cancellationRequested: boolean;
+  version?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type OperationStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface OperationRecord {
+  id: string;
+  runId?: string;
+  kind: string;
+  status: OperationStatus;
+  serviceInstanceId: string;
+  inputHash: string;
+  resultJson?: string;
+  errorJson?: string;
+  startedAt?: string;
+  heartbeatAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+}
+
+export interface DuetEvent {
+  seq: number;
+  id: string;
+  type: string;
+  severity: "debug" | "info" | "warning" | "error";
+  runId?: string;
+  taskId?: string;
+  operationId?: string;
+  occurredAt: string;
+  payload: unknown;
+}
+
+export interface ArtifactRecord {
+  id: number;
+  runId: string;
+  taskId?: string;
+  kind: string;
+  content?: string;
+  sha256?: string;
+  createdAt: string;
 }
 
 export interface LeaseRecord {

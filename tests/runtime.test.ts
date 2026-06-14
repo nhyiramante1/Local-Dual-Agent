@@ -17,6 +17,7 @@ import { buildCodexArgs } from "../src/providers/codex.js";
 test("Node below 24 returns a friendly bootstrap error", () => {
   assert.match(nodeVersionError("20.19.0")!, /requires Node.js 24/);
   assert.equal(nodeVersionError("24.0.0"), undefined);
+  assert.match(nodeVersionError("25.0.0")!, /validated release line/);
 });
 
 test("revision configuration accepts 0, 1, and 3", async () => {

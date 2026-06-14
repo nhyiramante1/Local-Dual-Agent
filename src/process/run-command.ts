@@ -1,4 +1,5 @@
 import crossSpawn from "cross-spawn";
+import path from "node:path";
 
 import type { CommandResult } from "../core/types.js";
 
@@ -18,7 +19,11 @@ export function terminateProcessTree(childPid: number | undefined): void {
   if (childPid === undefined) return;
   if (process.platform === "win32") {
     const killer = crossSpawn(
-      "taskkill.exe",
+      path.join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "taskkill.exe",
+      ),
       ["/PID", String(childPid), "/T", "/F"],
       { windowsHide: true, stdio: "ignore" },
     );

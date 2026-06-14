@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { appendFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import type {
   AgentResult,
@@ -52,6 +55,8 @@ import {
   validateRunPlan,
 } from "./providers/validation.js";
 import { runVerification } from "./verification.js";
+import { approvalBinding } from "./application/integrity.js";
+import { artifactsRoot } from "./paths.js";
 
 const maxReviewDiffCharacters = 200_000;
 const leaseTtlMs = 30_000;
@@ -248,7 +253,11 @@ export class Orchestrator {
         "INVALID_RUN_STATE",
       );
     }
-    this.store.approve(runId, stage);
+    this.store.approve(
+      runId,
+      stage,
+      approvalBinding(run, this.store.listTasks(runId), stage),
+    );
     return this.store.getRun(runId);
   }
 
@@ -266,6 +275,20 @@ export class Orchestrator {
       throw new DuetError(
         `Run ${runId} requires plan approval or a resumable state.`,
         "PLAN_NOT_APPROVED",
+      );
+    }
+    const planBinding = approvalBinding(
+      run,
+      this.store.listTasks(runId),
+      "plan",
+    );
+    const recordedPlanBinding = this.store.getApprovalBinding(runId, "plan");
+    if (!recordedPlanBinding) {
+      this.store.bindLegacyApproval(runId, "plan", planBinding);
+    } else if (recordedPlanBinding !== planBinding) {
+      throw new DuetError(
+        "Plan approval no longer matches the approved state.",
+        "APPROVAL_BINDING_MISMATCH",
       );
     }
     if (!run.plan) {
@@ -299,8 +322,18 @@ export class Orchestrator {
 
   async resume(runId: string, config?: DuetConfig): Promise<RunRecord> {
     const run = this.store.getRun(runId);
-    if (config) {
-      this.store.updateRun(runId, { configJson: JSON.stringify(config) });
+    if (config && JSON.stringify(config) !== run.configJson) {
+      this.store.invalidateApproval(
+        runId,
+        "plan",
+        "Run configuration changed during resume.",
+      );
+      this.store.updateRun(runId, {
+        configJson: JSON.stringify(config),
+        status: "awaiting_plan_approval",
+        error: "Configuration changed; approve the updated run fingerprint.",
+      });
+      return this.store.getRun(runId);
     }
     for (const attempt of this.store.listRunningAttempts(runId)) {
       if (isProcessAlive(attempt.pid)) {
@@ -468,6 +501,20 @@ export class Orchestrator {
       throw new DuetError(
         `Run ${runId} requires merge approval.`,
         "MERGE_NOT_APPROVED",
+      );
+    }
+    const mergeBinding = approvalBinding(
+      run,
+      this.store.listTasks(runId),
+      "merge",
+    );
+    const recordedMergeBinding = this.store.getApprovalBinding(runId, "merge");
+    if (!recordedMergeBinding) {
+      this.store.bindLegacyApproval(runId, "merge", mergeBinding);
+    } else if (recordedMergeBinding !== mergeBinding) {
+      throw new DuetError(
+        "Merge approval no longer matches the reviewed state.",
+        "APPROVAL_BINDING_MISMATCH",
       );
     }
     try {
@@ -1251,7 +1298,34 @@ export class Orchestrator {
         "BUDGET_PAUSED",
       );
     }
+    let stdoutWrites = Promise.resolve();
+    let stderrWrites = Promise.resolve();
+    let outputError: unknown;
     try {
+      const outputDirectory = path.join(
+        artifactsRoot(),
+        run.id,
+        task?.id ?? "run",
+      );
+      mkdirSync(outputDirectory, { recursive: true });
+      const stdoutPath = path.join(outputDirectory, `${attempt}.stdout.log`);
+      const stderrPath = path.join(outputDirectory, `${attempt}.stderr.log`);
+      await Promise.all([
+        writeFile(stdoutPath, "", "utf8"),
+        writeFile(stderrPath, "", "utf8"),
+      ]);
+      this.store.addFileArtifact(
+        run.id,
+        `${role}.${provider}.raw.stdout`,
+        stdoutPath,
+        task?.id,
+      );
+      this.store.addFileArtifact(
+        run.id,
+        `${role}.${provider}.raw.stderr`,
+        stderrPath,
+        task?.id,
+      );
       const result = await this.adapters(provider).run({
         ...turn,
         maxBudgetUsd:
@@ -1260,14 +1334,22 @@ export class Orchestrator {
             : undefined,
         onStart: (pid) =>
           this.store.updateAttemptProcess(attempt, { pid }),
-        onStdout: (chunk) =>
-          this.store.updateAttemptProcess(attempt, {
-            stdoutAppend: chunk,
-          }),
-        onStderr: (chunk) =>
-          this.store.updateAttemptProcess(attempt, {
-            stderrAppend: chunk,
-          }),
+        onStdout: (chunk) => {
+          stdoutWrites = stdoutWrites
+            .then(() => appendFile(stdoutPath, chunk, "utf8"))
+            .catch((error: unknown) => {
+              outputError ??= error;
+            });
+          this.store.updateAttemptProcess(attempt, { heartbeat: true });
+        },
+        onStderr: (chunk) => {
+          stderrWrites = stderrWrites
+            .then(() => appendFile(stderrPath, chunk, "utf8"))
+            .catch((error: unknown) => {
+              outputError ??= error;
+            });
+          this.store.updateAttemptProcess(attempt, { heartbeat: true });
+        },
         onHeartbeat: () =>
           this.store.updateAttemptProcess(attempt, { heartbeat: true }),
         shouldCancel: () =>
@@ -1276,6 +1358,17 @@ export class Orchestrator {
             ? this.store.getTask(run.id, task.id).cancellationRequested
             : false),
       });
+      await Promise.all([stdoutWrites, stderrWrites]);
+      if (outputError) {
+        throw new DuetError(
+          `Could not persist provider output: ${
+            outputError instanceof Error
+              ? outputError.message
+              : String(outputError)
+          }`,
+          "ARTIFACT_WRITE_FAILED",
+        );
+      }
       this.store.recordAgentResult(
         run.id,
         task?.id,
@@ -1285,6 +1378,7 @@ export class Orchestrator {
       );
       return result;
     } catch (error) {
+      await Promise.allSettled([stdoutWrites, stderrWrites]);
       this.store.finishAttempt(attempt, "failed", {
         error: error instanceof Error ? error.message : String(error),
       });

@@ -5,7 +5,8 @@
   "description": "Local Claude Code and Codex coding-agent orchestrator.",
   "type": "module",
   "bin": {
-    "duet": "./dist/cli.js"
+    "duet": "./dist/cli.js",
+    "duetd": "./dist/duetd.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -13,10 +14,11 @@
     "dev": "tsx src/cli.ts",
     "doctor": "tsx src/cli.ts doctor",
     "doctor:live": "tsx src/cli.ts doctor --live",
+    "service": "tsx src/duetd.ts",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24 <25"
   },
   "dependencies": {
     "@openai/codex": "0.139.0",

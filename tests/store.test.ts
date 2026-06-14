@@ -10,6 +10,7 @@ import type {
   TaskRecord,
 } from "../src/core/domain.js";
 import { Store } from "../src/persistence/store.js";
+import { ApplicationCommands } from "../src/application/commands.js";
 
 function records(directory: string): {
   run: RunRecord;
@@ -152,6 +153,120 @@ test("agent turn reservation is atomic across concurrent stores", async () => {
   } finally {
     first.close();
     second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("operations, events, and idempotency survive restart", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-events-"));
+  const database = path.join(directory, "state.sqlite");
+  let store = new Store(database);
+  try {
+    const { run } = records(directory);
+    store.createRun(run);
+    store.createOperation({
+      id: "operation",
+      runId: run.id,
+      kind: "execute",
+      status: "running",
+      serviceInstanceId: "old-service",
+      inputHash: "input",
+      createdAt: new Date().toISOString(),
+    });
+    store.saveIdempotentResponse({
+      clientId: "client",
+      method: "POST",
+      route: "/runs",
+      key: "key",
+      inputHash: "input",
+      statusCode: 202,
+      responseJson: "{\"ok\":true}",
+    });
+    store.close();
+
+    store = new Store(database);
+    assert.equal(store.interruptActiveOperations("new-service"), 1);
+    assert.equal(store.getOperation("operation").status, "interrupted");
+    assert.ok(store.listEvents().length >= 3);
+    assert.deepEqual(
+      store.getIdempotentResponse({
+        clientId: "client",
+        method: "POST",
+        route: "/runs",
+        key: "key",
+        inputHash: "input",
+      }),
+      { statusCode: 202, responseJson: "{\"ok\":true}" },
+    );
+    assert.throws(
+      () =>
+        store.getIdempotentResponse({
+          clientId: "client",
+          method: "POST",
+          route: "/runs",
+          key: "key",
+          inputHash: "changed",
+        }),
+      /different request/,
+    );
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("approval bindings reject changed approved inputs", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-approval-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  try {
+    const { run, task } = records(directory);
+    store.createRun(run, [task]);
+    const app = new ApplicationCommands(store);
+    app.approve(run.id, "plan");
+    store.updateRun(run.id, { configJson: "{\"changed\":true}" });
+    assert.throws(() => app.execute(run.id), /approval no longer matches/);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resume configuration changes require a fresh plan approval", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-reapprove-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  try {
+    const { run, task } = records(directory);
+    store.createRun(run, [task]);
+    const app = new ApplicationCommands(store);
+    app.approve(run.id, "plan");
+    const config = {
+      orchestration: {
+        defaultLead: "claude" as const,
+        maxRevisions: 1,
+        agentTimeoutSeconds: 600,
+        maxParallelTasks: 2,
+        maxTasks: 6,
+      },
+      budgets: {
+        runWallClockSeconds: 3_600,
+        maxAgentTurns: 25,
+        claudeMaxUsdPerTurn: 0.75,
+        claudeMaxUsdPerRun: 3,
+        codexMaxInputTokens: 400_000,
+        codexMaxOutputTokens: 40_000,
+      },
+      verification: {
+        setupCommands: [],
+        commands: [],
+        timeoutSeconds: 300,
+        env: {},
+      },
+    };
+    const changed = await app.resume(run.id, config);
+    assert.equal(changed.status, "awaiting_plan_approval");
+    assert.equal(store.isApproved(run.id, "plan"), false);
+  } finally {
+    store.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
