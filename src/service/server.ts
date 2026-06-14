@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { ActivityManager, type LongRunningCommand } from "../application/activities.js";
@@ -157,7 +157,7 @@ export class DuetService {
 
   private validateLocalRequest(request: IncomingMessage): void {
     const host = request.headers.host ?? "";
-    if (!/^127\.0\.0\.1:\d+$/.test(host) && !/^localhost:\d+$/.test(host)) {
+    if (!/^127\.0\.0\.1:\d+$/.test(host) && !/^localhost:\d+$/.test(host) && !/^\[::1\]:\d+$/.test(host)) {
       throw new DuetError("Invalid Host header.", "INVALID_HOST");
     }
     const origin = request.headers.origin;
@@ -648,12 +648,29 @@ export class DuetService {
     let cursor = Number(request.headers["last-event-id"] ?? url.searchParams.get("after") ?? 0);
     const runId = url.searchParams.get("runId") ?? undefined;
     let backpressured = false;
+    let cleaned = false;
+    let poll: NodeJS.Timeout;
+    let heartbeat: NodeJS.Timeout;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(poll);
+      clearInterval(heartbeat);
+      this.activeStreams -= 1;
+      this.streams.delete(response);
+    };
     const flush = () => {
-      if (backpressured) return;
+      if (cleaned || backpressured) return;
       for (const event of this.options.store.listEvents({ afterSeq: cursor, runId })) {
-        const writable = response.write(
-          `id: ${event.seq}\nevent: duet.event\ndata: ${JSON.stringify(event)}\n\n`,
-        );
+        let writable: boolean;
+        try {
+          writable = response.write(
+            `id: ${event.seq}\nevent: duet.event\ndata: ${JSON.stringify(event)}\n\n`,
+          );
+        } catch {
+          cleanup();
+          return;
+        }
         cursor = event.seq;
         if (!writable) {
           backpressured = true;
@@ -665,15 +682,18 @@ export class DuetService {
         }
       }
     };
+    poll = setInterval(flush, 500);
+    heartbeat = setInterval(() => {
+      try {
+        response.write(": heartbeat\n\n");
+      } catch {
+        cleanup();
+      }
+    }, 15_000);
+    response.on("error", cleanup);
+    response.on("close", cleanup);
+    request.on("close", cleanup);
     flush();
-    const poll = setInterval(flush, 500);
-    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
-    request.on("close", () => {
-      clearInterval(poll);
-      clearInterval(heartbeat);
-      this.activeStreams -= 1;
-      this.streams.delete(response);
-    });
   }
 
   private async sendArtifact(
@@ -684,13 +704,13 @@ export class DuetService {
     const source = this.options.store.getArtifactSource(id);
     let content: Buffer;
     if (source.filePath) {
-      const root = path.resolve(artifactsRoot());
-      const candidate = path.resolve(source.filePath);
+      const root = await realpath(path.resolve(artifactsRoot()));
+      await stat(path.resolve(source.filePath));
+      const candidate = await realpath(path.resolve(source.filePath));
       const relative = path.relative(root, candidate);
       if (relative.startsWith("..") || path.isAbsolute(relative)) {
         throw new DuetError("Artifact path escaped managed storage.", "PATH_TRAVERSAL");
       }
-      await stat(candidate);
       content = await readFile(candidate);
     } else {
       content = Buffer.from(source.record.content ?? "", "utf8");
