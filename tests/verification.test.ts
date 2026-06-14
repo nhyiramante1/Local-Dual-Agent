@@ -38,14 +38,21 @@ test("verification uses the staged tree and strips ambient secrets", async () =>
 
     const config = structuredClone(defaultConfig);
     config.verification.env = { DUET_STATIC: "yes" };
+    config.verification.setupCommands = [
+      [
+        process.execPath,
+        "-e",
+        "require('fs').writeFileSync('dependency.txt','provisioned')",
+      ],
+    ];
     config.verification.commands = [
       [
         process.execPath,
         "-e",
-        "const fs=require('fs'); if(process.env.DUET_TEST_SECRET||process.env.DUET_STATIC!=='yes'||fs.existsSync('ignored.txt')||fs.readFileSync('checked.txt','utf8').trim()!=='staged') process.exit(2)",
+        "const fs=require('fs'); if(process.env.DUET_TEST_SECRET||process.env.DUET_STATIC!=='yes'||fs.existsSync('ignored.txt')||fs.readFileSync('checked.txt','utf8').trim()!=='staged'||fs.readFileSync('dependency.txt','utf8')!=='provisioned') process.exit(2)",
       ],
     ];
-    const [result] = await runVerification({
+    const results = await runVerification({
       repoRoot: directory,
       treeId: artifact.treeId,
       runId: `verify-${Date.now()}`,
@@ -53,7 +60,8 @@ test("verification uses the staged tree and strips ambient secrets", async () =>
       attempt: 0,
       config,
     });
-    assert.equal(result.passed, true, JSON.stringify(result));
+    assert.equal(results.length, 2);
+    assert.ok(results.every((result) => result.passed), JSON.stringify(results));
   } finally {
     if (oldSecret === undefined) delete process.env.DUET_TEST_SECRET;
     else process.env.DUET_TEST_SECRET = oldSecret;

@@ -230,6 +230,80 @@ DUET_JSON_END`,
   }
 });
 
+test("concurrent providers cannot overshoot the reserved turn ceiling", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-turn-budget-"));
+  const stateDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "duet-turn-budget-state-"),
+  );
+  await git(directory, ["init", "--initial-branch=main"]);
+  await git(directory, ["config", "user.name", "Duet Test"]);
+  await git(directory, ["config", "user.email", "duet@example.invalid"]);
+  await writeFile(path.join(directory, "a.txt"), "a\n");
+  await writeFile(path.join(directory, "b.txt"), "b\n");
+  await git(directory, ["add", "."]);
+  await git(directory, ["commit", "-m", "base"]);
+  let sequence = 0;
+
+  class BudgetAdapter implements ProviderAdapter {
+    constructor(readonly name: ProviderName) {}
+    async run(turn: AgentTurn): Promise<AgentResult> {
+      sequence += 1;
+      if (turn.prompt.includes("planning lead")) {
+        return result(
+          this.name,
+          `DUET_JSON_BEGIN
+{"summary":"budget","tasks":[{"id":"a","title":"A","objective":"A","acceptanceCriteria":["A"],"allowedPaths":["a.txt"],"dependencies":[],"preferredProvider":"codex"},{"id":"b","title":"B","objective":"B","acceptanceCriteria":["B"],"allowedPaths":["b.txt"],"dependencies":[],"preferredProvider":"claude"}],"risks":[]}
+DUET_JSON_END`,
+          sequence,
+        );
+      }
+      if (this.name === "claude") {
+        await writeFile(path.join(turn.cwd, "b.txt"), "B\n");
+        return result(this.name, "done", sequence);
+      }
+      return result(
+        this.name,
+        `DUET_PATCH_BEGIN
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-a
++A
+DUET_PATCH_END`,
+        sequence,
+      );
+    }
+  }
+  const adapters = {
+    claude: new BudgetAdapter("claude"),
+    codex: new BudgetAdapter("codex"),
+  };
+  const store = new Store(path.join(stateDirectory, "state.sqlite"));
+  const orchestrator = new Orchestrator(store, (name) => adapters[name]);
+  let runId: string | undefined;
+  try {
+    const config = structuredClone(defaultConfig);
+    config.budgets.maxAgentTurns = 3;
+    const planned = await orchestrator.plan({
+      repoPath: directory,
+      goal: "budget",
+      lead: "claude",
+      config,
+    });
+    runId = planned.id;
+    orchestrator.approve(planned.id, "plan");
+    const paused = await orchestrator.execute(planned.id);
+    assert.equal(paused.status, "paused_budget");
+    assert.equal(store.getUsageSummary(planned.id).totalTurns, 3);
+  } finally {
+    if (runId) await orchestrator.cleanup(runId, true);
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test("planner write is a deterministic read-only violation and is preserved", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-readonly-"));
   const stateDirectory = await mkdtemp(path.join(os.tmpdir(), "duet-readonly-state-"));
@@ -456,7 +530,6 @@ DUET_PATCH_END`,
   let runId: string | undefined;
   try {
     const config = structuredClone(defaultConfig);
-    config.budgets.maxAgentTurns = 20;
     const planned = await orchestrator.plan({
       repoPath: directory,
       goal: "six changes",

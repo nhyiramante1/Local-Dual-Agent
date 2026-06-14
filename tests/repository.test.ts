@@ -14,7 +14,9 @@ import {
   assertAllowedChanges,
   cherryPickTask,
   commitReviewedTree,
+  createManagedWorktree,
   preflightAndApplyPatch,
+  removeManagedWorktree,
   stageCandidate,
 } from "../src/git/repository.js";
 import { runCommand } from "../src/process/run-command.js";
@@ -221,6 +223,30 @@ test("cherry-pick conflicts are preserved for human resolution", async () => {
       /allowed.txt/,
     );
     await abortCherryPick(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("managed worktree creation is idempotent", async () => {
+  const { directory, base } = await fixture();
+  const runId = `idempotent-${Date.now()}`;
+  const branch = `duet/${runId}/integration`;
+  try {
+    const first = await createManagedWorktree(
+      directory,
+      runId,
+      branch,
+      base,
+    );
+    const second = await createManagedWorktree(
+      directory,
+      runId,
+      branch,
+      base,
+    );
+    assert.equal(second, first);
+    await removeManagedWorktree(directory, runId, branch, undefined, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

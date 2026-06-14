@@ -22,6 +22,7 @@ only after explicit merge approval.
 - Git
 - Claude Code authenticated locally
 - Codex CLI authenticated through `duet auth codex`
+- Repositories owned by the same local user running Duet
 
 ```powershell
 npm install
@@ -35,10 +36,20 @@ Copy `duet.example.toml` to `duet.toml`. Verification commands are argument
 arrays executed with `shell: false`. They receive a stripped environment plus
 only the static values in `[verification.env]`.
 
+Verification runs from a clean materialization of the reviewed Git tree, so
+ignored dependencies such as `node_modules` are deliberately absent. Optional
+`verification.setup_commands` run inside that disposable directory before the
+verification commands. For example, `npm ci --ignore-scripts` can provision
+dependencies without letting unstaged or ignored files from the worker
+influence the checks. Setup commands are trusted operator configuration and
+may use network access if the local environment permits it.
+
 Provider limits are independent. Claude reports estimated dollar cost when
 available. Codex dollar cost is always shown as unavailable; its input/output
 token telemetry is enforced instead. Limits stop new turns while already
-bounded turns finish.
+bounded turns finish. The default 25-turn ceiling covers planning plus six
+tasks with one implementation, one review, and one permitted revision/re-review
+per task.
 
 ## Workflow
 
@@ -84,6 +95,10 @@ retaining SQLite history.
 - The supervisor commit must reproduce that exact tree and diff.
 - Source movement rejects the final fast-forward merge.
 - Structured responses require one exact marker envelope.
+
+Strict envelopes intentionally reject surrounding prose, duplicate blocks, and
+nested markers. This favors safe, deterministic failure over guessing which
+part of an agent response controls the run.
 
 SQLite uses WAL, foreign keys, a five-second busy timeout, immediate
 transactions, normalized attempts/tasks/leases, and durable raw/control

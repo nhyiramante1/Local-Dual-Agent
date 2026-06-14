@@ -12,7 +12,11 @@ import type {
 } from "./core/domain.js";
 import { DuetError } from "./core/errors.js";
 import { extractMarkedJson, extractMarkedPatch } from "./core/json.js";
-import type { DuetConfig } from "./config.js";
+import {
+  normalizeConfig,
+  type DuetConfig,
+  type PartialDuetConfig,
+} from "./config.js";
 import {
   assertAllowedChanges,
   assertFingerprintUnchanged,
@@ -73,7 +77,7 @@ function opposite(provider: ProviderName): ProviderName {
 }
 
 function parseConfig(run: RunRecord): DuetConfig {
-  return JSON.parse(run.configJson) as DuetConfig;
+  return normalizeConfig(JSON.parse(run.configJson) as PartialDuetConfig);
 }
 
 function allVerificationPassed(results: VerificationResult[]): boolean {
@@ -952,19 +956,30 @@ export class Orchestrator {
     config: DuetConfig,
   ): Promise<void> {
     const patchOnly = task.provider === "codex";
-    const result = await this.runAgent(
-      run,
-      task,
-      `worker-${task.id}`,
-      task.provider,
-      {
-        cwd: task.worktreePath!,
-        prompt: revisionPrompt(review, task.plan, patchOnly),
-        mode: patchOnly ? "read-only" : "workspace-write",
-        timeoutMs: config.orchestration.agentTimeoutSeconds * 1_000,
-        sessionId: task.sessionId,
-      },
-    );
+    const before = patchOnly
+      ? await fingerprintRepository(task.worktreePath!)
+      : undefined;
+    let result: AgentResult;
+    try {
+      result = await this.runAgent(
+        run,
+        task,
+        `worker-${task.id}`,
+        task.provider,
+        {
+          cwd: task.worktreePath!,
+          prompt: revisionPrompt(review, task.plan, patchOnly),
+          mode: patchOnly ? "read-only" : "workspace-write",
+          timeoutMs: config.orchestration.agentTimeoutSeconds * 1_000,
+          sessionId: task.sessionId,
+        },
+      );
+    } finally {
+      if (before) {
+        const after = await fingerprintRepository(task.worktreePath!);
+        assertFingerprintUnchanged(before, after);
+      }
+    }
     this.store.updateTask(run.id, task.id, {
       sessionId: result.sessionId,
     });
@@ -1216,13 +1231,26 @@ export class Orchestrator {
         leaseTtlMs,
       );
     }, leaseHeartbeatMs);
-    const attempt = this.store.beginAttempt({
+    const attempt = this.store.reserveAgentAttempt({
       runId: run.id,
       taskId: task?.id,
       role,
       provider,
       checkpoint: "agent_starting",
+      maxAgentTurns: config.budgets.maxAgentTurns,
     });
+    if (attempt === undefined) {
+      clearInterval(providerHeartbeat);
+      this.store.releaseLease("task", providerResource, providerOwner);
+      this.store.updateRun(run.id, {
+        status: "paused_budget",
+        error: "Aggregate provider or runtime budget reached.",
+      });
+      throw new DuetError(
+        "Aggregate provider or runtime budget reached.",
+        "BUDGET_PAUSED",
+      );
+    }
     try {
       const result = await this.adapters(provider).run({
         ...turn,

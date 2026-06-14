@@ -126,3 +126,32 @@ test("transactions roll back and concurrent writers respect leases", async () =>
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("agent turn reservation is atomic across concurrent stores", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-turns-"));
+  const database = path.join(directory, "state.sqlite");
+  const first = new Store(database);
+  const second = new Store(database);
+  try {
+    const { run, task } = records(directory);
+    first.createRun(run, [task]);
+    const options = {
+      runId: run.id,
+      taskId: task.id,
+      role: "worker",
+      provider: "codex" as const,
+      checkpoint: "agent_starting",
+      maxAgentTurns: 1,
+    };
+    const [left, right] = await Promise.all([
+      Promise.resolve().then(() => first.reserveAgentAttempt(options)),
+      Promise.resolve().then(() => second.reserveAgentAttempt(options)),
+    ]);
+    assert.equal([left, right].filter((value) => value !== undefined).length, 1);
+    assert.equal(first.getUsageSummary(run.id).totalTurns, 1);
+  } finally {
+    first.close();
+    second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

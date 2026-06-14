@@ -27,7 +27,11 @@ export async function runVerification(options: {
   const results: VerificationResult[] = [];
   const env = sanitizedAgentEnvironment(options.config.verification.env);
   try {
-    for (const command of options.config.verification.commands) {
+    const commands = [
+      ...options.config.verification.setupCommands,
+      ...options.config.verification.commands,
+    ];
+    for (const command of commands) {
       const [executable, ...args] = command;
       const result = await runCommand(executable, args, {
         cwd: target,

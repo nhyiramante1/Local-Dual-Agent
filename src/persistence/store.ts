@@ -576,31 +576,40 @@ export class Store {
     );
   }
 
-  beginAttempt(options: {
+  reserveAgentAttempt(options: {
     runId: string;
     taskId?: string;
     role: string;
-    provider?: ProviderName;
+    provider: ProviderName;
     checkpoint: string;
-  }): number {
-    const stamp = now();
-    const result = this.db
-      .prepare(`
-        INSERT INTO attempts (
-          run_id, task_id, role, provider, status, checkpoint,
-          started_at, heartbeat_at
-        ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
-      `)
-      .run(
-        options.runId,
-        options.taskId ?? null,
-        options.role,
-        options.provider ?? null,
-        options.checkpoint,
-        stamp,
-        stamp,
-      );
-    return Number(result.lastInsertRowid);
+    maxAgentTurns: number;
+  }): number | undefined {
+    return this.transaction(() => {
+      const count = this.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM attempts WHERE run_id = ? AND provider IS NOT NULL",
+        )
+        .get(options.runId) as { count: number };
+      if (count.count >= options.maxAgentTurns) return undefined;
+      const stamp = now();
+      const result = this.db
+        .prepare(`
+          INSERT INTO attempts (
+            run_id, task_id, role, provider, status, checkpoint,
+            started_at, heartbeat_at
+          ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
+        `)
+        .run(
+          options.runId,
+          options.taskId ?? null,
+          options.role,
+          options.provider,
+          options.checkpoint,
+          stamp,
+          stamp,
+        );
+      return Number(result.lastInsertRowid);
+    });
   }
 
   updateAttemptProcess(
@@ -893,13 +902,30 @@ export class Store {
     }>;
     const claude = rows.find((row) => row.provider === "claude");
     const codex = rows.find((row) => row.provider === "codex");
+    const attemptRows = this.db
+      .prepare(`
+        SELECT provider, COUNT(*) AS turns
+        FROM attempts
+        WHERE run_id = ? AND provider IS NOT NULL
+        GROUP BY provider
+      `)
+      .all(runId) as unknown as Array<{
+      provider: ProviderName;
+      turns: number;
+    }>;
+    const claudeAttempts =
+      attemptRows.find((row) => row.provider === "claude")?.turns ?? 0;
+    const codexAttempts =
+      attemptRows.find((row) => row.provider === "codex")?.turns ?? 0;
+    const claudeTurns = Math.max(claude?.turns ?? 0, claudeAttempts);
+    const codexTurns = Math.max(codex?.turns ?? 0, codexAttempts);
     return {
       claude: {
         inputTokens: claude?.input_tokens ?? 0,
         outputTokens: claude?.output_tokens ?? 0,
         costUsd: claude?.cost_usd ?? 0,
         costKnown: claude ? claude.all_cost_known === 1 : true,
-        turns: claude?.turns ?? 0,
+        turns: claudeTurns,
         durationMs: claude?.duration_ms ?? 0,
       },
       codex: {
@@ -907,10 +933,10 @@ export class Store {
         outputTokens: codex?.output_tokens ?? 0,
         costUsd: null,
         costKnown: false,
-        turns: codex?.turns ?? 0,
+        turns: codexTurns,
         durationMs: codex?.duration_ms ?? 0,
       },
-      totalTurns: (claude?.turns ?? 0) + (codex?.turns ?? 0),
+      totalTurns: claudeTurns + codexTurns,
       totalDurationMs:
         (claude?.duration_ms ?? 0) + (codex?.duration_ms ?? 0),
     };

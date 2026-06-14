@@ -173,6 +173,18 @@ function managedWorktreePath(runId: string, taskId?: string): string {
   return target;
 }
 
+function normalizedFilesystemPath(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function registeredWorktreePaths(value: string): string[] {
+  return value
+    .split("\0")
+    .filter((field) => field.startsWith("worktree "))
+    .map((field) => normalizedFilesystemPath(field.slice("worktree ".length)));
+}
+
 export async function createManagedWorktree(
   repoRoot: string,
   runId: string,
@@ -182,8 +194,17 @@ export async function createManagedWorktree(
 ): Promise<string> {
   const target = managedWorktreePath(runId, taskId);
   await mkdir(path.dirname(target), { recursive: true });
-  const registered = await git(repoRoot, ["worktree", "list", "--porcelain"]);
-  if (registered.includes(`worktree ${target.replaceAll("\\", "/")}`)) {
+  const registered = await git(repoRoot, [
+    "worktree",
+    "list",
+    "--porcelain",
+    "-z",
+  ]);
+  if (
+    registeredWorktreePaths(registered).includes(
+      normalizedFilesystemPath(target),
+    )
+  ) {
     return target;
   }
   await rm(target, { recursive: true, force: true });

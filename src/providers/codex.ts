@@ -34,30 +34,7 @@ export class CodexAdapter implements ProviderAdapter {
 
   async run(turn: AgentTurn): Promise<AgentResult> {
     const command = await resolveCodexCommand(appRoot());
-    const args = [...command.argsPrefix, "exec"];
-    if (turn.sessionId) {
-      args.push(
-        "resume",
-        "--json",
-        "--ignore-user-config",
-        "--ignore-rules",
-        turn.sessionId,
-        turn.prompt,
-      );
-    } else {
-      args.push(
-        "--json",
-        "--sandbox",
-        turn.mode,
-        "--ignore-user-config",
-        "--ignore-rules",
-        "-c",
-        'approval_policy="never"',
-        "--cd",
-        turn.cwd,
-        turn.prompt,
-      );
-    }
+    const args = [...command.argsPrefix, ...buildCodexArgs(turn)];
 
     const result = await runCommand(command.command, args, {
       cwd: turn.cwd,
@@ -120,4 +97,35 @@ export class CodexAdapter implements ProviderAdapter {
       },
     };
   }
+}
+
+export function buildCodexArgs(turn: AgentTurn): string[] {
+  if (turn.sessionId) {
+    return [
+      "exec",
+      "resume",
+      "--json",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "-c",
+      `sandbox_mode="${turn.mode}"`,
+      "-c",
+      'approval_policy="never"',
+      turn.sessionId,
+      turn.prompt,
+    ];
+  }
+  return [
+    "exec",
+    "--json",
+    "--sandbox",
+    turn.mode,
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    'approval_policy="never"',
+    "--cd",
+    turn.cwd,
+    turn.prompt,
+  ];
 }

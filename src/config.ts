@@ -24,10 +24,18 @@ export interface DuetConfig {
     codexMaxOutputTokens: number;
   };
   verification: {
+    setupCommands: string[][];
     commands: string[][];
     timeoutSeconds: number;
     env: Record<string, string>;
   };
+}
+
+export function recommendedTurnBudget(
+  maxTasks: number,
+  maxRevisions: number,
+): number {
+  return 1 + maxTasks * (2 + 2 * maxRevisions);
 }
 
 export const defaultConfig: DuetConfig = {
@@ -40,18 +48,48 @@ export const defaultConfig: DuetConfig = {
   },
   budgets: {
     runWallClockSeconds: 3_600,
-    maxAgentTurns: 12,
+    maxAgentTurns: recommendedTurnBudget(6, 1),
     claudeMaxUsdPerTurn: 0.75,
     claudeMaxUsdPerRun: 2,
     codexMaxInputTokens: 400_000,
     codexMaxOutputTokens: 40_000,
   },
   verification: {
+    setupCommands: [],
     commands: [],
     timeoutSeconds: 300,
     env: {},
   },
 };
+
+export type PartialDuetConfig = {
+  orchestration?: Partial<DuetConfig["orchestration"]>;
+  budgets?: Partial<DuetConfig["budgets"]>;
+  verification?: Partial<DuetConfig["verification"]>;
+};
+
+export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
+  return {
+    orchestration: {
+      ...defaultConfig.orchestration,
+      ...(value.orchestration ?? {}),
+    },
+    budgets: {
+      ...defaultConfig.budgets,
+      ...(value.budgets ?? {}),
+    },
+    verification: {
+      ...defaultConfig.verification,
+      ...(value.verification ?? {}),
+      setupCommands:
+        value.verification?.setupCommands ??
+        defaultConfig.verification.setupCommands,
+      commands:
+        value.verification?.commands ?? defaultConfig.verification.commands,
+      env: value.verification?.env ?? defaultConfig.verification.env,
+    },
+  };
+}
 
 interface RawConfig {
   orchestration?: Record<string, unknown>;
@@ -80,8 +118,8 @@ function numberInRange(
   return value;
 }
 
-function parseCommands(value: unknown): string[][] {
-  if (value === undefined) return defaultConfig.verification.commands;
+function parseCommands(value: unknown, fallback: string[][]): string[][] {
+  if (value === undefined) return fallback;
   if (
     !Array.isArray(value) ||
     !value.every(
@@ -207,7 +245,14 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
       ),
     },
     verification: {
-      commands: parseCommands(verification.commands),
+      setupCommands: parseCommands(
+        verification.setup_commands,
+        defaultConfig.verification.setupCommands,
+      ),
+      commands: parseCommands(
+        verification.commands,
+        defaultConfig.verification.commands,
+      ),
       timeoutSeconds: numberInRange(
         verification.timeout_seconds,
         defaultConfig.verification.timeoutSeconds,
