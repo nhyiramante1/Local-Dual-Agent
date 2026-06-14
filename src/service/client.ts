@@ -26,12 +26,14 @@ async function requestRaw(
   info: ServiceInfo,
   secret: string,
   route: string,
+  clientId: string,
   init: RequestInit = {},
 ): Promise<Response> {
   return await fetch(`http://127.0.0.1:${info.port}${route}`, {
     ...init,
     headers: {
       authorization: `Bearer ${secret}`,
+      "x-duet-client": clientId,
       ...(init.headers ?? {}),
     },
   });
@@ -91,14 +93,22 @@ export class DuetClient {
   private constructor(
     readonly info: ServiceInfo,
     private readonly secret: string,
+    private readonly clientId: string,
   ) {}
 
-  static async connect(start = true): Promise<DuetClient> {
+  static async connect(
+    start = true,
+    clientId = "local-cli",
+  ): Promise<DuetClient> {
     const info = start ? await ensureService() : await readServiceInfo();
     if (!info || !(await probeService(info))) {
       throw new DuetError("Duet service is not running.", "SERVICE_NOT_RUNNING");
     }
-    return new DuetClient(info, await loadOrCreateServiceSecret());
+    return new DuetClient(
+      info,
+      await loadOrCreateServiceSecret(),
+      clientId,
+    );
   }
 
   async get<T>(route: string): Promise<T> {
@@ -140,12 +150,68 @@ export class DuetClient {
     }
   }
 
+  async readArtifact(
+    artifactId: number,
+    offset: number,
+    maximumLength: number,
+  ): Promise<{
+    content: string;
+    offset: number;
+    nextOffset: number;
+    totalLength: number;
+    truncated: boolean;
+  }> {
+    const end = offset + maximumLength - 1;
+    const response = await requestRaw(
+      this.info,
+      this.secret,
+      `/api/v1/artifacts/${artifactId}`,
+      this.clientId,
+      { method: "GET", headers: { range: `bytes=${offset}-${end}` } },
+    );
+    if (!response.ok) {
+      let message = response.statusText;
+      let code = "HTTP_ERROR";
+      try {
+        const envelope = (await response.json()) as {
+          error?: { code?: string; message?: string };
+        };
+        message = envelope.error?.message ?? message;
+        code = envelope.error?.code ?? code;
+      } catch {
+        // Artifact range failures may not use a JSON response body.
+      }
+      throw new DuetError(message, code);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
+      response.headers.get("content-range") ?? "",
+    );
+    const totalLength = range
+      ? Number(range[3])
+      : Number(response.headers.get("content-length") ?? bytes.byteLength);
+    const nextOffset = offset + bytes.byteLength;
+    return {
+      content: new TextDecoder().decode(bytes),
+      offset,
+      nextOffset,
+      totalLength,
+      truncated: nextOffset < totalLength,
+    };
+  }
+
   private async request<T>(route: string, init: RequestInit): Promise<T> {
     let response: Response | undefined;
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        response = await requestRaw(this.info, this.secret, route, init);
+        response = await requestRaw(
+          this.info,
+          this.secret,
+          route,
+          this.clientId,
+          init,
+        );
         break;
       } catch (error) {
         lastError = error;

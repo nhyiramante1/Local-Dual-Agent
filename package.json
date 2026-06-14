@@ -6,7 +6,8 @@
   "type": "module",
   "bin": {
     "duet": "./dist/cli.js",
-    "duetd": "./dist/duetd.js"
+    "duetd": "./dist/duetd.js",
+    "duet-mcp": "./dist/duet-mcp.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,9 +22,11 @@
     "node": ">=24 <25"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@openai/codex": "0.139.0",
     "cross-spawn": "^7.0.6",
-    "smol-toml": "^1.6.1"
+    "smol-toml": "^1.6.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",

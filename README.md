@@ -84,6 +84,42 @@ Its launch URL contains a one-minute, single-use fragment ticket that is
 exchanged for a same-site HTTP-only session. The service rejects every
 dashboard-session mutation instead of relying on the page to hide controls.
 
+## Claude Code And Codex MCP
+
+Build Duet, then install the restricted user-scoped MCP bridge:
+
+```powershell
+npm run build
+node dist/cli.js mcp install all
+node dist/cli.js mcp status all
+```
+
+Restart or reload Claude Code and Codex after installation. Both clients then
+connect through independent `duet-mcp` stdio processes to the same local
+`duetd` service and SQLite history.
+
+The MCP bridge exposes exactly six tools:
+
+- `duet_list_runs`
+- `duet_get_run`
+- `duet_get_events`
+- `duet_get_operation`
+- `duet_read_artifact`
+- `duet_create_plan`
+
+The first five tools are bounded inspection operations. `duet_create_plan`
+starts a paid, budget-limited planning turn and returns a durable operation ID
+immediately. Reusing the same intent UUID with the same input returns the same
+operation; changing the input produces an idempotency conflict.
+
+MCP agents cannot approve plans, execute work, retry or cancel tasks, resolve
+conflicts, clean up worktrees, approve merges, or merge. Those actions remain
+human-gated CLI operations. Remove the integrations with:
+
+```powershell
+node dist/cli.js mcp uninstall all
+```
+
 Plan and merge approvals display a SHA-256 fingerprint and require typed
 confirmation in an interactive terminal. Approval fingerprints bind the plan,
 configuration, repository base, scopes, reviewed trees, commits, and patch
@@ -147,10 +183,8 @@ not a container boundary. Use WSL, a VM, or a container before running
 untrusted repositories or untrusted test commands.
 
 No remote push, automatic conflict resolver, UI automation, credential
-rotation, or usage-limit bypass is implemented.
-
-MCP integration and interface-agent conversation handoffs are intentionally
-deferred to later phases.
+rotation, usage-limit bypass, MCP approval/execution tools, or interface-agent
+conversation handoffs are implemented.
 
 ## Development
 

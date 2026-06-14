@@ -155,6 +155,14 @@ export class DuetService {
       : undefined;
   }
 
+  private requestClientId(request: IncomingMessage): string {
+    const requested = request.headers["x-duet-client"];
+    return typeof requested === "string" &&
+      /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(requested)
+      ? requested
+      : "local-cli";
+  }
+
   private validateLocalRequest(request: IncomingMessage): void {
     const host = request.headers.host ?? "";
     if (!/^127\.0\.0\.1:\d+$/.test(host) && !/^localhost:\d+$/.test(host) && !/^\[::1\]:\d+$/.test(host)) {
@@ -298,6 +306,7 @@ export class DuetService {
         node: process.version,
         platform: process.platform,
         instanceId: this.options.instanceId,
+        clientId: this.requestClientId(request),
         activeOperations: this.options.store.listActiveOperations(),
         leases: this.options.store.listLeases(),
       }));
@@ -608,7 +617,7 @@ export class DuetService {
     }
     const inputHash = hash(bodyText);
     const scope = {
-      clientId: "local-cli",
+      clientId: this.requestClientId(request),
       method: request.method ?? "POST",
       route,
       key,

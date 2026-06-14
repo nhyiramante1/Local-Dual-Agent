@@ -17,10 +17,12 @@ import {
 } from "./service/discovery.js";
 import { DuetClient, ensureService, probeService } from "./service/client.js";
 import { terminateProcessTree } from "./process/run-command.js";
+import { mcpCli } from "./mcp/cli.js";
 
 function usage(): void {
   console.log(`Usage:
   duet service start|status|stop|restart [--force]
+  duet mcp install|status|uninstall claude|codex|all [--force]
   duet dashboard [RUN_ID]
   duet plan --repo PATH [--lead claude|codex] [--config PATH] [--detach] "goal"
   duet approve RUN_ID --stage plan|merge
@@ -228,6 +230,10 @@ export async function serviceMain(): Promise<void> {
   const command = args.shift()!;
   if (command === "service") {
     await serviceCommand(args);
+    return;
+  }
+  if (command === "mcp") {
+    await mcpCli(args);
     return;
   }
   const client = await DuetClient.connect();
