@@ -109,8 +109,10 @@ The MCP bridge exposes exactly six tools:
 
 The first five tools are bounded inspection operations. `duet_create_plan`
 starts a paid, budget-limited planning turn and returns a durable operation ID
-immediately. Reusing the same intent UUID with the same input returns the same
-operation; changing the input produces an idempotency conflict.
+immediately. Its explicit limits may lower, but cannot raise, the ceilings in
+the target repository's `duet.toml`. Reusing the same intent UUID with the same
+input returns the same operation; changing the input produces an idempotency
+conflict. A retry with a new intent UUID is a new paid planning operation.
 
 MCP agents cannot approve plans, execute work, retry or cancel tasks, resolve
 conflicts, clean up worktrees, approve merges, or merge. Those actions remain

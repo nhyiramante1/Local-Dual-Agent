@@ -91,7 +91,7 @@ export async function ensureService(): Promise<ServiceInfo> {
 
 export class DuetClient {
   private constructor(
-    readonly info: ServiceInfo,
+    public info: ServiceInfo,
     private readonly secret: string,
     private readonly clientId: string,
   ) {}
@@ -162,13 +162,24 @@ export class DuetClient {
     truncated: boolean;
   }> {
     const end = offset + maximumLength - 1;
-    const response = await requestRaw(
-      this.info,
-      this.secret,
-      `/api/v1/artifacts/${artifactId}`,
-      this.clientId,
-      { method: "GET", headers: { range: `bytes=${offset}-${end}` } },
-    );
+    let response: Response | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await requestRaw(
+          this.info,
+          this.secret,
+          `/api/v1/artifacts/${artifactId}`,
+          this.clientId,
+          { method: "GET", headers: { range: `bytes=${offset}-${end}` } },
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) this.info = await ensureService();
+      }
+    }
+    if (!response) throw lastError;
     if (!response.ok) {
       let message = response.statusText;
       let code = "HTTP_ERROR";
@@ -216,7 +227,7 @@ export class DuetClient {
       } catch (error) {
         lastError = error;
         if (attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          this.info = await ensureService();
         }
       }
     }

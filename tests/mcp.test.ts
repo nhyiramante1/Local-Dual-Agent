@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -14,6 +14,7 @@ import type {
   DuetEvent,
   OperationRecord,
   RunRecord,
+  TaskRecord,
 } from "../src/core/domain.js";
 import { DuetError } from "../src/core/errors.js";
 import {
@@ -57,6 +58,7 @@ class FakeApi implements DuetApi {
     operation: OperationRecord;
   }>();
   runs = Array.from({ length: 130 }, (_, index) => fixtureRun(index));
+  tasks: TaskRecord[] = [];
   artifact = "abcdefghijklmnopqrstuvwxyz";
 
   async get<T>(route: string): Promise<T> {
@@ -102,7 +104,7 @@ class FakeApi implements DuetApi {
     if (/\/runs\/[^/]+$/.test(route)) {
       return {
         run: this.runs[0],
-        tasks: [],
+        tasks: this.tasks,
         usage: { totalTurns: 0 },
         approvals: { plan: false, merge: false },
         leases: [],
@@ -209,8 +211,8 @@ class HttpApi implements DuetApi {
   }
 }
 
-async function connected(api: DuetApi) {
-  const server = createDuetMcpServer(async () => api);
+async function connectedFactory(factory: () => Promise<DuetApi>) {
+  const server = createDuetMcpServer(factory);
   const client = new Client(
     { name: "duet-test", version: "1.0.0" },
     { capabilities: {} },
@@ -227,6 +229,10 @@ async function connected(api: DuetApi) {
       await server.close();
     },
   };
+}
+
+async function connected(api: DuetApi) {
+  return await connectedFactory(async () => api);
 }
 
 test("MCP advertises only the restricted six-tool surface and instructions", async () => {
@@ -253,11 +259,97 @@ test("MCP advertises only the restricted six-tool surface and instructions", asy
     )!;
     assert.equal(planning.annotations?.readOnlyHint, false);
     assert.match(planning.description ?? "", /PAID/);
+    assert.match(planning.description ?? "", /same intentId/);
+    assert.match(serverInstructions, /same intentId/);
     assert.ok(
       !listed.tools.some((tool) =>
         /approve|execute|cancel|cleanup|resolve|merge/.test(tool.name),
       ),
     );
+  } finally {
+    await connection.close();
+  }
+});
+
+test("run and task planner text is bounded in structured MCP output", async () => {
+  const api = new FakeApi();
+  const huge = "x".repeat(100_000);
+  api.runs[0] = {
+    ...api.runs[0],
+    goal: huge,
+    configJson: huge,
+    error: huge,
+    plan: {
+      summary: huge,
+      risks: Array.from({ length: 30 }, () => huge),
+      tasks: [
+        {
+          id: "oversized",
+          title: huge,
+          objective: huge,
+          acceptanceCriteria: Array.from({ length: 30 }, () => huge),
+          allowedPaths: Array.from({ length: 120 }, (_, index) => `src/${index}`),
+          dependencies: [],
+        },
+      ],
+    },
+  };
+  api.tasks = [{
+    runId: api.runs[0].id,
+    id: "oversized",
+    ordinal: 0,
+    plan: api.runs[0].plan.tasks[0],
+    status: "ready",
+    provider: "claude",
+    reviewerProvider: "codex",
+    revisionCount: 0,
+    error: huge,
+    cancellationRequested: false,
+    createdAt: api.runs[0].createdAt,
+    updatedAt: api.runs[0].updatedAt,
+  }];
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "duet_get_run",
+      arguments: { runId: api.runs[0].id },
+    });
+    const content = result.structuredContent as {
+      run: {
+        goal: { truncated: boolean };
+        configJson: { truncated: boolean };
+        error: { truncated: boolean };
+        plan: {
+          summary: { truncated: boolean };
+          tasks: Array<{
+            objective: { truncated: boolean };
+            acceptanceCriteriaTruncated: boolean;
+            allowedPathsTruncated: boolean;
+          }>;
+          risksTruncated: boolean;
+        };
+      };
+      sections: {
+        tasks: Array<{
+          plan: { objective: { truncated: boolean } };
+          error: { truncated: boolean };
+        }>;
+      };
+    };
+    assert.equal(content.run.goal.truncated, true);
+    assert.equal(content.run.configJson.truncated, true);
+    assert.equal(content.run.error.truncated, true);
+    assert.equal(content.run.plan.summary.truncated, true);
+    assert.equal(content.run.plan.tasks[0].objective.truncated, true);
+    assert.equal(
+      content.run.plan.tasks[0].acceptanceCriteriaTruncated,
+      true,
+    );
+    assert.equal(content.run.plan.tasks[0].allowedPathsTruncated, true);
+    assert.equal(content.run.plan.risksTruncated, true);
+    assert.equal(content.sections.tasks[0].plan.objective.truncated, true);
+    assert.equal(content.sections.tasks[0].error.truncated, true);
+    assert.ok(JSON.stringify(content).length < 125_000);
   } finally {
     await connection.close();
   }
@@ -372,8 +464,41 @@ test("service failures return structured MCP errors", async () => {
       error: {
         code: "SERVICE_NOT_RUNNING",
         message: "Duet service is not running.",
+        messageTruncated: false,
+        originalLength: 28,
       },
     });
+  } finally {
+    await connection.close();
+  }
+});
+
+test("MCP errors and service client creation are bounded and reused", async () => {
+  let factoryCalls = 0;
+  const api = new FakeApi();
+  api.get = async () => {
+    throw new Error("e".repeat(20_000));
+  };
+  const connection = await connectedFactory(async () => {
+    factoryCalls += 1;
+    return api;
+  });
+  try {
+    for (let call = 0; call < 2; call += 1) {
+      const result = await connection.client.callTool({
+        name: "duet_list_runs",
+        arguments: {},
+      });
+      const error = result.structuredContent?.error as {
+        message: string;
+        messageTruncated: boolean;
+        originalLength: number;
+      };
+      assert.equal(error.message.length, 4_000);
+      assert.equal(error.messageTruncated, true);
+      assert.equal(error.originalLength, 20_000);
+    }
+    assert.equal(factoryCalls, 1);
   } finally {
     await connection.close();
   }
@@ -419,6 +544,72 @@ test("paid plan intent is idempotent and conflicting reuse is rejected", async (
     assert.equal(api.operations.size, 1);
   } finally {
     await connection.close();
+  }
+});
+
+test("MCP planning limits can lower but never raise repository policy", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-mcp-budget-"));
+  await writeFile(
+    path.join(directory, "duet.toml"),
+    [
+      "[orchestration]",
+      "max_tasks = 2",
+      "",
+      "[budgets]",
+      "run_wall_clock_seconds = 120",
+      "max_agent_turns = 3",
+      "claude_max_usd_per_turn = 0.25",
+      "claude_max_usd_per_run = 0.5",
+      "codex_max_input_tokens = 2000",
+      "codex_max_output_tokens = 500",
+      "",
+    ].join("\n"),
+  );
+  const api = new FakeApi();
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "duet_create_plan",
+      arguments: {
+        intentId: randomUUID(),
+        repositoryPath: directory,
+        goal: "Attempt to raise every configured limit",
+        planningLead: "claude",
+        maxTasks: 6,
+        runWallClockSeconds: 86_400,
+        maxAgentTurns: 100,
+        claudeMaxUsdPerTurn: 100,
+        claudeMaxUsdPerRun: 1_000,
+        codexMaxInputTokens: 10_000_000,
+        codexMaxOutputTokens: 1_000_000,
+      },
+    });
+    assert.equal(result.isError, undefined);
+    const body = api.posts[0].body as {
+      config: {
+        orchestration: { maxTasks: number };
+        budgets: {
+          runWallClockSeconds: number;
+          maxAgentTurns: number;
+          claudeMaxUsdPerTurn: number;
+          claudeMaxUsdPerRun: number;
+          codexMaxInputTokens: number;
+          codexMaxOutputTokens: number;
+        };
+      };
+    };
+    assert.equal(body.config.orchestration.maxTasks, 2);
+    assert.deepEqual(body.config.budgets, {
+      runWallClockSeconds: 120,
+      maxAgentTurns: 3,
+      claudeMaxUsdPerTurn: 0.25,
+      claudeMaxUsdPerRun: 0.5,
+      codexMaxInputTokens: 2_000,
+      codexMaxOutputTokens: 500,
+    });
+  } finally {
+    await connection.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -286,22 +286,37 @@ function managedRange(content: string): { start: number; end: number } | undefin
   return { start, end };
 }
 
+function parsedDuetConfig(content: string): unknown {
+  const parsed = parse(content || "") as {
+    mcp_servers?: Record<string, unknown>;
+  };
+  return parsed.mcp_servers?.duet;
+}
+
 function hasUnmanagedDuet(content: string): boolean {
-  return /^\s*\[mcp_servers\.duet(?:\]|\.)/m.test(content);
+  return parsedDuetConfig(content) !== undefined;
 }
 
 function removeUnmanagedDuet(content: string): string {
   const lines = content.split(/(?<=\n)/);
   let removing = false;
+  let inMcpServers = false;
   const kept: string[] = [];
   for (const line of lines) {
-    const heading = /^\s*\[([^\]]+)]/.exec(line)?.[1];
+    if (/^\s*mcp_servers\.duet\s*=/.test(line)) continue;
+    const arrayHeading = /^\s*\[\[([^\]]+)]]/.exec(line)?.[1];
+    const heading = arrayHeading ?? /^\s*\[([^\]]+)]/.exec(line)?.[1];
     if (heading) {
       if (heading === "mcp_servers.duet" || heading.startsWith("mcp_servers.duet.")) {
         removing = true;
+        inMcpServers = false;
         continue;
       }
       removing = false;
+      inMcpServers = heading === "mcp_servers";
+    }
+    if (inMcpServers && /^\s*duet\s*=/.test(line)) {
+      continue;
     }
     if (!removing) kept.push(line);
   }
@@ -330,36 +345,30 @@ async function readCodexConfig(file: string): Promise<string> {
   }
 }
 
-function parsedDuetConfig(content: string): Record<string, unknown> | undefined {
-  const parsed = parse(content || "") as {
-    mcp_servers?: Record<string, Record<string, unknown>>;
-  };
-  return parsed.mcp_servers?.duet;
-}
-
 function codexMatches(
   content: string,
   nodePath: string,
   entryPath: string,
 ): boolean {
   const duet = parsedDuetConfig(content);
-  if (!duet) return false;
-  const tools = duet.tools as
+  if (!duet || typeof duet !== "object" || Array.isArray(duet)) return false;
+  const config = duet as Record<string, unknown>;
+  const tools = config.tools as
     | Record<DuetToolName, { approval_mode?: string }>
     | undefined;
-  const enabledTools = Array.isArray(duet.enabled_tools)
-    ? duet.enabled_tools
+  const enabledTools = Array.isArray(config.enabled_tools)
+    ? config.enabled_tools
     : undefined;
   return (
-    duet.command === nodePath &&
-    Array.isArray(duet.args) &&
-    duet.args.length === 1 &&
-    duet.args[0] === entryPath &&
+    config.command === nodePath &&
+    Array.isArray(config.args) &&
+    config.args.length === 1 &&
+    config.args[0] === entryPath &&
     enabledTools !== undefined &&
     duetToolNames.every((tool) => enabledTools.includes(tool)) &&
     enabledTools.length === duetToolNames.length &&
-    duet.tool_timeout_sec === 30 &&
-    duet.startup_timeout_sec === 30 &&
+    config.tool_timeout_sec === 30 &&
+    config.startup_timeout_sec === 30 &&
     readTools.every((tool) => tools?.[tool]?.approval_mode === "approve") &&
     tools?.duet_create_plan?.approval_mode === "prompt"
   );

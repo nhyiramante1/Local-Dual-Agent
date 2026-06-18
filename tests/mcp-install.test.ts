@@ -200,3 +200,62 @@ test("Codex refuses unmanaged duet config and backs it up before forced replacem
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Codex detects and replaces alternate unmanaged duet TOML forms", async () => {
+  const variants = [
+    [
+      'mcp_servers.duet = { command = "inline", args = ["server.js"] }',
+      'keep = "root"',
+      "",
+    ].join("\n"),
+    [
+      "[mcp_servers]",
+      'duet = { command = "inline-table", args = ["server.js"] }',
+      'sibling = { command = "keep" }',
+      "",
+    ].join("\n"),
+    [
+      "[[mcp_servers.duet]]",
+      'command = "array-table"',
+      'args = ["server.js"]',
+      "",
+      "[mcp_servers.keep]",
+      'command = "keep"',
+      "",
+    ].join("\n"),
+  ];
+  for (const [index, original] of variants.entries()) {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), `duet-codex-alternate-${index}-`),
+    );
+    const configPath = path.join(directory, "config.toml");
+    const nodePath = path.join(directory, "node.exe");
+    const entryPath = path.join(directory, "duet-mcp.js");
+    await writeFile(nodePath, "");
+    await writeFile(entryPath, "");
+    await writeFile(configPath, original);
+    const options = {
+      codexConfigPath: configPath,
+      nodePath,
+      entryPath,
+      now: () => new Date(`2026-01-02T03:04:0${index}.000Z`),
+    };
+    try {
+      assert.equal((await codexMcpStatus(options)).state, "unmanaged");
+      await assert.rejects(
+        installCodexMcp(options),
+        /unmanaged mcp_servers\.duet/,
+      );
+      await installCodexMcp({ ...options, force: true });
+      const updated = await readFile(configPath, "utf8");
+      assert.match(updated, /BEGIN DUET MCP/);
+      assert.equal((await codexMcpStatus(options)).state, "installed");
+      assert.doesNotMatch(updated, /inline|array-table/);
+      if (index === 0) assert.match(updated, /keep = "root"/);
+      if (index === 1) assert.match(updated, /sibling = \{ command = "keep" }/);
+      if (index === 2) assert.match(updated, /\[mcp_servers\.keep]/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
