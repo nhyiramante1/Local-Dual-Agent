@@ -744,9 +744,15 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /\/chat\/conversations/);
   assert.match(dashboardJs, /function rememberConversation/);
   assert.match(dashboardJs, /updatedAt/);
+  assert.match(dashboardJs, /eventCursor/);
+  assert.match(dashboardJs, /renderedEventSeqs/);
+  assert.match(dashboardJs, /eventRunId/);
   assert.match(dashboardJs, /if \(eventStream\) eventStream\.close\(\)/);
   assert.match(dashboardJs, /connectEvents\(\)/);
   assert.match(dashboardJs, /return Boolean\(chat\.activeOperation\)/);
+  assert.match(dashboardJs, /loadRuns\(\{selectCurrent:true\}\)/);
+  assert.doesNotMatch(dashboardJs, /if\(selected\) await selectRun\(selected\)/);
+  assert.doesNotMatch(dashboardJs, /setChatEnabled\(true\)/);
   assert.doesNotMatch(dashboardJs, /activeOperationId/);
   assert.doesNotMatch(dashboardJs, /\/approve/);
   assert.doesNotMatch(dashboardJs, /\/merge/);

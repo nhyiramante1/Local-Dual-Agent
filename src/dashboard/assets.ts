@@ -131,6 +131,9 @@ const chat = {
   polling: null
 };
 let eventStream = null;
+let eventRunId = null;
+let eventCursor = 0;
+const renderedEventSeqs = new Set();
 function requestKey(prefix) {
   const id = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
   return prefix + "-" + id;
@@ -172,14 +175,23 @@ async function authenticate() {
   await fetch("/dashboard/session", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({ticket})});
   history.replaceState(null,"",location.pathname+location.search);
 }
-async function loadRuns() {
+async function loadRuns(options = {}) {
   const runs=await api("/runs");
   q("runs").innerHTML=runs.map(r=>'<button data-id="'+esc(r.id)+'" class="'+(r.id===selected?"sel":"")+'"><b>'+esc(r.goal)+'</b><br><span class="muted">'+esc(r.id)+'</span> '+badge(r.status)+'</button>').join("")||'<span class="empty">No runs yet.</span>';
   q("runs").querySelectorAll("button").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
-  if(selected) await selectRun(selected);
+  if(selected && options.selectCurrent) await selectRun(selected);
 }
 async function selectRun(id) {
+  const changed = selected !== id || eventRunId !== id;
   selected=id;
+  if (changed) {
+    q("events").innerHTML="";
+    renderedEventSeqs.clear();
+    eventCursor=0;
+    if (eventStream) eventStream.close();
+    eventStream=null;
+    eventRunId=null;
+  }
   q("runs").querySelectorAll("button").forEach(b=>b.classList.toggle("sel",b.dataset.id===id));
   const detail=await api("/runs/"+encodeURIComponent(id));
   q("summary").innerHTML='<h2>'+esc(detail.run.goal)+'</h2><div class="card"><div class="row">'+badge(detail.run.status)+'<span class="kv">lead <b>'+esc(detail.run.leadProvider)+'</b></span><span class="kv">'+detail.usage.totalTurns+' turns</span></div></div>';
@@ -209,7 +221,13 @@ function rememberConversation(conversation) {
   if (!conversation.runId) return;
   const key = conversationKey(conversation.runId, conversation.interfaceAgent);
   const existing = chat.conversations.get(key);
-  if (!existing || String(conversation.updatedAt || "") >= String(existing.updatedAt || "")) {
+  const updatedAt = String(conversation.updatedAt || "");
+  const existingUpdatedAt = String(existing?.updatedAt || "");
+  if (
+    !existing ||
+    updatedAt > existingUpdatedAt ||
+    (updatedAt === existingUpdatedAt && String(conversation.id) > String(existing.id))
+  ) {
     chat.conversations.set(key, conversation);
   }
 }
@@ -235,7 +253,7 @@ async function loadChat() {
   if (!conversation) {
     q("chat-turns").innerHTML='<span class="empty">No '+esc(chat.agent)+' manager conversation for this run yet. Send a message to create one.</span>';
     setChatStatus("Ready. Manager voice: "+chat.agent+".");
-    setChatEnabled(true);
+    setChatEnabled(!chatIsBusyForCurrentView());
     return;
   }
   await refreshConversation(conversation.id);
@@ -358,12 +376,21 @@ q("chat-claude").onclick = async () => {
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
 async function connectEvents() {
+  const targetRunId = selected || "";
+  if (eventStream && eventRunId === targetRunId) return;
   if (eventStream) eventStream.close();
-  const url="/api/v1/events"+(selected?"?runId="+encodeURIComponent(selected):"");
+  eventRunId=targetRunId;
+  const params=[];
+  if(selected) params.push("runId="+encodeURIComponent(selected));
+  if(eventCursor>0) params.push("after="+encodeURIComponent(String(eventCursor)));
+  const url="/api/v1/events"+(params.length?"?"+params.join("&"):"");
   const stream=new EventSource(url);
   eventStream=stream;
   stream.addEventListener("duet.event",e=>{
     const item=JSON.parse(e.data);
+    if (renderedEventSeqs.has(item.seq)) return;
+    renderedEventSeqs.add(item.seq);
+    eventCursor=Math.max(eventCursor, Number(item.seq)||0);
     const sev=item.severity==="error"?"ev-error":item.severity==="warning"?"ev-warning":"ev-info";
     const line=document.createElement("div");
     line.className="ev "+sev;
@@ -380,10 +407,10 @@ async function connectEvents() {
     }
   });
   stream.addEventListener("duet.reset",()=>location.reload());
-  stream.onerror=()=>setTimeout(()=>{ if (eventStream === stream) connectEvents(); },2000);
+  stream.onerror=()=>setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000);
 }
 await authenticate();
 renderChatShell();
-try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns();if(!selected)connectEvents()}
+try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected)connectEvents()}
 catch(error){q("health").textContent=error.message;q("health").className="pill bad"}
 `;
