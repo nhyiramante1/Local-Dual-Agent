@@ -224,6 +224,21 @@ async function startHarness(
     tier: "ordinary",
     expiresAt: "2030-01-01T00:00:00.000Z",
   });
+  store.createProposal({
+    id: "proposal-fingerprint",
+    conversationId: convA.id,
+    turnId: managerTurn.id,
+    runId: "run-a",
+    action: "approve_merge",
+    summary: "Approve the merge after reviewing the final diff.",
+    commandCli: "duet approve run-a --stage merge",
+    commandJson: JSON.stringify({
+      action: "approve_merge",
+      runId: "run-a",
+    }),
+    tier: "fingerprint",
+    expiresAt: "2030-01-01T00:00:00.000Z",
+  });
 
   store.createRun(runRecord("run-b", "Refactor logging", repoB), [
     taskRecord("run-b", "task-b1", "Introduce logger"),
@@ -477,12 +492,13 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
         });
       `);
       await selectRun(page, "run-a");
-      await waitForText(page, ".proposal-card", "Suggested Duet action");
-      await waitForText(page, ".proposal-card", "retry task");
-      await waitForText(page, ".proposal-card", "task task-a1");
-      await waitForText(page, ".proposal-card", "duet retry run-a task-a1");
-      await waitForText(page, ".proposal-card", "copy the command");
-      assert.equal(await page.locator(".proposal-card img").count(), 0);
+      const ordinary = '[data-proposal-id="proposal-a"]';
+      await waitForText(page, ordinary, "Suggested Duet action");
+      await waitForText(page, ordinary, "retry task");
+      await waitForText(page, ordinary, "task task-a1");
+      await waitForText(page, ordinary, "duet retry run-a task-a1");
+      await waitForText(page, ordinary, "copy the command");
+      assert.equal(await page.locator(`${ordinary} img`).count(), 0);
       assert.equal(
         await page.evaluate(
           () => (window as unknown as { __proposalXss?: number }).__proposalXss,
@@ -490,7 +506,7 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
         undefined,
       );
 
-      await page.locator(".proposal-card button", { hasText: "Copy CLI" }).click();
+      await page.locator(`${ordinary} button`, { hasText: "Copy CLI" }).click();
       await waitForText(page, "#chat-status", "Command copied");
       assert.equal(
         await page.evaluate(
@@ -505,13 +521,85 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
   }
 });
 
+test("proposal readiness renders available ordinary and fingerprint requirements", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      const beforeRun = h.store.getRun("run-a");
+      const beforeEvents = h.store.listEvents({}).length;
+      const ordinary = page
+        .locator(".proposal-card")
+        .filter({ hasText: "duet retry run-a task-a1" });
+      await ordinary.locator("button", { hasText: "Check readiness" }).click();
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "Ready to copy");
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "The CLI will re-check run and task state");
+
+      const fingerprint = page
+        .locator(".proposal-card")
+        .filter({ hasText: "duet approve run-a --stage merge" });
+      await fingerprint.locator("button", { hasText: "Check readiness" }).click();
+      await waitForText(page, '[data-proposal-id="proposal-fingerprint"]', "Duet will print a fingerprint");
+      await waitForText(page, '[data-proposal-id="proposal-fingerprint"]', "Fingerprint-gated actions remain CLI-only");
+
+      assert.equal(h.store.getRun("run-a").version, beforeRun.version);
+      assert.equal(
+        h.store
+          .listEvents({})
+          .filter((event) => event.type.startsWith("action_ticket.")).length,
+        0,
+      );
+      assert.equal(h.store.listEvents({}).length, beforeEvents);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal readiness shows blocked reasons safely", async () => {
+  const h = await startHarness();
+  try {
+    h.store.createOperation({
+      id: 'active-<img src=x onerror="window.__blockedXss=1">',
+      runId: "run-a",
+      kind: "retry",
+      status: "running",
+      serviceInstanceId: "dashboard-smoke",
+      inputHash: "hash",
+      createdAt: FIXED,
+    });
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      const ordinary = page
+        .locator(".proposal-card")
+        .filter({ hasText: "duet retry run-a task-a1" });
+      await ordinary.locator("button", { hasText: "Check readiness" }).click();
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "Not ready");
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "already has active operation");
+      assert.equal(await page.locator('[data-proposal-id="proposal-a"] img').count(), 0);
+      assert.equal(
+        await page.evaluate(
+          () => (window as unknown as { __blockedXss?: number }).__blockedXss,
+        ),
+        undefined,
+      );
+      assert.equal(h.store.getProposal("proposal-a").status, "proposed");
+      assert.equal(h.store.getRun("run-a").status, "running");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("dismissing a proposal removes only chat-state suggestion data", async () => {
   const h = await startHarness();
   try {
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
-      await waitForText(page, ".proposal-card", "duet retry run-a task-a1");
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "duet retry run-a task-a1");
       const beforeRun = h.store.getRun("run-a");
       const beforeTasks = h.store.listTasks("run-a").map((task) => ({
         id: task.id,
@@ -520,7 +608,7 @@ test("dismissing a proposal removes only chat-state suggestion data", async () =
       }));
       const beforeOperations = h.store.listActiveOperations().length;
 
-      await page.locator(".proposal-card button", { hasText: "Dismiss" }).click();
+      await page.locator('[data-proposal-id="proposal-a"] button', { hasText: "Dismiss" }).click();
       await waitForNoText(page, "#chat-turns", "duet retry run-a task-a1");
 
       const afterRun = h.store.getRun("run-a");

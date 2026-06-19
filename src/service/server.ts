@@ -13,6 +13,7 @@ import {
   type ChatProviders,
   type ManagerBudget,
 } from "../chat/engine.js";
+import { prepareProposalAction } from "../chat/proposals.js";
 import { defaultConfig, validateConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
@@ -392,6 +393,30 @@ export class DuetService {
         return;
       }
       throw new DuetError("Not found.", "NOT_FOUND");
+    }
+    const proposalPrepareMatch =
+      /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/prepare$/.exec(
+        route,
+      );
+    if (proposalPrepareMatch) {
+      if (request.method !== "GET") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const conversationId = decodeURIComponent(proposalPrepareMatch[1]);
+      const proposalId = decodeURIComponent(proposalPrepareMatch[2]);
+      this.send(
+        response,
+        200,
+        apiSuccess(
+          requestId,
+          prepareProposalAction(
+            this.options.store,
+            conversationId,
+            proposalId,
+          ),
+        ),
+      );
+      return;
     }
     const proposalDismissMatch =
       /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/dismiss$/.exec(

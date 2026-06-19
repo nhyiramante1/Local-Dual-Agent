@@ -1,8 +1,12 @@
 import type {
   ConversationRecord,
+  ManagerActionProposal,
   ProposalAction,
   ProposalTier,
+  RunRecord,
+  TaskRecord,
 } from "../core/domain.js";
+import { DuetError } from "../core/errors.js";
 import type { Store } from "../persistence/store.js";
 
 export interface RawProposal {
@@ -27,6 +31,29 @@ export interface SynthesizedProposal {
   tier: ProposalTier;
   summary: string;
   expiresAt: string;
+}
+
+export interface PreparedProposalAction {
+  proposalId: string;
+  action: ProposalAction;
+  tier: ProposalTier;
+  runId?: string;
+  taskId?: string;
+  commandCli: string;
+  available: boolean;
+  requirements: string[];
+  warnings: string[];
+  blockedReason?: string;
+  run?: {
+    id: string;
+    status: RunRecord["status"];
+    version: number;
+  };
+  task?: {
+    id: string;
+    status: TaskRecord["status"];
+    version: number;
+  };
 }
 
 type ActionSpec = {
@@ -237,4 +264,118 @@ export function tryValidateAndSynthesize(
     summary,
     expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
   };
+}
+
+export function prepareProposalAction(
+  store: Store,
+  conversationId: string,
+  proposalId: string,
+): PreparedProposalAction {
+  const conversation = store.getConversation(conversationId);
+  const proposal = store.getProposal(proposalId);
+  if (proposal.conversationId !== conversationId) {
+    throw new DuetError(
+      `Proposal ${proposalId} is not in conversation ${conversationId}.`,
+      "PROPOSAL_NOT_FOUND",
+    );
+  }
+  const prepared = basePrepared(proposal);
+  const now = Date.now();
+  if (proposal.status !== "proposed" || Date.parse(proposal.expiresAt) <= now) {
+    return unavailable(prepared, "This suggestion is no longer active.");
+  }
+
+  let run: RunRecord | undefined;
+  if (proposal.runId) {
+    try {
+      run = store.getRun(proposal.runId);
+      prepared.run = {
+        id: run.id,
+        status: run.status,
+        version: run.version ?? 1,
+      };
+    } catch {
+      return unavailable(prepared, "The linked run no longer exists.");
+    }
+  }
+  if (conversation.runId && proposal.runId !== conversation.runId) {
+    return unavailable(prepared, "This suggestion no longer matches the conversation run.");
+  }
+
+  if (proposal.taskId) {
+    if (!proposal.runId) {
+      return unavailable(prepared, "The linked task is missing its run.");
+    }
+    const task = store
+      .listTasks(proposal.runId)
+      .find((item) => item.id === proposal.taskId);
+    if (!task) {
+      return unavailable(prepared, "The linked task no longer exists.");
+    }
+    prepared.task = {
+      id: task.id,
+      status: task.status,
+      version: task.version ?? 1,
+    };
+  }
+
+  if (proposal.runId && runChangingAction(proposal.action)) {
+    const active = store
+      .listActiveOperations()
+      .find((operation) => operation.runId === proposal.runId);
+    if (active) {
+      return unavailable(
+        prepared,
+        `Run ${proposal.runId} already has active operation ${active.id}.`,
+      );
+    }
+  }
+
+  return prepared;
+}
+
+function basePrepared(proposal: ManagerActionProposal): PreparedProposalAction {
+  const requirements =
+    proposal.tier === "fingerprint"
+      ? [
+          "Run the copied command in your terminal.",
+          "Duet will print a fingerprint and require typed confirmation.",
+          "The dashboard cannot create action tickets or consume approvals.",
+        ]
+      : [
+          "Run the copied command in your terminal.",
+          "The CLI will re-check run and task state before doing anything.",
+          "The dashboard is showing a suggestion only.",
+        ];
+  const warnings =
+    proposal.tier === "fingerprint"
+      ? ["Fingerprint-gated actions remain CLI-only."]
+      : ["This readiness check does not reserve or start work."];
+  return {
+    proposalId: proposal.id,
+    action: proposal.action,
+    tier: proposal.tier,
+    runId: proposal.runId,
+    taskId: proposal.taskId,
+    commandCli: proposal.commandCli,
+    available: true,
+    requirements,
+    warnings,
+  };
+}
+
+function unavailable(
+  prepared: PreparedProposalAction,
+  blockedReason: string,
+): PreparedProposalAction {
+  return {
+    ...prepared,
+    available: false,
+    blockedReason,
+    warnings: [...prepared.warnings, blockedReason],
+  };
+}
+
+function runChangingAction(action: ProposalAction): boolean {
+  return Boolean(action);
 }
