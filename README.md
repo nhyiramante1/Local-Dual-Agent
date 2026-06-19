@@ -359,6 +359,23 @@ The manager-chat panel is read-only. It can explain what is happening in a run,
 but dashboard write controls are still planned and approvals/execution remain
 terminal commands.
 
+Manager chat may use provider quota when you send a message. Treat it like a
+real Claude/Codex turn, even though it cannot approve, run, cancel, or merge
+work from the dashboard.
+
+### Manual Dashboard Chat Smoke Check
+
+Before relying on a new dashboard-chat build with real providers, try one small
+local run and confirm:
+
+- A real manager reply appears after normal provider latency.
+- Provider or budget failures show a readable error.
+- The repository remains unchanged after a read-only manager chat turn.
+- Typing `/approve plan`, `/run`, `/merge`, or `/cancel` sends plain chat text
+  and does not perform those actions.
+- Refreshing or briefly disconnecting the browser does not duplicate timeline
+  events.
+
 ## Practical Tips
 
 - Start with small goals. Duet is strongest when work can be split into clear
@@ -392,7 +409,15 @@ For contributors:
 npm run check
 npm test
 npm run build
+npm run test:dashboard
 npm audit
+```
+
+`npm run test:dashboard` launches a local browser smoke test. If Chromium is not
+installed for Playwright, run:
+
+```powershell
+npx playwright install chromium
 ```
 
 Keep this README updated as new user-visible features land, especially the

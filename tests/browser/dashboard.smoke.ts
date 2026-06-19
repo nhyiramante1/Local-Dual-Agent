@@ -1,0 +1,612 @@
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { chromium, type Browser, type Page } from "@playwright/test";
+
+import type {
+  ProviderName,
+  RunRecord,
+  TaskRecord,
+} from "../../src/core/domain.js";
+import { Store } from "../../src/persistence/store.js";
+import type { ProviderAdapter } from "../../src/providers/adapter.js";
+import {
+  defaultManagerBudget,
+  type ManagerBudget,
+} from "../../src/chat/engine.js";
+import { DuetService } from "../../src/service/server.js";
+import { runCommand } from "../../src/process/run-command.js";
+
+const SECRET = "dashboard-smoke-secret";
+const FIXED = "2026-06-01T00:00:00.000Z";
+const XSS = "<img src=x onerror=\"window.__xss=1\">manager reply";
+
+interface Gate {
+  promise: Promise<void>;
+  release: () => void;
+}
+
+interface Harness {
+  base: string;
+  store: Store;
+  service: DuetService;
+  calls: { n: number };
+  arm: () => void;
+  release: () => void;
+  ticket: () => Promise<string>;
+  cleanup: () => Promise<void>;
+}
+
+let browser: Browser | null = null;
+
+test.before(async () => {
+  const fallbackBrowsers = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  ];
+  try {
+    browser = await chromium.launch({ headless: true });
+    return;
+  } catch (error) {
+    const bundledMessage = error instanceof Error ? error.message : String(error);
+    for (const executablePath of fallbackBrowsers) {
+      if (!existsSync(executablePath)) continue;
+      try {
+        browser = await chromium.launch({ executablePath, headless: true });
+        return;
+      } catch {
+        // Try the next installed Chromium-family browser.
+      }
+    }
+    throw new Error(
+      `Chromium is required for dashboard smoke tests. Run: npx playwright install chromium\n${bundledMessage}`,
+    );
+  }
+});
+
+test.after(async () => {
+  await browser?.close();
+});
+
+function makeGate(): Gate {
+  let release!: () => void;
+  const promise = new Promise<void>((done) => {
+    release = done;
+  });
+  return { promise, release };
+}
+
+function runRecord(id: string, goal: string, repoRoot: string): RunRecord {
+  return {
+    id,
+    repoPath: repoRoot,
+    repoRoot,
+    goal,
+    status: "running",
+    leadProvider: "claude",
+    baseBranch: "main",
+    baseCommit: "abc0000",
+    integrationBranch: `duet/${id}/integration`,
+    plan: { summary: goal, tasks: [], risks: [] },
+    configJson: "{}",
+    cancellationRequested: false,
+    createdAt: FIXED,
+    updatedAt: FIXED,
+  };
+}
+
+function taskRecord(runId: string, id: string, title: string): TaskRecord {
+  return {
+    runId,
+    id,
+    ordinal: 0,
+    plan: {
+      id,
+      title,
+      objective: `do ${title}`,
+      acceptanceCriteria: ["works"],
+      allowedPaths: ["src/**"],
+      dependencies: [],
+    },
+    status: "ready",
+    provider: "codex",
+    reviewerProvider: "claude",
+    revisionCount: 0,
+    cancellationRequested: false,
+    createdAt: FIXED,
+    updatedAt: FIXED,
+  };
+}
+
+async function gitInit(dir: string): Promise<void> {
+  for (const args of [
+    ["init", "--initial-branch=main"],
+    ["config", "user.email", "smoke@example.invalid"],
+    ["config", "user.name", "Smoke"],
+    ["commit", "--allow-empty", "-m", "seed"],
+  ]) {
+    const result = await runCommand("git", args, { cwd: dir });
+    if (result.exitCode !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    }
+  }
+}
+
+async function startHarness(
+  options: { managerBudget?: ManagerBudget; gitRepo?: boolean } = {},
+): Promise<Harness> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-dash-smoke-"));
+  const repoA = path.join(directory, "repo-a");
+  const repoB = path.join(directory, "repo-b");
+  await mkdir(repoA, { recursive: true });
+  await mkdir(repoB, { recursive: true });
+  if (options.gitRepo) {
+    await gitInit(repoA);
+    await gitInit(repoB);
+  }
+
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const calls = { n: 0 };
+  let gate: Gate | null = null;
+  const provider: ProviderAdapter = {
+    name: "codex" as ProviderName,
+    async run() {
+      calls.n += 1;
+      if (gate) await gate.promise;
+      return {
+        provider: "codex",
+        sessionId: "sess-smoke",
+        finalText: "manager reply from stub",
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        usage: {
+          costUsd: 0.01,
+          costKnown: true,
+          inputTokens: 10,
+          outputTokens: 5,
+        },
+      };
+    },
+  };
+
+  store.createRun(runRecord("run-a", "Add a healthz endpoint", repoA), [
+    taskRecord("run-a", "task-a1", "Add route handler"),
+    taskRecord("run-a", "task-a2", "Add unit test"),
+  ]);
+  store.updateRun("run-a", { status: "running", error: null });
+  store.recordVerification("run-a", "task-a1", 1, {
+    command: ["npm", "test"],
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    durationMs: 1200,
+    passed: true,
+  });
+  const convA = store.createConversation({
+    id: "conv-a",
+    runId: "run-a",
+    interfaceAgent: "codex",
+  });
+  store.appendConversationTurn({
+    conversationId: convA.id,
+    role: "user",
+    content: "What is happening?",
+  });
+  store.appendConversationTurn({
+    conversationId: convA.id,
+    role: "manager",
+    interfaceAgent: "codex",
+    content: XSS,
+    usageJson: JSON.stringify({ costUsd: 0.01, costKnown: true }),
+  });
+
+  store.createRun(runRecord("run-b", "Refactor logging", repoB), [
+    taskRecord("run-b", "task-b1", "Introduce logger"),
+  ]);
+  store.updateRun("run-b", { status: "running", error: null });
+
+  const service = new DuetService({
+    store,
+    secret: SECRET,
+    instanceId: "dashboard-smoke",
+    idleTimeoutMs: 600_000,
+    chatProviders: { claude: provider, codex: provider },
+    managerBudget: options.managerBudget,
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  return {
+    base,
+    store,
+    service,
+    calls,
+    arm: () => {
+      gate = makeGate();
+    },
+    release: () => {
+      const current = gate;
+      gate = null;
+      current?.release();
+    },
+    ticket: async () => {
+      const res = await fetch(`${base}/api/v1/dashboard/ticket`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${SECRET}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      assert.equal(res.status, 200);
+      return ((await res.json()) as { data: { ticket: string } }).data.ticket;
+    },
+    cleanup: async () => {
+      const current = gate;
+      gate = null;
+      current?.release();
+      await assertEventually(async () => {
+        assert.equal(store.listActiveOperations().length, 0);
+      }, 5_000).catch(() => {
+        // If cleanup is running after an assertion failure, close best-effort.
+      });
+      await service.close();
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
+  assert.ok(browser, "browser was not started");
+  const page = await browser.newPage();
+  try {
+    await page.route("**/favicon.ico", (route) =>
+      route.fulfill({ status: 204, body: "" }),
+    );
+    return await fn(page);
+  } finally {
+    await page.close();
+  }
+}
+
+async function open(page: Page, h: Harness): Promise<void> {
+  await page.goto(`${h.base}/#${await h.ticket()}`);
+  await waitForClass(page, "#health", /ok/);
+}
+
+async function selectRun(page: Page, id: string): Promise<void> {
+  await page.locator(`#runs button[data-id="${id}"]`).click();
+  await waitForClass(page, `#runs button[data-id="${id}"]`, /sel/);
+}
+
+async function waitForChatEnabled(page: Page): Promise<void> {
+  await assertEventually(async () => {
+    assert.equal(await page.locator("#chat-input").isEnabled(), true);
+    assert.equal(await page.locator("#chat-send").isEnabled(), true);
+  });
+}
+
+function trackConsole(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("response", (response) => {
+    if (response.status() >= 400 && !response.url().endsWith("/favicon.ico")) {
+      errors.push(`HTTP ${response.status()} ${response.url()}`);
+    }
+  });
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    const text = message.text();
+    if (text === "Failed to load resource: the server responded with a status of 404 (Not Found)") {
+      return;
+    }
+    errors.push(text);
+  });
+  page.on("pageerror", (error) => errors.push(String(error)));
+  return errors;
+}
+
+async function waitForText(
+  page: Page,
+  selector: string,
+  expected: string | RegExp,
+): Promise<void> {
+  await page.locator(selector).waitFor({ state: "visible" });
+  await assertEventually(async () => {
+    const text = (await page.locator(selector).textContent()) ?? "";
+    if (typeof expected === "string") assert.ok(text.includes(expected), text);
+    else assert.match(text, expected);
+  });
+}
+
+async function waitForNoText(
+  page: Page,
+  selector: string,
+  unexpected: string,
+): Promise<void> {
+  await assertEventually(async () => {
+    const text = (await page.locator(selector).textContent()) ?? "";
+    assert.ok(!text.includes(unexpected), text);
+  });
+}
+
+async function waitForClass(
+  page: Page,
+  selector: string,
+  expected: RegExp,
+): Promise<void> {
+  await page.locator(selector).waitFor({ state: "visible" });
+  await assertEventually(async () => {
+    assert.match((await page.locator(selector).getAttribute("class")) ?? "", expected);
+  });
+}
+
+async function assertEventually(
+  check: () => Promise<void> | void,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const start = Date.now();
+  let last: unknown;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      await check();
+      return;
+    } catch (error) {
+      last = error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw last;
+}
+
+test("loads Run A panels and chat with no console errors", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      const errors = trackConsole(page);
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#summary", "Add a healthz endpoint");
+      await waitForText(page, "#tasks", "Add route handler");
+      await waitForText(page, "#verification", "PASS");
+      await waitForText(page, "#events", "run.created");
+      await waitForText(page, "#chat-turns", "What is happening?");
+      assert.deepEqual(errors, []);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("switching A -> B -> A clears stale state and does not duplicate events", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#events", "run.created");
+      await selectRun(page, "run-b");
+      await waitForText(page, "#summary", "Refactor logging");
+      await waitForNoText(page, "#chat-turns", "What is happening?");
+      await selectRun(page, "run-a");
+      await waitForText(page, "#summary", "Add a healthz endpoint");
+      await assertEventually(async () => {
+        assert.equal(
+          await page.locator("#events .ty", { hasText: "run.created" }).count(),
+          1,
+        );
+      });
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("switching Manager voice preserves the selected run", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await page.locator("#chat-claude").click();
+      await waitForClass(page, "#chat-claude", /active/);
+      await waitForClass(page, `#runs button[data-id="run-a"]`, /sel/);
+      await waitForText(page, "#summary", "Add a healthz endpoint");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("seeded XSS turn renders as text, not executed HTML", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "manager reply");
+      assert.equal(await page.locator("#chat-turns img").count(), 0);
+      assert.equal(
+        await page.evaluate(() => (window as unknown as { __xss?: number }).__xss),
+        undefined,
+      );
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("sending shows pending, disables input, then renders the reply after release", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForChatEnabled(page);
+      h.arm();
+      await page.locator("#chat-input").fill("status please");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-turns", "status please");
+      await assertEventually(async () => {
+        assert.equal(await page.locator("#chat-input").isDisabled(), true);
+        assert.equal(await page.locator("#chat-send").isDisabled(), true);
+      });
+      h.release();
+      await waitForText(page, "#chat-turns", "manager reply from stub");
+      await assertEventually(async () => {
+        assert.equal(await page.locator("#chat-input").isEnabled(), true);
+      });
+    });
+  } finally {
+    h.release();
+    await h.cleanup();
+  }
+});
+
+test("input stays disabled while a turn is pending even when switching run/voice", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForChatEnabled(page);
+      h.arm();
+      await page.locator("#chat-input").fill("hold please");
+      await page.locator("#chat-send").click();
+      await assertEventually(async () => {
+        assert.equal(await page.locator("#chat-input").isDisabled(), true);
+      });
+      await page.locator("#chat-claude").click();
+      assert.equal(await page.locator("#chat-input").isDisabled(), true);
+      await selectRun(page, "run-b");
+      assert.equal(await page.locator("#chat-input").isDisabled(), true);
+      h.release();
+      await assertEventually(async () => {
+        assert.equal(h.store.listActiveOperations().length, 0);
+      });
+    });
+  } finally {
+    h.release();
+    await h.cleanup();
+  }
+});
+
+test("sending on a run without a conversation creates one", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-b");
+      await waitForChatEnabled(page);
+      await page.locator("#chat-input").fill("hello run b");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-turns", "hello run b");
+      await waitForText(page, "#chat-turns", "manager reply from stub");
+      assert.equal(h.store.listConversations("run-b").length, 1);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("action-like text stays chat and does not mutate the run", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForChatEnabled(page);
+      const before = h.store.getRun("run-a").version;
+      await page.locator("#chat-input").fill("/approve plan");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-turns", "/approve plan");
+      await waitForText(page, "#chat-turns", "manager reply from stub");
+      assert.equal(h.store.isApproved("run-a", "plan"), false);
+      assert.equal(h.store.getRun("run-a").version, before);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("budget exceeded renders a safe visible error", async () => {
+  const h = await startHarness({
+    managerBudget: { ...defaultManagerBudget, maxTurnsPerDay: 0 },
+  });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForChatEnabled(page);
+      await page.locator("#chat-input").fill("anything");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-status", /BUDGET_EXCEEDED|budget|turn limit/i);
+      assert.equal(h.calls.n, 0);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Enter sends, Shift+Enter inserts a newline, and IME composition does not send", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForChatEnabled(page);
+      const input = page.locator("#chat-input");
+      await input.click();
+      await input.fill("composing");
+      await page.dispatchEvent("#chat-input", "keydown", {
+        key: "Enter",
+        isComposing: true,
+      });
+      assert.equal(await input.inputValue(), "composing");
+      await input.fill("line one");
+      await input.press("Shift+Enter");
+      await input.type("line two");
+      assert.match(await input.inputValue(), /\n/);
+      await input.press("Enter");
+      await waitForText(page, "#chat-turns", "line one");
+      await waitForText(page, "#chat-turns", "manager reply from stub");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard session can use chat routes but not run mutations", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      const result = await page.evaluate(async () => {
+        const mutate = await fetch("/api/v1/runs/run-a/cancel", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "smoke-cancel-1",
+          },
+          body: JSON.stringify({ expectedVersion: 1 }),
+          credentials: "same-origin",
+        });
+        const chat = await fetch("/api/v1/chat/conversations?runId=run-a", {
+          credentials: "same-origin",
+        });
+        return { mutate: mutate.status, chat: chat.status };
+      });
+      assert.equal(result.mutate, 403);
+      assert.equal(result.chat, 200);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});

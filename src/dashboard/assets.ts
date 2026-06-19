@@ -19,18 +19,19 @@ export const dashboardHtml = `<!doctype html>
       <div id="chat" class="chat card">
         <div class="chat-head">
           <div>
-            <b>Read-only manager</b>
+            <div class="chat-title"><b>Read-only manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
             <p class="muted">Ask about the selected run. Approve, run, cancel, resolve, cleanup, and merge still happen in the CLI.</p>
+            <p class="faint chat-quota">Manager chat may consume provider quota.</p>
           </div>
           <div class="chat-agents" role="group" aria-label="Manager voice">
             <button id="chat-codex" type="button" data-agent="codex">Codex</button>
             <button id="chat-claude" type="button" data-agent="claude">Claude</button>
           </div>
         </div>
-        <div id="chat-status" class="muted">Select a run to start chatting.</div>
-        <div id="chat-turns" class="chat-turns"></div>
+        <div id="chat-status" class="muted" role="status" aria-live="polite">Select a run to start chatting.</div>
+        <div id="chat-turns" class="chat-turns" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
-          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="Ask the Manager about this run..." disabled></textarea>
+          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="Ask the Manager about this run. Enter sends, Shift+Enter for a newline." disabled></textarea>
           <button id="chat-send" type="submit" disabled>Send</button>
         </form>
       </div>
@@ -102,6 +103,13 @@ button b{font-weight:600}
 pre{white-space:pre-wrap;background:#0e1217;border:1px solid var(--line);padding:14px;border-radius:10px;max-height:440px;overflow:auto;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .empty{color:var(--faint);font-size:13px;font-style:italic}
 .chat{display:grid;gap:12px}
+.chat-title{display:flex;align-items:center;gap:8px}
+.chat-quota{font-size:12px}
+.conn{font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--faint)}
+.conn-ok{color:var(--ok);border-color:#2f5f43;background:#13251b}
+.conn-bad{color:var(--warn);border-color:#5f4d28;background:#241d11}
+.chat-turn .meta time,.chat-turn .meta .when{color:var(--faint);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.chat-turn .note{color:var(--faint);font-size:12px;margin-bottom:4px}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
 .chat-head p{margin:3px 0 0}
 .chat-agents{display:flex;gap:7px;flex:0 0 auto}
@@ -278,7 +286,10 @@ async function refreshConversation(conversationId) {
   rememberConversation(data.conversation);
   if (!isCurrentConversation(data.conversation)) return data;
   renderTurns(data.turns);
-  setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
+  const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
+  const failure = failedTurnMessage(failed);
+  if (failure) setChatStatus(failure, true);
+  else setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
   setChatEnabled(!chatIsBusyForCurrentView());
   return data;
 }
@@ -299,19 +310,48 @@ function setChatEnabled(enabled) {
   q("chat-input").disabled = !enabled;
   q("chat-send").disabled = !enabled;
 }
+function setConn(state) {
+  const el = q("chat-conn");
+  if (!el) return;
+  if (state === "live") { el.textContent = "live"; el.className = "conn conn-ok"; }
+  else if (state === "reconnecting") { el.textContent = "reconnecting"; el.className = "conn conn-bad"; }
+  else { el.textContent = "connecting"; el.className = "conn"; }
+}
 function renderTurns(turns) {
   if (!turns.length) {
     q("chat-turns").innerHTML='<span class="empty">No turns yet.</span>';
     return;
   }
   q("chat-turns").innerHTML = turns.map(turn => {
-    const who = turn.role === "manager" ? "Manager: "+(turn.interfaceAgent || chat.agent) : turn.role;
+    const who = turn.role === "manager"
+      ? "Manager: "+(turn.interfaceAgent || chat.agent)
+      : (turn.role === "user" ? "You" : turn.role);
     const failed = turn.status === "failed";
-    const body = failed && turn.errorJson ? turn.errorJson : turn.content;
-    const clipped = visibleText(body, 4000);
-    return '<div class="chat-turn '+esc(turn.role)+(failed ? " failed" : "")+'"><div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span></div><div class="body">'+clipped+'</div></div>';
+    let note = "";
+    let body;
+    if (failed && turn.errorJson) {
+      let code = "error", message = turn.errorJson;
+      try { const parsed = JSON.parse(turn.errorJson); code = parsed.code || code; message = parsed.message || message; }
+      catch { /* fall back to the raw, bounded error text */ }
+      note = '<div class="note">'+esc(code)+'</div>';
+      body = visibleText(message, 4000);
+    } else {
+      body = visibleText(turn.content, 4000);
+    }
+    const when = turn.createdAt ? new Date(turn.createdAt) : null;
+    const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
+    return '<div class="chat-turn '+esc(turn.role)+(failed ? " failed" : "")+'"><div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>'+note+'<div class="body">'+body+'</div></div>';
   }).join("");
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
+}
+function failedTurnMessage(turn) {
+  if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
+  try {
+    const parsed = JSON.parse(turn.errorJson);
+    return parsed.message || parsed.code || "Manager turn failed.";
+  } catch {
+    return turn.errorJson;
+  }
 }
 async function pollOperation(operationId, conversationId) {
   chat.activeOperation = { id: operationId, conversationId };
@@ -360,11 +400,20 @@ q("chat-form").addEventListener("submit", async (event) => {
   const text = q("chat-input").value.trim();
   if (!text || !selected || chatIsBusyForCurrentView()) return;
   q("chat-input").value = "";
+  setChatEnabled(false);
+  setChatStatus("Sending...");
   try {
     await sendChat(text);
   } catch (error) {
     setChatStatus(error.message, true);
-    setChatEnabled(Boolean(selected));
+    setChatEnabled(Boolean(selected) && !chatIsBusyForCurrentView());
+  }
+});
+q("chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (q("chat-form").requestSubmit) q("chat-form").requestSubmit();
+    else q("chat-form").dispatchEvent(new Event("submit", { cancelable: true }));
   }
 });
 q("chat-codex").onclick = async () => {
@@ -384,8 +433,10 @@ async function connectEvents() {
   if(selected) params.push("runId="+encodeURIComponent(selected));
   if(eventCursor>0) params.push("after="+encodeURIComponent(String(eventCursor)));
   const url="/api/v1/events"+(params.length?"?"+params.join("&"):"");
+  setConn("connecting");
   const stream=new EventSource(url);
   eventStream=stream;
+  stream.onopen=()=>{ if(eventStream===stream) setConn("live"); };
   stream.addEventListener("duet.event",e=>{
     const item=JSON.parse(e.data);
     if (renderedEventSeqs.has(item.seq)) return;
@@ -407,7 +458,7 @@ async function connectEvents() {
     }
   });
   stream.addEventListener("duet.reset",()=>location.reload());
-  stream.onerror=()=>setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000);
+  stream.onerror=()=>{ if(eventStream===stream) setConn("reconnecting"); setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000); };
 }
 await authenticate();
 renderChatShell();
