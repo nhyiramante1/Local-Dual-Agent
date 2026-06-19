@@ -149,7 +149,9 @@ export class ChatEngine {
         throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
       }
     } finally {
-      if (before) {
+      // Only assert fingerprint when the provider call completed (result is set).
+      // If the provider itself threw, skip asserting to avoid masking the original error.
+      if (before && result) {
         const after = await fingerprintRepository(cwd);
         assertFingerprintUnchanged(before, after);
       }

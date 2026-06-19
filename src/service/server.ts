@@ -280,10 +280,12 @@ export class DuetService {
         this.send(response, 401, apiFailure(requestId, new DuetError("Unauthorized.", "UNAUTHORIZED")));
         return;
       }
-      // Sessions are read-only for runs. The only session-allowed mutation is
-      // the chat-only paid-read surface (/api/v1/chat/*), which cannot reach a
-      // run mutation; everything else stays bearer-only.
-      const chatRoute = url.pathname.startsWith("/api/v1/chat/");
+      // Sessions are read-only for runs. Chat-state mutations (/api/v1/chat/*)
+      // are session-allowed, but proposal /start submits run work and must
+      // stay bearer-only.
+      const chatRoute =
+        url.pathname.startsWith("/api/v1/chat/") &&
+        !url.pathname.endsWith("/start");
       if (
         credential === "session" &&
         request.method !== "GET" &&
@@ -442,11 +444,16 @@ export class DuetService {
           body,
         );
         const operation = this.activities.submit(command);
-        this.options.store.markProposalStarted(
-          conversationId,
-          proposalId,
-          operation.id,
-        );
+        try {
+          this.options.store.markProposalStarted(
+            conversationId,
+            proposalId,
+            operation.id,
+          );
+        } catch (err) {
+          this.activities.cancelActive(operation.id);
+          throw err;
+        }
         return {
           status: 202,
           data: operation,

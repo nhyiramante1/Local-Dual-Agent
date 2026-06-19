@@ -1182,7 +1182,7 @@ test("proposal start rejects fingerprint, inactive, active-run, and ownership mi
   }
 });
 
-test("dashboard session can start ordinary proposals but still cannot mutate runs directly", async () => {
+test("dashboard session cannot start proposals or mutate runs directly", async () => {
   const h = await startService();
   try {
     seedRunWithTask(h.store);
@@ -1196,6 +1196,7 @@ test("dashboard session can start ordinary proposals but still cannot mutate run
     const cookie = await sessionCookie(h.base);
     const run = h.store.getRun("proposal-run");
 
+    // Proposal /start submits run work — sessions must be rejected.
     const start = await fetch(
       `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
       {
@@ -1211,9 +1212,7 @@ test("dashboard session can start ordinary proposals but still cannot mutate run
         }),
       },
     );
-    assert.equal(start.status, 202);
-    const operation = ((await start.json()) as { data: OperationRecord }).data;
-    assert.equal(operation.kind, "execute");
+    assert.equal(start.status, 403);
 
     const runMutation = await fetch(
       `${h.base}/api/v1/runs/proposal-run/cancel`,
@@ -1228,7 +1227,6 @@ test("dashboard session can start ordinary proposals but still cannot mutate run
       },
     );
     assert.equal(runMutation.status, 403);
-    assert.equal(h.store.getProposal(proposalId).status, "started");
   } finally {
     await h.cleanup();
   }
