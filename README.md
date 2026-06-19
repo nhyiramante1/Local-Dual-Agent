@@ -28,14 +28,12 @@ considered, but Windows is the main development target right now.
   runs and start bounded planning operations.
 - Store local durable history so runs can survive service restarts.
 
-Manager chat foundations are being added now. The backend can store
-conversations and run bounded read-only manager turns with summarized run,
-task, usage, event, verification, and message context. The full browser chat
-experience is still in progress.
+Manager chat is being added now. The dashboard can run read-only manager
+conversations with summarized run, task, usage, event, verification, and
+message context. Approval, execution, and merge controls still stay in the CLI.
 
 ## What It Does Not Do Yet
 
-- No full manager-chat UI in the dashboard yet.
 - No dashboard buttons for approve/run/merge yet.
 - No automatic conflict resolver.
 - No remote/cloud service.
@@ -357,8 +355,9 @@ The dashboard currently focuses on inspection:
 - conflicts
 - approval state
 
-The manager-chat panel and dashboard write controls are planned, but the
-current dashboard is intentionally read-only.
+The manager-chat panel is read-only. It can explain what is happening in a run,
+but dashboard write controls are still planned and approvals/execution remain
+terminal commands.
 
 ## Practical Tips
 

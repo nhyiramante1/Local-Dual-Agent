@@ -10,6 +10,7 @@ import { DuetError } from "../src/core/errors.js";
 import { Store } from "../src/persistence/store.js";
 import type { AgentTurn, ProviderAdapter } from "../src/providers/adapter.js";
 import { defaultManagerBudget, type ManagerBudget } from "../src/chat/engine.js";
+import { dashboardHtml, dashboardJs } from "../src/dashboard/assets.js";
 import { DuetService } from "../src/service/server.js";
 import { runCommand } from "../src/process/run-command.js";
 
@@ -639,6 +640,119 @@ test("dashboard session can create chat turns but not run mutations", async () =
   } finally {
     await h.cleanup();
   }
+});
+
+test("dashboard session can manage read-only run chat for both interface agents", async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "duet-dashboard-chat-repo-"));
+  const h = await startService();
+  try {
+    await git(repo, ["init", "--initial-branch=main"]);
+    await git(repo, ["config", "user.name", "Duet Test"]);
+    await git(repo, ["config", "user.email", "duet@example.invalid"]);
+    await writeFile(path.join(repo, "file.txt"), "base\n");
+    await git(repo, ["add", "."]);
+    await git(repo, ["commit", "-m", "base"]);
+    const baseCommit = await git(repo, ["rev-parse", "HEAD"]);
+    const stamp = new Date().toISOString();
+    const run: RunRecord = {
+      id: "dashboard-chat-run",
+      repoPath: repo,
+      repoRoot: repo,
+      goal: "show manager chat in the dashboard",
+      status: "awaiting_plan_approval",
+      leadProvider: "codex",
+      baseBranch: "main",
+      baseCommit,
+      integrationBranch: "duet/dashboard-chat-run/integration",
+      configJson: "{}",
+      cancellationRequested: false,
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    h.store.createRun(run);
+    const cookie = await sessionCookie(h.base);
+    const headers = {
+      cookie,
+      "content-type": "application/json",
+    };
+
+    const codex = await postConversation(
+      h.base,
+      {
+        runId: run.id,
+        interfaceAgent: "codex",
+        title: "Dashboard manager chat",
+      },
+      "dashboard-chat-conv-codex",
+      headers,
+    );
+    assert.equal(codex.status, 201);
+    const codexConversation = ((await codex.json()) as { data: { id: string } })
+      .data;
+
+    const claude = await postConversation(
+      h.base,
+      {
+        runId: run.id,
+        interfaceAgent: "claude",
+        title: "Dashboard manager chat",
+      },
+      "dashboard-chat-conv-claude",
+      headers,
+    );
+    assert.equal(claude.status, 201);
+
+    const list = await fetch(
+      `${h.base}/api/v1/chat/conversations?runId=${run.id}`,
+      { headers: { cookie } },
+    );
+    assert.equal(list.status, 200);
+    const conversations = ((await list.json()) as {
+      data: Array<{ runId: string; interfaceAgent: string }>;
+    }).data;
+    assert.deepEqual(
+      conversations.map((conversation) => conversation.interfaceAgent).sort(),
+      ["claude", "codex"],
+    );
+    assert.ok(
+      conversations.every((conversation) => conversation.runId === run.id),
+    );
+
+    const turn = await postTurn(
+      h.base,
+      codexConversation.id,
+      "/approve plan is still a read-only chat message",
+      "dashboard-chat-turn-codex",
+      headers,
+    );
+    assert.equal(turn.status, 202);
+    const operation = ((await turn.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(operation.id);
+
+    assert.equal(h.store.getOperation(operation.id).status, "succeeded");
+    assert.equal(h.store.getRun(run.id).status, "awaiting_plan_approval");
+    assert.equal(h.store.isApproved(run.id, "plan"), false);
+  } finally {
+    await h.cleanup();
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("dashboard manager chat asset stays read-only and chat-only", () => {
+  assert.match(dashboardHtml, /Manager Chat/);
+  assert.match(dashboardHtml, /read-only manager/i);
+  assert.match(dashboardJs, /\/chat\/conversations/);
+  assert.match(dashboardJs, /function rememberConversation/);
+  assert.match(dashboardJs, /updatedAt/);
+  assert.match(dashboardJs, /if \(eventStream\) eventStream\.close\(\)/);
+  assert.match(dashboardJs, /connectEvents\(\)/);
+  assert.match(dashboardJs, /return Boolean\(chat\.activeOperation\)/);
+  assert.doesNotMatch(dashboardJs, /activeOperationId/);
+  assert.doesNotMatch(dashboardJs, /\/approve/);
+  assert.doesNotMatch(dashboardJs, /\/merge/);
+  assert.doesNotMatch(dashboardJs, /\/cancel/);
+  assert.doesNotMatch(dashboardJs, /\/resolve/);
+  assert.doesNotMatch(dashboardJs, /\/cleanup/);
 });
 
 test("cross-origin chat POST is rejected", async () => {
