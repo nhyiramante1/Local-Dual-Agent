@@ -29,8 +29,9 @@ considered, but Windows is the main development target right now.
 - Store local durable history so runs can survive service restarts.
 
 Manager chat foundations are being added now. The backend can store
-conversations and run bounded read-only manager turns, but the full browser
-chat experience is still in progress.
+conversations and run bounded read-only manager turns with summarized run,
+task, usage, event, verification, and message context. The full browser chat
+experience is still in progress.
 
 ## What It Does Not Do Yet
 

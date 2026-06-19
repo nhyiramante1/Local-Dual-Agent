@@ -1919,6 +1919,25 @@ export class Store {
     return rows.map((row) => this.mapConversationTurn(row));
   }
 
+  listRecentConversationTurns(
+    conversationId: string,
+    limit: number,
+  ): ConversationTurnRecord[] {
+    const boundedLimit = Math.min(Math.max(limit, 1), 1_000);
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM conversation_turns
+        WHERE conversation_id = ?
+        ORDER BY seq DESC LIMIT ?
+      `)
+      .all(conversationId, boundedLimit) as unknown as Array<
+      Record<string, unknown>
+    >;
+    return rows
+      .map((row) => this.mapConversationTurn(row))
+      .reverse();
+  }
+
   countManagerTurns(sinceIso?: string): number {
     const row = this.db
       .prepare(`
