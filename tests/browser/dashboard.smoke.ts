@@ -24,6 +24,7 @@ import { runCommand } from "../../src/process/run-command.js";
 const SECRET = "dashboard-smoke-secret";
 const FIXED = "2026-06-01T00:00:00.000Z";
 const XSS = "<img src=x onerror=\"window.__xss=1\">manager reply";
+const PROPOSAL_XSS = "<img src=x onerror=\"window.__proposalXss=1\">copy the command";
 
 interface Gate {
   promise: Promise<void>;
@@ -199,12 +200,29 @@ async function startHarness(
     role: "user",
     content: "What is happening?",
   });
-  store.appendConversationTurn({
+  const managerTurn = store.appendConversationTurn({
     conversationId: convA.id,
     role: "manager",
     interfaceAgent: "codex",
     content: XSS,
     usageJson: JSON.stringify({ costUsd: 0.01, costKnown: true }),
+  });
+  store.createProposal({
+    id: "proposal-a",
+    conversationId: convA.id,
+    turnId: managerTurn.id,
+    runId: "run-a",
+    taskId: "task-a1",
+    action: "retry_task",
+    summary: PROPOSAL_XSS,
+    commandCli: "duet retry run-a task-a1",
+    commandJson: JSON.stringify({
+      action: "retry_task",
+      runId: "run-a",
+      taskId: "task-a1",
+    }),
+    tier: "ordinary",
+    expiresAt: "2030-01-01T00:00:00.000Z",
   });
 
   store.createRun(runRecord("run-b", "Refactor logging", repoB), [
@@ -436,6 +454,145 @@ test("seeded XSS turn renders as text, not executed HTML", async () => {
         await page.evaluate(() => (window as unknown as { __xss?: number }).__xss),
         undefined,
       );
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal cards render safely and copy the exact CLI command", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      const errors = trackConsole(page);
+      await open(page, h);
+      await page.evaluate(`
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: {
+            writeText: async (text) => {
+              window.__copied = text;
+            },
+          },
+        });
+      `);
+      await selectRun(page, "run-a");
+      await waitForText(page, ".proposal-card", "Suggested Duet action");
+      await waitForText(page, ".proposal-card", "retry task");
+      await waitForText(page, ".proposal-card", "task task-a1");
+      await waitForText(page, ".proposal-card", "duet retry run-a task-a1");
+      await waitForText(page, ".proposal-card", "copy the command");
+      assert.equal(await page.locator(".proposal-card img").count(), 0);
+      assert.equal(
+        await page.evaluate(
+          () => (window as unknown as { __proposalXss?: number }).__proposalXss,
+        ),
+        undefined,
+      );
+
+      await page.locator(".proposal-card button", { hasText: "Copy CLI" }).click();
+      await waitForText(page, "#chat-status", "Command copied");
+      assert.equal(
+        await page.evaluate(
+          () => (window as unknown as { __copied?: string }).__copied,
+        ),
+        "duet retry run-a task-a1",
+      );
+      assert.deepEqual(errors, []);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dismissing a proposal removes only chat-state suggestion data", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, ".proposal-card", "duet retry run-a task-a1");
+      const beforeRun = h.store.getRun("run-a");
+      const beforeTasks = h.store.listTasks("run-a").map((task) => ({
+        id: task.id,
+        status: task.status,
+        version: task.version,
+      }));
+      const beforeOperations = h.store.listActiveOperations().length;
+
+      await page.locator(".proposal-card button", { hasText: "Dismiss" }).click();
+      await waitForNoText(page, "#chat-turns", "duet retry run-a task-a1");
+
+      const afterRun = h.store.getRun("run-a");
+      assert.equal(afterRun.status, beforeRun.status);
+      assert.equal(afterRun.version, beforeRun.version);
+      assert.equal(h.store.isApproved("run-a", "plan"), false);
+      assert.deepEqual(
+        h.store.listTasks("run-a").map((task) => ({
+          id: task.id,
+          status: task.status,
+          version: task.version,
+        })),
+        beforeTasks,
+      );
+      assert.equal(h.store.listActiveOperations().length, beforeOperations);
+      assert.equal(h.store.getProposal("proposal-a").status, "dismissed");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard session can dismiss the same proposal twice without run mutation", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      const result = await page.evaluate(async () => {
+        const first = await fetch(
+          "/api/v1/chat/conversations/conv-a/proposals/proposal-a/dismiss",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "smoke-dismiss-repeat-1",
+            },
+            body: "{}",
+            credentials: "same-origin",
+          },
+        );
+        const second = await fetch(
+          "/api/v1/chat/conversations/conv-a/proposals/proposal-a/dismiss",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "smoke-dismiss-repeat-2",
+            },
+            body: "{}",
+            credentials: "same-origin",
+          },
+        );
+        const mutate = await fetch("/api/v1/runs/run-a/cancel", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "smoke-dismiss-cancel-1",
+          },
+          body: JSON.stringify({ expectedVersion: 1 }),
+          credentials: "same-origin",
+        });
+        return { first: first.status, second: second.status, mutate: mutate.status };
+      });
+      assert.deepEqual(result, { first: 200, second: 200, mutate: 403 });
+      assert.equal(h.store.getProposal("proposal-a").status, "dismissed");
+      assert.equal(
+        h.store
+          .listEvents({})
+          .filter((event) => event.type === "chat.proposal.dismissed").length,
+        1,
+      );
+      assert.equal(h.store.getRun("run-a").version, 2);
     });
   } finally {
     await h.cleanup();

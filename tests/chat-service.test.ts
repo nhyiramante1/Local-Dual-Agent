@@ -5,7 +5,13 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 
-import type { DuetEvent, OperationRecord, ProviderName, RunRecord } from "../src/core/domain.js";
+import type {
+  DuetEvent,
+  OperationRecord,
+  ProviderName,
+  RunRecord,
+  TaskRecord,
+} from "../src/core/domain.js";
 import { DuetError } from "../src/core/errors.js";
 import { Store } from "../src/persistence/store.js";
 import type { AgentTurn, ProviderAdapter } from "../src/providers/adapter.js";
@@ -89,6 +95,101 @@ async function git(cwd: string, args: string[]): Promise<string> {
   const result = await runCommand("git", args, { cwd });
   assert.equal(result.exitCode, 0, result.stderr);
   return result.stdout.trim();
+}
+
+function seedRunWithTask(store: Store, runId = "proposal-run"): void {
+  const stamp = "2026-06-01T00:00:00.000Z";
+  const run: RunRecord = {
+    id: runId,
+    repoPath: "/repo",
+    repoRoot: "/repo",
+    goal: "proposal run",
+    status: "approved",
+    leadProvider: "codex",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: `duet/${runId}/integration`,
+    configJson: "{}",
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
+  const task: TaskRecord = {
+    runId,
+    id: "task-1",
+    ordinal: 0,
+    plan: {
+      id: "task-1",
+      title: "Task",
+      objective: "Do it",
+      acceptanceCriteria: ["done"],
+      allowedPaths: ["src/**"],
+      dependencies: [],
+    },
+    status: "failed",
+    provider: "codex",
+    reviewerProvider: "claude",
+    revisionCount: 0,
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
+  store.createRun(run, [task]);
+}
+
+function proposalReply(
+  action: string,
+  fields: Record<string, unknown> = {},
+): string {
+  return [
+    "I can suggest the next Duet action.",
+    "",
+    "```duet-proposal",
+    JSON.stringify({ action, ...fields }),
+    "```",
+  ].join("\n");
+}
+
+function createStoredProposal(
+  store: Store,
+  conversationId: string,
+  options: {
+    id?: string;
+    action?: "execute_run" | "retry_task" | "approve_plan";
+    taskId?: string;
+    expiresAt?: string;
+    summary?: string;
+  } = {},
+): string {
+  const turn = store.appendConversationTurn({
+    conversationId,
+    role: "manager",
+    interfaceAgent: "codex",
+    content: "I can suggest an action.",
+  });
+  const action = options.action ?? "execute_run";
+  const taskId = options.taskId ?? (action === "retry_task" ? "task-1" : undefined);
+  const id = options.id ?? randomUUID();
+  store.createProposal({
+    id,
+    conversationId,
+    turnId: turn.id,
+    runId: "proposal-run",
+    taskId,
+    action,
+    summary: options.summary ?? "Suggestion only.",
+    commandCli:
+      action === "retry_task"
+        ? "duet retry proposal-run task-1"
+        : action === "approve_plan"
+          ? "duet approve proposal-run --stage plan"
+          : "duet run proposal-run",
+    commandJson: JSON.stringify({ action, runId: "proposal-run", taskId }),
+    tier: action === "approve_plan" ? "fingerprint" : "ordinary",
+    expiresAt:
+      options.expiresAt ?? new Date(Date.now() + 15 * 60_000).toISOString(),
+  });
+  return id;
 }
 
 function bearer(extra: Record<string, string> = {}): Record<string, string> {
@@ -234,6 +335,424 @@ test("same idempotency key with a different body conflicts", async () => {
     );
     const second = await postTurn(h.base, conversationId, "beta", "chatkey-2");
     assert.equal(second.status, 409);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("valid manager proposal creates one server-synthesized proposal", async () => {
+  const h = await startService({
+    text: proposalReply("retry_task", {
+      runId: "proposal-run",
+      taskId: "task-1",
+      rationale: "Retry the failed task.",
+      command: "rm -rf /",
+      commandCli: "rm -rf /",
+      cli: "rm -rf /",
+      tier: "fingerprint",
+      commandJson: { evil: true },
+    }),
+  });
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(
+      h.base,
+      conversationId,
+      "please retry",
+      "chatkey-proposal-valid",
+    );
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const turns = h.store.listConversationTurns(conversationId);
+    const manager = turns.find((turn) => turn.role === "manager");
+    assert.ok(manager);
+    assert.equal(manager.content, "I can suggest the next Duet action.");
+    assert.doesNotMatch(manager.content, /duet-proposal/);
+
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].turnId, manager.id);
+    assert.equal(proposals[0].action, "retry_task");
+    assert.equal(proposals[0].commandCli, "duet retry proposal-run task-1");
+    assert.equal(
+      proposals[0].commandJson,
+      JSON.stringify({
+        action: "retry_task",
+        runId: "proposal-run",
+        taskId: "task-1",
+      }),
+    );
+    assert.equal(proposals[0].tier, "ordinary");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("malformed or invalid proposal output degrades to plain chat without a proposal", async () => {
+  for (const [name, text] of [
+    [
+      "malformed",
+      "I can run it.\n\n```duet-proposal\nnot-json\n```",
+    ],
+    [
+      "unknown-action",
+      proposalReply("create_plan", { runId: "proposal-run" }),
+    ],
+    [
+      "missing-task",
+      proposalReply("retry_task", { runId: "proposal-run" }),
+    ],
+    [
+      "trailing",
+      `${proposalReply("execute_run", { runId: "proposal-run" })}\nextra`,
+    ],
+  ] as const) {
+    const h = await startService({ text });
+    try {
+      seedRunWithTask(h.store);
+      const conversationId = await createConversation(h.base);
+      const response = await postTurn(
+        h.base,
+        conversationId,
+        name,
+        `chatkey-proposal-invalid-${name}`,
+      );
+      assert.equal(response.status, 202);
+      const op = ((await response.json()) as { data: OperationRecord }).data;
+      await h.service.chat.wait(op.id);
+
+      assert.equal(h.store.getOperation(op.id).status, "succeeded");
+      assert.equal(h.store.listProposals(conversationId).length, 0);
+    } finally {
+      await h.cleanup();
+    }
+  }
+});
+
+test("action-like chat can create a proposal without mutating run state", async () => {
+  const h = await startService({
+    text: proposalReply("approve_plan", {
+      runId: "proposal-run",
+      rationale: "Approve the plan if it still looks right.",
+    }),
+  });
+  try {
+    seedRunWithTask(h.store);
+    const before = h.store.getRun("proposal-run");
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(
+      h.base,
+      conversationId,
+      "/approve plan",
+      "chatkey-proposal-approve",
+    );
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const after = h.store.getRun("proposal-run");
+    assert.equal(after.status, before.status);
+    assert.equal(after.version, before.version);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "approve_plan");
+    assert.equal(proposals[0].tier, "fingerprint");
+    assert.equal(
+      proposals[0].commandCli,
+      "duet approve proposal-run --stage plan",
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("idempotency replay does not duplicate proposals or paid turns", async () => {
+  const h = await startService({
+    text: proposalReply("execute_run", { runId: "proposal-run" }),
+  });
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base);
+    const first = await postTurn(
+      h.base,
+      conversationId,
+      "run it",
+      "chatkey-proposal-idempotent",
+    );
+    assert.equal(first.status, 202);
+    const op1 = ((await first.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op1.id);
+
+    const second = await postTurn(
+      h.base,
+      conversationId,
+      "run it",
+      "chatkey-proposal-idempotent",
+    );
+    assert.equal(second.status, 202);
+    const op2 = ((await second.json()) as { data: OperationRecord }).data;
+
+    assert.equal(op2.id, op1.id);
+    assert.equal(h.calls.n, 1);
+    assert.equal(h.store.listProposals(conversationId).length, 1);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal persistence failure rolls back the successful manager turn", async () => {
+  const h = await startService({
+    text: proposalReply("execute_run", { runId: "proposal-run" }),
+  });
+  try {
+    seedRunWithTask(h.store);
+    const createProposal = h.store.createProposal.bind(h.store);
+    h.store.createProposal = (() => {
+      throw new Error("proposal insert failed");
+    }) as typeof h.store.createProposal;
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(
+      h.base,
+      conversationId,
+      "run it",
+      "chatkey-proposal-db-fail",
+    );
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+    h.store.createProposal = createProposal;
+
+    assert.equal(h.store.getOperation(op.id).status, "failed");
+    assert.equal(h.store.listProposals(conversationId).length, 0);
+    const turns = h.store.listConversationTurns(conversationId);
+    assert.equal(turns.filter((turn) => turn.role === "manager").length, 1);
+    assert.equal(turns.find((turn) => turn.role === "manager")?.status, "failed");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("conversation detail returns active proposals with turns and conversation", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId, {
+      action: "retry_task",
+      taskId: "task-1",
+    });
+
+    const detail = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}`,
+      { headers: bearer() },
+    );
+    assert.equal(detail.status, 200);
+    const data = ((await detail.json()) as {
+      data: {
+        conversation: { id: string };
+        turns: Array<{ id: string }>;
+        proposals: Array<{ id: string; commandCli: string }>;
+      };
+    }).data;
+
+    assert.equal(data.conversation.id, conversationId);
+    assert.ok(data.turns.length >= 1);
+    assert.deepEqual(
+      data.proposals.map((proposal) => proposal.id),
+      [proposalId],
+    );
+    assert.equal(data.proposals[0].commandCli, "duet retry proposal-run task-1");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("conversation detail omits expired and dismissed proposals without mutating", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const expiredId = createStoredProposal(h.store, conversationId, {
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const dismissedId = createStoredProposal(h.store, conversationId);
+    h.store.dismissProposal(conversationId, dismissedId);
+    const eventCountBefore = h.store.listEvents({}).length;
+
+    const detail = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}`,
+      { headers: bearer() },
+    );
+    assert.equal(detail.status, 200);
+    const data = ((await detail.json()) as {
+      data: { proposals: Array<{ id: string }> };
+    }).data;
+
+    assert.deepEqual(data.proposals, []);
+    assert.equal(h.store.getProposal(expiredId).status, "proposed");
+    assert.equal(h.store.listEvents({}).length, eventCountBefore);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal dismiss route is idempotent and removes proposal from detail", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId);
+    const route = `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/dismiss`;
+
+    const first = await fetch(route, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "dismiss-proposal-1" },
+      body: "{}",
+    });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as {
+      data: { proposalId: string; status: string };
+    };
+    assert.deepEqual(firstBody.data, { proposalId, status: "dismissed" });
+
+    const second = await fetch(route, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "dismiss-proposal-1" },
+      body: "{}",
+    });
+    assert.equal(second.status, 200);
+    assert.deepEqual(await second.json(), firstBody);
+
+    const detail = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}`,
+      { headers: bearer() },
+    );
+    const data = ((await detail.json()) as {
+      data: { proposals: Array<{ id: string }> };
+    }).data;
+    assert.deepEqual(data.proposals, []);
+    assert.equal(h.store.getProposal(proposalId).status, "dismissed");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal dismiss route rejects idempotency conflicts and ownership mismatch", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const firstConversation = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const secondConversation = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+      title: "other",
+    });
+    const proposalId = createStoredProposal(h.store, firstConversation);
+    const route = `${h.base}/api/v1/chat/conversations/${firstConversation}/proposals/${proposalId}/dismiss`;
+
+    const first = await fetch(route, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "dismiss-conflict-1" },
+      body: "{}",
+    });
+    assert.equal(first.status, 200);
+    const conflict = await fetch(route, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "dismiss-conflict-1" },
+      body: JSON.stringify({ changed: true }),
+    });
+    assert.equal(conflict.status, 409);
+
+    const otherRoute = `${h.base}/api/v1/chat/conversations/${secondConversation}/proposals/${proposalId}/dismiss`;
+    const mismatch = await fetch(otherRoute, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "dismiss-mismatch-1" },
+      body: "{}",
+    });
+    assert.equal(mismatch.status, 404);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard session can dismiss proposals but still cannot mutate runs", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId, {
+      action: "approve_plan",
+    });
+    const beforeRun = h.store.getRun("proposal-run");
+    const beforeTasks = h.store.listTasks("proposal-run").map((task) => ({
+      id: task.id,
+      status: task.status,
+      version: task.version,
+    }));
+    const beforeOperations = h.store.listActiveOperations().length;
+    const cookie = await sessionCookie(h.base);
+
+    const dismiss = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/dismiss`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": "session-dismiss-1",
+        },
+        body: "{}",
+      },
+    );
+    assert.equal(dismiss.status, 200);
+
+    const runMutation = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/cancel`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": "session-run-mutation-1",
+        },
+        body: JSON.stringify({ expectedVersion: beforeRun.version }),
+      },
+    );
+    assert.equal(runMutation.status, 403);
+
+    const afterRun = h.store.getRun("proposal-run");
+    assert.equal(afterRun.status, beforeRun.status);
+    assert.equal(afterRun.version, beforeRun.version);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+    assert.deepEqual(
+      h.store.listTasks("proposal-run").map((task) => ({
+        id: task.id,
+        status: task.status,
+        version: task.version,
+      })),
+      beforeTasks,
+    );
+    assert.equal(h.store.listActiveOperations().length, beforeOperations);
+    assert.equal(h.store.getProposal(proposalId).status, "dismissed");
   } finally {
     await h.cleanup();
   }
@@ -749,11 +1268,16 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /eventRunId/);
   assert.match(dashboardJs, /if \(eventStream\) eventStream\.close\(\)/);
   assert.match(dashboardJs, /connectEvents\(\)/);
+  assert.match(dashboardJs, /renderProposalCard/);
+  assert.match(dashboardJs, /data-proposal-dismiss/);
+  assert.match(dashboardJs, /\/proposals\/"\+encodeURIComponent\(proposalId\)\+"\/dismiss/);
+  assert.match(dashboardJs, /Copy CLI/);
   assert.match(dashboardJs, /return Boolean\(chat\.activeOperation\)/);
   assert.match(dashboardJs, /loadRuns\(\{selectCurrent:true\}\)/);
   assert.doesNotMatch(dashboardJs, /if\(selected\) await selectRun\(selected\)/);
   assert.doesNotMatch(dashboardJs, /setChatEnabled\(true\)/);
   assert.doesNotMatch(dashboardJs, /activeOperationId/);
+  assert.doesNotMatch(dashboardJs, /action-ticket/);
   assert.doesNotMatch(dashboardJs, /\/approve/);
   assert.doesNotMatch(dashboardJs, /\/merge/);
   assert.doesNotMatch(dashboardJs, /\/cancel/);

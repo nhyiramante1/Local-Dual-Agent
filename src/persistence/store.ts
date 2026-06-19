@@ -12,8 +12,12 @@ import type {
   ConversationTurnRecord,
   DuetEvent,
   LeaseRecord,
+  ManagerActionProposal,
   OperationRecord,
   OperationStatus,
+  ProposalAction,
+  ProposalStatus,
+  ProposalTier,
   ProviderName,
   ReviewResult,
   ReviewedArtifact,
@@ -117,6 +121,21 @@ function capWithMeta(
 function opposite(provider: ProviderName): ProviderName {
   return provider === "claude" ? "codex" : "claude";
 }
+
+const VALID_PROPOSAL_ACTIONS = new Set<string>([
+  "execute_run",
+  "resume_run",
+  "retry_task",
+  "resolve_task",
+  "cancel_run",
+  "cancel_task",
+  "cleanup_run",
+  "approve_plan",
+  "approve_merge",
+  "merge_run",
+]);
+
+const VALID_PROPOSAL_TIERS = new Set<string>(["ordinary", "fingerprint"]);
 
 export class Store {
   private readonly db: DatabaseSync;
@@ -416,6 +435,28 @@ export class Store {
 
         CREATE INDEX IF NOT EXISTS idx_conversation_turns_seq
           ON conversation_turns(conversation_id, seq);
+
+        CREATE TABLE IF NOT EXISTS manager_action_proposals (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL
+            REFERENCES conversations(id) ON DELETE CASCADE,
+          turn_id TEXT NOT NULL
+            REFERENCES conversation_turns(id) ON DELETE CASCADE,
+          run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+          task_id TEXT,
+          action TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          command_cli TEXT NOT NULL,
+          command_json TEXT NOT NULL,
+          tier TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'proposed',
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_proposals_conversation_status
+          ON manager_action_proposals(conversation_id, status);
       `);
 
       this.addColumn(
@@ -445,7 +486,7 @@ export class Store {
         "truncated INTEGER NOT NULL DEFAULT 0",
       );
       this.addColumn("conversation_turns", "original_length INTEGER");
-      this.db.exec("PRAGMA user_version = 4");
+      this.db.exec("PRAGMA user_version = 5");
     });
   }
 
@@ -1994,6 +2035,211 @@ export class Store {
       }
     }
     return { costUsd, inputTokens, outputTokens, turns };
+  }
+
+  createProposal(input: {
+    id: string;
+    conversationId: string;
+    turnId: string;
+    runId?: string;
+    taskId?: string;
+    action: ProposalAction;
+    summary: string;
+    commandCli: string;
+    commandJson: string;
+    tier: ProposalTier;
+    expiresAt: string;
+  }): ManagerActionProposal {
+    return this.transaction(() => {
+      if (!VALID_PROPOSAL_ACTIONS.has(input.action)) {
+        throw new DuetError(
+          `Unknown proposal action: ${input.action}`,
+          "INVALID_PROPOSAL",
+        );
+      }
+      if (!VALID_PROPOSAL_TIERS.has(input.tier)) {
+        throw new DuetError(
+          `Unknown proposal tier: ${input.tier}`,
+          "INVALID_PROPOSAL",
+        );
+      }
+      if (isNaN(Date.parse(input.expiresAt))) {
+        throw new DuetError(
+          "Proposal expiresAt must be a valid ISO date.",
+          "INVALID_PROPOSAL",
+        );
+      }
+
+      // Turn must belong to this conversation.
+      const turn = this.getConversationTurn(input.turnId);
+      if (turn.conversationId !== input.conversationId) {
+        throw new DuetError(
+          `Turn ${input.turnId} does not belong to conversation ${input.conversationId}.`,
+          "INVALID_PROPOSAL",
+        );
+      }
+
+      // Proposal run must match the conversation's run (if conversation is run-scoped).
+      if (input.runId) {
+        this.getRun(input.runId);
+        const conversation = this.getConversation(input.conversationId);
+        if (conversation.runId && conversation.runId !== input.runId) {
+          throw new DuetError(
+            `Proposal run ${input.runId} does not match conversation run ${conversation.runId}.`,
+            "INVALID_PROPOSAL",
+          );
+        }
+      }
+
+      if (input.taskId) {
+        if (!input.runId) {
+          throw new DuetError(
+            "Task proposal requires a run.",
+            "INVALID_PROPOSAL",
+          );
+        }
+        const exists = this.listTasks(input.runId).some(
+          (task) => task.id === input.taskId,
+        );
+        if (!exists) {
+          throw new DuetError(`Unknown task: ${input.taskId}`, "TASK_NOT_FOUND");
+        }
+      }
+      const stamp = now();
+      this.db
+        .prepare(`
+          INSERT INTO manager_action_proposals (
+            id, conversation_id, turn_id, run_id, task_id, action,
+            summary, command_cli, command_json, tier, status,
+            expires_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)
+        `)
+        .run(
+          input.id,
+          input.conversationId,
+          input.turnId,
+          input.runId ?? null,
+          input.taskId ?? null,
+          input.action,
+          capText(input.summary, 2_000),
+          capText(input.commandCli, 1_000),
+          capText(input.commandJson, 4_000),
+          input.tier,
+          input.expiresAt,
+          stamp,
+          stamp,
+        );
+      this.appendEvent({
+        type: "chat.proposal.created",
+        runId: input.runId,
+        payload: {
+          proposalId: input.id,
+          action: input.action,
+          status: "proposed",
+        },
+      });
+      return this.getProposal(input.id);
+    });
+  }
+
+  getProposal(id: string): ManagerActionProposal {
+    const row = this.db
+      .prepare("SELECT * FROM manager_action_proposals WHERE id = ?")
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new DuetError(`Unknown proposal: ${id}`, "PROPOSAL_NOT_FOUND");
+    }
+    return this.mapProposal(row);
+  }
+
+  // Read-only: filters out expired/dismissed without mutating.
+  listProposals(conversationId: string): ManagerActionProposal[] {
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM manager_action_proposals
+        WHERE conversation_id = ? AND status = 'proposed' AND expires_at > ?
+        ORDER BY created_at
+      `)
+      .all(conversationId, now()) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapProposal(row));
+  }
+
+  dismissProposal(conversationId: string, proposalId: string): void {
+    this.transaction(() => {
+      const proposal = this.getProposal(proposalId);
+      if (proposal.conversationId !== conversationId) {
+        throw new DuetError(
+          `Proposal ${proposalId} is not in conversation ${conversationId}.`,
+          "PROPOSAL_NOT_FOUND",
+        );
+      }
+      if (proposal.status === "dismissed") return;
+      this.db
+        .prepare(`
+          UPDATE manager_action_proposals
+          SET status = 'dismissed', updated_at = ? WHERE id = ?
+        `)
+        .run(now(), proposalId);
+      this.appendEvent({
+        type: "chat.proposal.dismissed",
+        runId: proposal.runId,
+        payload: { proposalId, action: proposal.action, status: "dismissed" },
+      });
+    });
+  }
+
+  // Explicit write path (never on read): mark proposals past their expiry.
+  expireProposals(): number {
+    return this.transaction(() => {
+      const stamp = now();
+      const rows = this.db
+        .prepare(`
+          SELECT id, run_id, action FROM manager_action_proposals
+          WHERE status = 'proposed' AND expires_at <= ?
+        `)
+        .all(stamp) as unknown as Array<{
+        id: string;
+        run_id: string | null;
+        action: string;
+      }>;
+      for (const row of rows) {
+        this.db
+          .prepare(`
+            UPDATE manager_action_proposals
+            SET status = 'expired', updated_at = ? WHERE id = ?
+          `)
+          .run(stamp, row.id);
+        this.appendEvent({
+          type: "chat.proposal.expired",
+          runId: row.run_id ?? undefined,
+          payload: {
+            proposalId: row.id,
+            action: row.action,
+            status: "expired",
+          },
+        });
+      }
+      return rows.length;
+    });
+  }
+
+  private mapProposal(row: Record<string, unknown>): ManagerActionProposal {
+    return {
+      id: String(row.id),
+      conversationId: String(row.conversation_id),
+      turnId: String(row.turn_id),
+      runId: row.run_id ? String(row.run_id) : undefined,
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      action: row.action as ProposalAction,
+      summary: String(row.summary),
+      commandCli: String(row.command_cli),
+      commandJson: String(row.command_json),
+      tier: row.tier as ProposalTier,
+      status: row.status as ProposalStatus,
+      expiresAt: String(row.expires_at),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   private mapConversation(row: Record<string, unknown>): ConversationRecord {

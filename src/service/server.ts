@@ -326,6 +326,7 @@ export class DuetService {
                   "RUN_NOT_FOUND",
                   "CONVERSATION_NOT_FOUND",
                   "OPERATION_NOT_FOUND",
+                  "PROPOSAL_NOT_FOUND",
                 ].includes(error.code)
               ? 404
               : 400;
@@ -392,6 +393,34 @@ export class DuetService {
       }
       throw new DuetError("Not found.", "NOT_FOUND");
     }
+    const proposalDismissMatch =
+      /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/dismiss$/.exec(
+        route,
+      );
+    if (proposalDismissMatch) {
+      if (request.method !== "POST") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const conversationId = decodeURIComponent(proposalDismissMatch[1]);
+      const proposalId = decodeURIComponent(proposalDismissMatch[2]);
+      const bodyText = await readBody(request);
+      await this.mutate(
+        request,
+        response,
+        requestId,
+        route,
+        bodyText,
+        () => {
+          this.options.store.getConversation(conversationId);
+          this.options.store.dismissProposal(conversationId, proposalId);
+          return {
+            status: 200,
+            data: { proposalId, status: "dismissed" },
+          };
+        },
+      );
+      return;
+    }
     const chatMatch = /^\/chat\/conversations\/([^/]+)(\/turns)?$/.exec(route);
     if (chatMatch) {
       const conversationId = decodeURIComponent(chatMatch[1]);
@@ -407,6 +436,7 @@ export class DuetService {
             turns: this.options.store.listConversationTurns(conversationId, {
               limit: 200,
             }),
+            proposals: this.options.store.listProposals(conversationId),
           }),
         );
         return;

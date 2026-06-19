@@ -1,4 +1,5 @@
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 
 import type {
   AgentResult,
@@ -18,6 +19,7 @@ import {
   type ChatContextBuilder,
   type ChatContextOptions,
 } from "./context.js";
+import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
 
 /**
  * Per-provider manager-chat budgets. Claude is metered in USD; Codex has no
@@ -152,14 +154,46 @@ export class ChatEngine {
         assertFingerprintUnchanged(before, after);
       }
     }
-    return this.store.appendConversationTurn({
-      conversationId,
-      role: "manager",
-      interfaceAgent: provider,
-      content: result.finalText,
-      providerSessionId: result.sessionId,
-      usageJson: JSON.stringify(result.usage),
-      operationId,
+    // Parse any proposal block from the reply. Strip it from visible content.
+    const parseResult = parseProposalBlock(result.finalText);
+    const contentToStore =
+      parseResult.kind === "parsed"
+        ? parseResult.strippedText
+        : result.finalText;
+    const synthesized =
+      parseResult.kind === "parsed"
+        ? tryValidateAndSynthesize(parseResult.raw, conversation, this.store)
+        : null;
+
+    // Persist turn + optional proposal atomically.
+    // If a valid proposal fails to persist (DB error), the whole transaction
+    // rolls back so the turn is not silently stored without its proposal.
+    return this.store.transaction(() => {
+      const turn = this.store.appendConversationTurn({
+        conversationId,
+        role: "manager",
+        interfaceAgent: provider,
+        content: contentToStore,
+        providerSessionId: result.sessionId,
+        usageJson: JSON.stringify(result.usage),
+        operationId,
+      });
+      if (synthesized) {
+        this.store.createProposal({
+          id: randomUUID(),
+          conversationId,
+          turnId: turn.id,
+          runId: synthesized.runId,
+          taskId: synthesized.taskId,
+          action: synthesized.action,
+          summary: synthesized.summary,
+          commandCli: synthesized.commandCli,
+          commandJson: synthesized.commandJson,
+          tier: synthesized.tier,
+          expiresAt: synthesized.expiresAt,
+        });
+      }
+      return turn;
     });
   }
 

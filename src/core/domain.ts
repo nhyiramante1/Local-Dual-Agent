@@ -186,6 +186,38 @@ export interface ConversationTurnRecord {
   createdAt: string;
 }
 
+export type ProposalAction =
+  | "execute_run"
+  | "resume_run"
+  | "retry_task"
+  | "resolve_task"
+  | "cancel_run"
+  | "cancel_task"
+  | "cleanup_run"
+  | "approve_plan"
+  | "approve_merge"
+  | "merge_run";
+
+export type ProposalTier = "ordinary" | "fingerprint";
+export type ProposalStatus = "proposed" | "dismissed" | "expired";
+
+export interface ManagerActionProposal {
+  id: string;
+  conversationId: string;
+  turnId: string;
+  runId?: string;
+  taskId?: string;
+  action: ProposalAction;
+  summary: string;
+  commandCli: string;
+  commandJson: string;
+  tier: ProposalTier;
+  status: ProposalStatus;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DuetEvent {
   seq: number;
   id: string;
