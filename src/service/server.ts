@@ -6,9 +6,18 @@ import path from "node:path";
 import { ActivityManager, type LongRunningCommand } from "../application/activities.js";
 import { ApplicationCommands } from "../application/commands.js";
 import { approvalBinding } from "../application/integrity.js";
+import { ChatActivityManager } from "../chat/activity.js";
+import {
+  ChatEngine,
+  defaultManagerBudget,
+  type ChatProviders,
+  type ManagerBudget,
+} from "../chat/engine.js";
 import { defaultConfig, validateConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
+import { ClaudeAdapter } from "../providers/claude.js";
+import { CodexAdapter } from "../providers/codex.js";
 import {
   dashboardCss,
   dashboardHtml,
@@ -24,6 +33,8 @@ interface ServerOptions {
   instanceId: string;
   idleTimeoutMs?: number;
   onStop?: () => void;
+  chatProviders?: ChatProviders;
+  managerBudget?: ManagerBudget;
 }
 
 interface JsonBody {
@@ -95,6 +106,7 @@ function parseCookies(value: string | undefined): Record<string, string> {
 export class DuetService {
   readonly app: ApplicationCommands;
   readonly activities: ActivityManager;
+  readonly chat: ChatActivityManager;
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
   });
@@ -109,6 +121,20 @@ export class DuetService {
   constructor(private readonly options: ServerOptions) {
     this.app = new ApplicationCommands(options.store);
     this.activities = new ActivityManager(this.app, options.instanceId);
+    const chatProviders: ChatProviders = options.chatProviders ?? {
+      claude: new ClaudeAdapter(),
+      codex: new CodexAdapter(),
+    };
+    this.chat = new ChatActivityManager(
+      options.store,
+      new ChatEngine(
+        options.store,
+        chatProviders,
+        options.managerBudget ?? defaultManagerBudget,
+      ),
+      options.instanceId,
+    );
+    // Marks interrupted operations (run + manager_turn) from prior instances.
     this.activities.recoverInterrupted();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 15 * 60_000;
   }
@@ -137,6 +163,7 @@ export class DuetService {
     if (
       this.activeStreams === 0 &&
       !this.activities.hasActiveOperations() &&
+      !this.chat.hasActiveOperations() &&
       Date.now() - this.lastRequestAt >= this.idleTimeoutMs
     ) {
       this.options.onStop?.();
@@ -249,14 +276,22 @@ export class DuetService {
         this.send(response, 401, apiFailure(requestId, new DuetError("Unauthorized.", "UNAUTHORIZED")));
         return;
       }
-      if (credential === "session" && request.method !== "GET") {
+      // Sessions are read-only for runs. The only session-allowed mutation is
+      // the chat-only paid-read surface (/api/v1/chat/*), which cannot reach a
+      // run mutation; everything else stays bearer-only.
+      const chatRoute = url.pathname.startsWith("/api/v1/chat/");
+      if (
+        credential === "session" &&
+        request.method !== "GET" &&
+        !chatRoute
+      ) {
         this.send(
           response,
           403,
           apiFailure(
             requestId,
             new DuetError(
-              "Dashboard sessions are read-only.",
+              "Dashboard sessions are read-only for runs.",
               "READ_ONLY_SESSION",
             ),
           ),
@@ -271,7 +306,13 @@ export class DuetService {
       });
       const status =
         error instanceof DuetError &&
-        ["VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT", "RUN_ACTIVITY_ACTIVE"].includes(error.code)
+        [
+          "VERSION_CONFLICT",
+          "IDEMPOTENCY_CONFLICT",
+          "RUN_ACTIVITY_ACTIVE",
+          "CHAT_TURN_ACTIVE",
+          "CHAT_PROVIDER_ACTIVE",
+        ].includes(error.code)
           ? 409
           : error instanceof DuetError &&
               ["UNAUTHORIZED", "INVALID_TICKET"].includes(error.code)
@@ -279,7 +320,13 @@ export class DuetService {
             : error instanceof DuetError &&
                 error.code === "READ_ONLY_SESSION"
               ? 403
-            : error instanceof DuetError && error.code === "NOT_FOUND"
+            : error instanceof DuetError &&
+                [
+                  "NOT_FOUND",
+                  "RUN_NOT_FOUND",
+                  "CONVERSATION_NOT_FOUND",
+                  "OPERATION_NOT_FOUND",
+                ].includes(error.code)
               ? 404
               : 400;
       this.send(response, status, apiFailure(requestId, error));
@@ -293,6 +340,107 @@ export class DuetService {
     requestId: string,
   ): Promise<void> {
     const route = url.pathname.slice("/api/v1".length);
+    if (route === "/chat/conversations") {
+      if (request.method === "GET") {
+        const runId = url.searchParams.get("runId") ?? undefined;
+        this.send(
+          response,
+          200,
+          apiSuccess(requestId, this.options.store.listConversations(runId)),
+        );
+        return;
+      }
+      if (request.method === "POST") {
+        const bodyText = await readBody(request);
+        const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
+        const interfaceAgent =
+          body.interfaceAgent === undefined || body.interfaceAgent === "codex"
+            ? "codex"
+            : body.interfaceAgent === "claude"
+              ? "claude"
+              : undefined;
+        if (!interfaceAgent) {
+          throw new DuetError(
+            "interfaceAgent must be 'claude' or 'codex'.",
+            "INVALID_ARGUMENT",
+          );
+        }
+        const runId =
+          typeof body.runId === "string" && body.runId.trim().length > 0
+            ? body.runId.trim()
+            : undefined;
+        await this.mutate(request, response, requestId, route, bodyText, () => {
+          if (runId) {
+            // Validate the run link before creating chat state so callers get
+            // a clean 404 instead of a foreign-key failure.
+            this.options.store.getRun(runId);
+          }
+          return {
+            status: 201,
+            data: this.options.store.createConversation({
+              id: randomUUID(),
+              runId,
+              interfaceAgent,
+              title:
+                typeof body.title === "string"
+                  ? body.title.slice(0, 200)
+                  : undefined,
+            }),
+          };
+        });
+        return;
+      }
+      throw new DuetError("Not found.", "NOT_FOUND");
+    }
+    const chatMatch = /^\/chat\/conversations\/([^/]+)(\/turns)?$/.exec(route);
+    if (chatMatch) {
+      const conversationId = decodeURIComponent(chatMatch[1]);
+      if (!chatMatch[2]) {
+        if (request.method !== "GET") {
+          throw new DuetError("Not found.", "NOT_FOUND");
+        }
+        this.send(
+          response,
+          200,
+          apiSuccess(requestId, {
+            conversation: this.options.store.getConversation(conversationId),
+            turns: this.options.store.listConversationTurns(conversationId, {
+              limit: 200,
+            }),
+          }),
+        );
+        return;
+      }
+      if (request.method !== "POST") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const bodyText = await readBody(request);
+      const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
+      if (typeof body.message !== "string") {
+        throw new DuetError(
+          "A chat message of 1 to 20,000 characters is required.",
+          "INVALID_ARGUMENT",
+        );
+      }
+      const message = body.message.trim();
+      if (!message || message.length > 20_000) {
+        throw new DuetError(
+          "A chat message of 1 to 20,000 characters is required.",
+          "INVALID_ARGUMENT",
+        );
+      }
+      // 404s if the conversation does not exist, before any paid work.
+      this.options.store.getConversation(conversationId);
+      await this.mutate(request, response, requestId, route, bodyText, () => ({
+        status: 202,
+        data: this.chat.submitTurn({
+          conversationId,
+          userMessage: message,
+          inputHash: hash(bodyText),
+        }),
+      }));
+      return;
+    }
     if (request.method === "GET" && route === "/health") {
       this.send(response, 200, apiSuccess(requestId, {
         status: "ok",
@@ -327,14 +475,19 @@ export class DuetService {
         throw new DuetError("Active operations prevent graceful shutdown.", "SERVICE_BUSY");
       }
       if (active.length > 0) {
+        const chatCancelled = this.chat.cancelActive();
         for (const runId of new Set(
-          active.map((operation) => operation.runId).filter(Boolean),
+          active
+            .filter((operation) => operation.kind !== "manager_turn")
+            .map((operation) => operation.runId)
+            .filter(Boolean),
         )) {
           await this.app.cancel(runId!);
         }
         this.send(response, 202, apiSuccess(requestId, {
           stopping: false,
           cancellationRequested: true,
+          chatCancellationRequested: chatCancelled,
         }));
         return;
       }

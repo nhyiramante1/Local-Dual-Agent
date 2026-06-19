@@ -153,6 +153,39 @@ export interface OperationRecord {
   createdAt: string;
 }
 
+export type ConversationStatus = "active" | "archived";
+
+export interface ConversationRecord {
+  id: string;
+  runId?: string;
+  interfaceAgent: ProviderName;
+  title?: string;
+  summary?: string;
+  status: ConversationStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TurnRole = "user" | "manager" | "system";
+export type TurnStatus = "ok" | "failed";
+
+export interface ConversationTurnRecord {
+  id: string;
+  conversationId: string;
+  seq: number;
+  role: TurnRole;
+  interfaceAgent?: ProviderName;
+  content: string;
+  status: TurnStatus;
+  errorJson?: string;
+  providerSessionId?: string;
+  usageJson?: string;
+  operationId?: string;
+  truncated: boolean;
+  originalLength?: number;
+  createdAt: string;
+}
+
 export interface DuetEvent {
   seq: number;
   id: string;

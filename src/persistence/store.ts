@@ -7,6 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AgentResult,
   ArtifactRecord,
+  ConversationRecord,
+  ConversationStatus,
+  ConversationTurnRecord,
   DuetEvent,
   LeaseRecord,
   OperationRecord,
@@ -19,6 +22,8 @@ import type {
   RunStatus,
   TaskRecord,
   TaskStatus,
+  TurnRole,
+  TurnStatus,
   UsageSummary,
   VerificationResult,
 } from "../core/domain.js";
@@ -91,6 +96,22 @@ export interface AttemptRecord {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function capText(value: string, max: number): string {
+  return value.length <= max ? value : value.slice(0, max);
+}
+
+function capWithMeta(
+  value: string,
+  max: number,
+): { text: string; truncated: boolean; originalLength: number } {
+  const truncated = value.length > max;
+  return {
+    text: truncated ? value.slice(0, max) : value,
+    truncated,
+    originalLength: value.length,
+  };
 }
 
 function opposite(provider: ProviderName): ProviderName {
@@ -363,6 +384,38 @@ export class Store {
           ON operations(run_id, status);
         CREATE INDEX IF NOT EXISTS idx_action_tickets_expiry
           ON action_tickets(expires_at);
+
+        CREATE TABLE IF NOT EXISTS conversations (
+          id TEXT PRIMARY KEY,
+          run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+          interface_agent TEXT NOT NULL DEFAULT 'codex',
+          title TEXT,
+          summary TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_turns (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL
+            REFERENCES conversations(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          role TEXT NOT NULL,
+          interface_agent TEXT,
+          content TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'ok',
+          error_json TEXT,
+          provider_session_id TEXT,
+          usage_json TEXT,
+          operation_id TEXT,
+          truncated INTEGER NOT NULL DEFAULT 0,
+          original_length INTEGER,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_conversation_turns_seq
+          ON conversation_turns(conversation_id, seq);
       `);
 
       this.addColumn(
@@ -387,7 +440,12 @@ export class Store {
       this.addColumn("tasks", "version INTEGER NOT NULL DEFAULT 1");
       this.addColumn("approvals", "binding_hash TEXT");
       this.addColumn("approvals", "actor TEXT NOT NULL DEFAULT 'local-human'");
-      this.db.exec("PRAGMA user_version = 3");
+      this.addColumn(
+        "conversation_turns",
+        "truncated INTEGER NOT NULL DEFAULT 0",
+      );
+      this.addColumn("conversation_turns", "original_length INTEGER");
+      this.db.exec("PRAGMA user_version = 4");
     });
   }
 
@@ -1561,6 +1619,16 @@ export class Store {
     return rows.map((row) => this.mapOperation(row));
   }
 
+  countActiveManagerTurns(): number {
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS count FROM operations
+        WHERE kind = 'manager_turn' AND status IN ('queued', 'running')
+      `)
+      .get() as { count: number };
+    return row.count;
+  }
+
   updateOperation(
     id: string,
     fields: Partial<{
@@ -1642,6 +1710,331 @@ export class Store {
       }
       return rows.length;
     });
+  }
+
+  createConversation(input: {
+    id: string;
+    runId?: string;
+    interfaceAgent: ProviderName;
+    title?: string;
+  }): ConversationRecord {
+    return this.transaction(() => {
+      const stamp = now();
+      this.db
+        .prepare(`
+          INSERT INTO conversations (
+            id, run_id, interface_agent, title, summary, status,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, NULL, 'active', ?, ?)
+        `)
+        .run(
+          input.id,
+          input.runId ?? null,
+          input.interfaceAgent,
+          input.title ?? null,
+          stamp,
+          stamp,
+        );
+      this.appendEvent({
+        type: "chat.conversation.created",
+        runId: input.runId,
+        payload: {
+          conversationId: input.id,
+          interfaceAgent: input.interfaceAgent,
+        },
+      });
+      return this.getConversation(input.id);
+    });
+  }
+
+  getConversation(id: string): ConversationRecord {
+    const row = this.db
+      .prepare("SELECT * FROM conversations WHERE id = ?")
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new DuetError(
+        `Unknown conversation: ${id}`,
+        "CONVERSATION_NOT_FOUND",
+      );
+    }
+    return this.mapConversation(row);
+  }
+
+  listConversations(runId?: string, limit = 50): ConversationRecord[] {
+    const capped = Math.min(Math.max(limit, 1), 200);
+    const rows = (
+      runId
+        ? this.db
+            .prepare(`
+              SELECT * FROM conversations WHERE run_id = ?
+              ORDER BY updated_at DESC LIMIT ?
+            `)
+            .all(runId, capped)
+        : this.db
+            .prepare(`
+              SELECT * FROM conversations
+              ORDER BY updated_at DESC LIMIT ?
+            `)
+            .all(capped)
+    ) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapConversation(row));
+  }
+
+  updateConversation(
+    id: string,
+    fields: Partial<{
+      interfaceAgent: ProviderName;
+      summary: string;
+      title: string;
+      status: ConversationStatus;
+    }>,
+  ): void {
+    this.transaction(() => {
+      const entries: Array<[string, string | null]> = [];
+      if (fields.interfaceAgent !== undefined) {
+        entries.push(["interface_agent", fields.interfaceAgent]);
+      }
+      if (fields.summary !== undefined) {
+        entries.push(["summary", capText(fields.summary, 20_000)]);
+      }
+      if (fields.title !== undefined) entries.push(["title", fields.title]);
+      if (fields.status !== undefined) entries.push(["status", fields.status]);
+      if (entries.length === 0) return;
+      entries.push(["updated_at", now()]);
+      this.update("conversations", "id", id, entries);
+    });
+  }
+
+  appendConversationTurn(input: {
+    conversationId: string;
+    role: TurnRole;
+    content: string;
+    interfaceAgent?: ProviderName;
+    status?: TurnStatus;
+    errorJson?: string;
+    providerSessionId?: string;
+    usageJson?: string;
+    operationId?: string;
+  }): ConversationTurnRecord {
+    return this.transaction(() => {
+      const conversation = this.getConversation(input.conversationId);
+      const id = randomUUID();
+      const status = input.status ?? "ok";
+      const capped = capWithMeta(
+        input.content,
+        input.role === "manager" ? 100_000 : 20_000,
+      );
+      const errorJson = input.errorJson
+        ? capText(input.errorJson, 8_000)
+        : null;
+      const seqRow = this.db
+        .prepare(
+          `SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+             FROM conversation_turns WHERE conversation_id = ?`,
+        )
+        .get(input.conversationId) as { seq: number };
+      const stamp = now();
+      this.db
+        .prepare(`
+          INSERT INTO conversation_turns (
+            id, conversation_id, seq, role, interface_agent, content,
+            status, error_json, provider_session_id, usage_json,
+            operation_id, truncated, original_length, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          id,
+          input.conversationId,
+          seqRow.seq,
+          input.role,
+          input.interfaceAgent ?? null,
+          capped.text,
+          status,
+          errorJson,
+          input.providerSessionId ?? null,
+          input.usageJson ?? null,
+          input.operationId ?? null,
+          capped.truncated ? 1 : 0,
+          capped.truncated ? capped.originalLength : null,
+          stamp,
+        );
+      this.db
+        .prepare("UPDATE conversations SET updated_at = ? WHERE id = ?")
+        .run(stamp, input.conversationId);
+      const eventType =
+        input.role === "user"
+          ? "chat.turn.created"
+          : input.role === "manager"
+            ? status === "failed"
+              ? "chat.turn.failed"
+              : "chat.turn.completed"
+            : "chat.turn.system";
+      this.appendEvent({
+        type: eventType,
+        runId: conversation.runId,
+        operationId: input.operationId,
+        severity: status === "failed" ? "error" : "info",
+        payload: {
+          conversationId: input.conversationId,
+          turnId: id,
+          role: input.role,
+          status,
+          truncated: capped.truncated,
+          snippet: capText(capped.text, 120),
+        },
+      });
+      return this.getConversationTurn(id);
+    });
+  }
+
+  getConversationTurn(id: string): ConversationTurnRecord {
+    const row = this.db
+      .prepare("SELECT * FROM conversation_turns WHERE id = ?")
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new DuetError(
+        `Unknown conversation turn: ${id}`,
+        "CONVERSATION_TURN_NOT_FOUND",
+      );
+    }
+    return this.mapConversationTurn(row);
+  }
+
+  listConversationTurns(
+    conversationId: string,
+    options: { afterSeq?: number; limit?: number } = {},
+  ): ConversationTurnRecord[] {
+    const limit = Math.min(Math.max(options.limit ?? 200, 1), 1_000);
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM conversation_turns
+        WHERE conversation_id = ? AND seq > ?
+        ORDER BY seq LIMIT ?
+      `)
+      .all(
+        conversationId,
+        options.afterSeq ?? 0,
+        limit,
+      ) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapConversationTurn(row));
+  }
+
+  listRecentConversationTurns(
+    conversationId: string,
+    limit: number,
+  ): ConversationTurnRecord[] {
+    const boundedLimit = Math.min(Math.max(limit, 1), 1_000);
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM conversation_turns
+        WHERE conversation_id = ?
+        ORDER BY seq DESC LIMIT ?
+      `)
+      .all(conversationId, boundedLimit) as unknown as Array<
+      Record<string, unknown>
+    >;
+    return rows
+      .map((row) => this.mapConversationTurn(row))
+      .reverse();
+  }
+
+  countManagerTurns(sinceIso?: string): number {
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS count FROM conversation_turns
+        WHERE role = 'manager' AND (? IS NULL OR created_at >= ?)
+      `)
+      .get(sinceIso ?? null, sinceIso ?? null) as { count: number };
+    return row.count;
+  }
+
+  sumManagerUsage(
+    provider: ProviderName,
+    sinceIso?: string,
+  ): {
+    costUsd: number;
+    inputTokens: number;
+    outputTokens: number;
+    turns: number;
+  } {
+    const rows = this.db
+      .prepare(`
+        SELECT usage_json FROM conversation_turns
+        WHERE role = 'manager' AND interface_agent = ?
+          AND usage_json IS NOT NULL
+          AND (? IS NULL OR created_at >= ?)
+      `)
+      .all(provider, sinceIso ?? null, sinceIso ?? null) as Array<{
+      usage_json: string;
+    }>;
+    let costUsd = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let turns = 0;
+    for (const row of rows) {
+      try {
+        const usage = JSON.parse(row.usage_json) as {
+          costUsd?: number;
+          costKnown?: boolean;
+          inputTokens?: number;
+          outputTokens?: number;
+        };
+        turns += 1;
+        if (usage.costKnown && typeof usage.costUsd === "number") {
+          costUsd += usage.costUsd;
+        }
+        if (typeof usage.inputTokens === "number") {
+          inputTokens += usage.inputTokens;
+        }
+        if (typeof usage.outputTokens === "number") {
+          outputTokens += usage.outputTokens;
+        }
+      } catch {
+        // Ignore malformed usage rows.
+      }
+    }
+    return { costUsd, inputTokens, outputTokens, turns };
+  }
+
+  private mapConversation(row: Record<string, unknown>): ConversationRecord {
+    return {
+      id: String(row.id),
+      runId: row.run_id ? String(row.run_id) : undefined,
+      interfaceAgent: row.interface_agent as ProviderName,
+      title: row.title ? String(row.title) : undefined,
+      summary: row.summary ? String(row.summary) : undefined,
+      status: row.status as ConversationStatus,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private mapConversationTurn(
+    row: Record<string, unknown>,
+  ): ConversationTurnRecord {
+    return {
+      id: String(row.id),
+      conversationId: String(row.conversation_id),
+      seq: Number(row.seq),
+      role: row.role as TurnRole,
+      interfaceAgent: row.interface_agent
+        ? (row.interface_agent as ProviderName)
+        : undefined,
+      content: String(row.content),
+      status: row.status as TurnStatus,
+      errorJson: row.error_json ? String(row.error_json) : undefined,
+      providerSessionId: row.provider_session_id
+        ? String(row.provider_session_id)
+        : undefined,
+      usageJson: row.usage_json ? String(row.usage_json) : undefined,
+      operationId: row.operation_id ? String(row.operation_id) : undefined,
+      truncated: Number(row.truncated) === 1,
+      originalLength:
+        row.original_length === null || row.original_length === undefined
+          ? undefined
+          : Number(row.original_length),
+      createdAt: String(row.created_at),
+    };
   }
 
   listEvents(options: {
