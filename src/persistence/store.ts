@@ -2188,6 +2188,52 @@ export class Store {
     });
   }
 
+  markProposalStarted(
+    conversationId: string,
+    proposalId: string,
+    operationId: string,
+  ): ManagerActionProposal {
+    return this.transaction(() => {
+      const proposal = this.getProposal(proposalId);
+      if (proposal.conversationId !== conversationId) {
+        throw new DuetError(
+          `Proposal ${proposalId} is not in conversation ${conversationId}.`,
+          "PROPOSAL_NOT_FOUND",
+        );
+      }
+      if (proposal.status !== "proposed") {
+        throw new DuetError(
+          `Proposal ${proposalId} is no longer active.`,
+          "PROPOSAL_ALREADY_STARTED",
+        );
+      }
+      if (Date.parse(proposal.expiresAt) <= Date.now()) {
+        throw new DuetError(
+          `Proposal ${proposalId} is expired.`,
+          "PROPOSAL_NOT_ACTIVE",
+        );
+      }
+      this.db
+        .prepare(`
+          UPDATE manager_action_proposals
+          SET status = 'started', updated_at = ? WHERE id = ?
+        `)
+        .run(now(), proposalId);
+      this.appendEvent({
+        type: "chat.proposal.started",
+        runId: proposal.runId,
+        operationId,
+        payload: {
+          proposalId,
+          action: proposal.action,
+          status: "started",
+          operationId,
+        },
+      });
+      return this.getProposal(proposalId);
+    });
+  }
+
   // Explicit write path (never on read): mark proposals past their expiry.
   expireProposals(): number {
     return this.transaction(() => {

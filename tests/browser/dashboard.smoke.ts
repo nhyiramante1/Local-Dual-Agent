@@ -535,6 +535,15 @@ test("proposal readiness renders available ordinary and fingerprint requirements
       await ordinary.locator("button", { hasText: "Check readiness" }).click();
       await waitForText(page, '[data-proposal-id="proposal-a"]', "Ready to copy");
       await waitForText(page, '[data-proposal-id="proposal-a"]', "The CLI will re-check run and task state");
+      const startInput = page.locator('[data-proposal-id="proposal-a"] [data-proposal-start-input]');
+      const startButton = page.locator('[data-proposal-id="proposal-a"] [data-proposal-start]');
+      await assertEventually(async () => {
+        assert.equal(await startButton.isDisabled(), true);
+      });
+      await startInput.fill("almost");
+      assert.equal(await startButton.isDisabled(), true);
+      await startInput.fill("start");
+      assert.equal(await startButton.isEnabled(), true);
 
       const fingerprint = page
         .locator(".proposal-card")
@@ -542,6 +551,10 @@ test("proposal readiness renders available ordinary and fingerprint requirements
       await fingerprint.locator("button", { hasText: "Check readiness" }).click();
       await waitForText(page, '[data-proposal-id="proposal-fingerprint"]', "Duet will print a fingerprint");
       await waitForText(page, '[data-proposal-id="proposal-fingerprint"]', "Fingerprint-gated actions remain CLI-only");
+      assert.equal(
+        await page.locator('[data-proposal-id="proposal-fingerprint"] [data-proposal-start]').count(),
+        0,
+      );
 
       assert.equal(h.store.getRun("run-a").version, beforeRun.version);
       assert.equal(
@@ -551,6 +564,41 @@ test("proposal readiness renders available ordinary and fingerprint requirements
         0,
       );
       assert.equal(h.store.listEvents({}).length, beforeEvents);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("starting an ordinary proposal polls the operation and removes the card", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      const errors = trackConsole(page);
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await page
+        .locator('[data-proposal-id="proposal-a"] button', {
+          hasText: "Check readiness",
+        })
+        .click();
+      const startInput = page.locator('[data-proposal-id="proposal-a"] [data-proposal-start-input]');
+      const startButton = page.locator('[data-proposal-id="proposal-a"] [data-proposal-start]');
+      await startInput.fill("start");
+      await startButton.click();
+      await waitForText(page, "#chat-status", /Duet operation (running|failed|succeeded)/);
+      await assertEventually(async () => {
+        assert.equal(h.store.getProposal("proposal-a").status, "started");
+      });
+      await waitForNoText(page, "#chat-turns", "duet retry run-a task-a1");
+      assert.equal(
+        h.store
+          .listEvents({})
+          .filter((event) => event.type.startsWith("action_ticket.")).length,
+        0,
+      );
+      assert.ok(h.store.listActiveOperations("run-a").length <= 1);
+      assert.deepEqual(errors, []);
     });
   } finally {
     await h.cleanup();

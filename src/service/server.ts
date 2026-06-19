@@ -13,7 +13,10 @@ import {
   type ChatProviders,
   type ManagerBudget,
 } from "../chat/engine.js";
-import { prepareProposalAction } from "../chat/proposals.js";
+import {
+  prepareProposalAction,
+  startProposalAction,
+} from "../chat/proposals.js";
 import { defaultConfig, validateConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
@@ -313,6 +316,7 @@ export class DuetService {
           "RUN_ACTIVITY_ACTIVE",
           "CHAT_TURN_ACTIVE",
           "CHAT_PROVIDER_ACTIVE",
+          "PROPOSAL_ALREADY_STARTED",
         ].includes(error.code)
           ? 409
           : error instanceof DuetError &&
@@ -416,6 +420,38 @@ export class DuetService {
           ),
         ),
       );
+      return;
+    }
+    const proposalStartMatch =
+      /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/start$/.exec(
+        route,
+      );
+    if (proposalStartMatch) {
+      if (request.method !== "POST") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const conversationId = decodeURIComponent(proposalStartMatch[1]);
+      const proposalId = decodeURIComponent(proposalStartMatch[2]);
+      const bodyText = await readBody(request);
+      const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
+      await this.mutate(request, response, requestId, route, bodyText, () => {
+        const { command } = startProposalAction(
+          this.options.store,
+          conversationId,
+          proposalId,
+          body,
+        );
+        const operation = this.activities.submit(command);
+        this.options.store.markProposalStarted(
+          conversationId,
+          proposalId,
+          operation.id,
+        );
+        return {
+          status: 202,
+          data: operation,
+        };
+      });
       return;
     }
     const proposalDismissMatch =
