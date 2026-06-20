@@ -4,12 +4,16 @@ export const dashboardHtml = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Duet</title>
+  <script>(function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();</script>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
   <header>
     <div class="brand"><span class="dot"></span><h1>Duet</h1><span class="sub">local orchestrator</span></div>
-    <span id="health" class="pill">connecting...</span>
+    <div class="header-right">
+      <button id="theme-toggle" type="button" class="theme-btn" title="Toggle light / dark mode">&#9728;</button>
+      <span id="health" class="pill">connecting...</span>
+    </div>
   </header>
   <main>
     <aside><h2>Runs</h2><div id="runs"></div></aside>
@@ -19,20 +23,23 @@ export const dashboardHtml = `<!doctype html>
       <div id="chat" class="chat card">
         <div class="chat-head">
           <div>
-            <div class="chat-title"><b>Read-only manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
+            <div class="chat-title"><b>Manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
             <p class="muted">Ask about your runs, or select one for run-scoped context. Approve, run, cancel, resolve, cleanup, and merge still happen in the CLI.</p>
             <p class="faint chat-quota">Manager chat may consume provider quota.</p>
           </div>
           <div class="chat-agents" role="group" aria-label="Manager voice">
             <button id="chat-codex" type="button" data-agent="codex">Codex</button>
             <button id="chat-claude" type="button" data-agent="claude">Claude</button>
+            <button id="chat-openai" type="button" data-agent="openai">OpenAI</button>
           </div>
         </div>
         <div id="chat-status" class="muted" role="status" aria-live="polite">Ask a question. Select a run for run-scoped context.</div>
         <div id="chat-turns" class="chat-turns" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
-          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="Ask the Manager. Enter sends, Shift+Enter for a newline." disabled></textarea>
-          <button id="chat-send" type="submit" disabled>Send</button>
+          <textarea id="chat-input" rows="1" maxlength="20000" placeholder="Ask the Manager&#x2026; (Enter sends, Shift+Enter for newline)" disabled></textarea>
+          <button id="chat-send" type="submit" disabled aria-label="Send">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
         </form>
       </div>
       <h2>Tasks</h2><div id="tasks"></div>
@@ -49,103 +56,148 @@ export const dashboardHtml = `<!doctype html>
 </html>`;
 
 export const dashboardCss = `
+/* ── tokens: dark (default) ── */
 :root{
   --bg:#0b0d10;--surface:#13171d;--surface-2:#171c23;--line:#262d38;--line-2:#313a47;
   --text:#e7ecf2;--muted:#9aa6b6;--faint:#6b7686;
   --accent:#5b8cff;--ok:#5fd38a;--warn:#f0b657;--bad:#ff7b72;
+  --ok-bg:#13251b;--ok-bd:#2f5f43;--ok-c:#0b1f13;
+  --warn-bg:#241d11;--warn-bd:#5f4d28;
+  --bad-bg:#251515;--bad-bd:#5f3232;--bad-c:#23100e;
+  --acc-bg:#172033;--acc-bd:#304364;
+  --run-c:#9cc2ff;--run-bd:#2c4a78;--run-bg:#142031;
+  --mgd-c:#a99cff;--mgd-bd:#41397a;--mgd-bg:#171430;
+  --ev-info-bd:#3a4d6b;
   color-scheme:dark;
 }
+/* ── tokens: light ── */
+[data-theme="light"]{
+  --bg:#f4f6f9;--surface:#ffffff;--surface-2:#eef0f4;--line:#dde1e8;--line-2:#c4c9d4;
+  --text:#1c2028;--muted:#4e5a6b;--faint:#8390a0;
+  --accent:#3b72e8;--ok:#17864a;--warn:#a0660a;--bad:#c9291e;
+  --ok-bg:#edf7f2;--ok-bd:#80c8a0;--ok-c:#ffffff;
+  --warn-bg:#fdf5e6;--warn-bd:#d4a060;
+  --bad-bg:#fdf0ef;--bad-bd:#e09090;--bad-c:#ffffff;
+  --acc-bg:#eef3fd;--acc-bd:#a0b8f0;
+  --run-c:#1a4db8;--run-bd:#a0c0f0;--run-bg:#e8f0fc;
+  --mgd-c:#5040a0;--mgd-bd:#b0a8e0;--mgd-bg:#f0eeff;
+  --ev-info-bd:#6090c8;
+  color-scheme:light;
+}
+/* ── reset ── */
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;transition:background .18s,color .18s}
 h1{font-size:18px;font-weight:600;margin:0;letter-spacing:.2px}
 h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--faint);margin:0 0 10px}
+/* ── layout ── */
 header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--surface)}
 .brand{display:flex;align-items:center;gap:10px}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex-shrink:0}
 .sub{color:var(--faint);font-size:12px}
+.header-right{display:flex;align-items:center;gap:10px}
+.theme-btn{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;margin:0;border-radius:50%;border:1px solid var(--line-2);background:var(--surface-2);color:var(--muted);cursor:pointer;font-size:15px;transition:background .12s,border-color .12s,color .12s}
+.theme-btn:hover{background:var(--line);color:var(--text);border-color:var(--line-2)}
 main{display:grid;grid-template-columns:300px 1fr;min-height:calc(100vh - 56px)}
 aside{padding:18px;border-right:1px solid var(--line);background:var(--surface)}
 section{padding:22px 26px;overflow:auto}
 section>h2{margin-top:24px}section>h2:first-child{margin-top:0}
 #summary{margin-bottom:4px}
 #summary h2{font-size:16px;text-transform:none;letter-spacing:0;color:var(--text);margin-bottom:10px}
+/* ── shared components ── */
 .pill{font-size:12px;font-weight:500;padding:4px 11px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
-.pill.ok{color:var(--ok);border-color:#2f5f43;background:#13251b}
-.pill.bad{color:var(--bad);border-color:#5f3232;background:#251515}
+.pill.ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
+.pill.bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}
 button{display:block;width:100%;text-align:left;border:1px solid var(--line);background:var(--surface-2);color:inherit;padding:10px 12px;margin:0 0 8px;border-radius:9px;cursor:pointer;transition:background .12s,border-color .12s}
-button:hover:not(:disabled){background:#1d242d;border-color:var(--line-2)}
+button:hover:not(:disabled){background:var(--line);border-color:var(--line-2)}
 button:disabled{cursor:not-allowed;opacity:.55}
-button.sel{border-color:var(--accent);background:#172033}
+button.sel{border-color:var(--accent);background:var(--acc-bg)}
 button b{font-weight:600}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 8px;background:var(--surface)}
 .muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.faint{color:var(--faint)}
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .kv{color:var(--muted);font-size:13px}.kv b{color:var(--text);font-weight:500}
 .badge{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.3px;padding:2px 8px;border-radius:6px;border:1px solid var(--line-2);color:var(--muted)}
-.badge.s-running{color:#9cc2ff;border-color:#2c4a78;background:#142031}
-.badge.s-approved{color:#7fd6a6;border-color:#2f5f43;background:#13251b}
-.badge.s-awaiting{color:#f0c879;border-color:#5f4d28;background:#241d11}
-.badge.s-merged{color:#a99cff;border-color:#41397a;background:#171430}
-.badge.s-ok{color:#7fd6a6;border-color:#2f5f43;background:#13251b}
-.badge.s-failed{color:#ff9a93;border-color:#5f3232;background:#251515}
-.badge.s-cancelled{color:#9aa6b6;border-color:#3a4350;background:#181d24}
-.badge.s-conflict{color:#ffb37a;border-color:#5f4328;background:#241a11}
+.badge.s-running{color:var(--run-c);border-color:var(--run-bd);background:var(--run-bg)}
+.badge.s-approved{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
+.badge.s-awaiting{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
+.badge.s-merged{color:var(--mgd-c);border-color:var(--mgd-bd);background:var(--mgd-bg)}
+.badge.s-ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
+.badge.s-failed{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}
+.badge.s-cancelled{color:var(--muted);border-color:var(--line-2);background:var(--surface-2)}
+.badge.s-conflict{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
 .ev{display:flex;gap:10px;align-items:baseline;padding:7px 11px;margin:0 0 5px;border-left:2px solid var(--line-2);border-radius:0 6px 6px 0;background:var(--surface)}
 .ev time{color:var(--faint);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
 .ev .ty{font-weight:500}
-.ev-info{border-left-color:#3a4d6b}
-.ev-warning{border-left-color:var(--warn);background:#1f1a12}
-.ev-error{border-left-color:var(--bad);background:#1f1414}
+.ev-info{border-left-color:var(--ev-info-bd)}
+.ev-warning{border-left-color:var(--warn);background:var(--warn-bg)}
+.ev-error{border-left-color:var(--bad);background:var(--bad-bg)}
 .vr{display:flex;align-items:center;gap:9px;padding:9px 12px;margin:0 0 6px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
 .vr .tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px}
-.vr.pass .tag{color:#0b1f13;background:var(--ok)}
-.vr.fail .tag{color:#23100e;background:var(--bad)}
-pre{white-space:pre-wrap;background:#0e1217;border:1px solid var(--line);padding:14px;border-radius:10px;max-height:440px;overflow:auto;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.vr.pass .tag{color:var(--ok-c);background:var(--ok)}
+.vr.fail .tag{color:var(--bad-c);background:var(--bad)}
+pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line);padding:14px;border-radius:10px;max-height:440px;overflow:auto;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
 .empty{color:var(--faint);font-size:13px;font-style:italic}
-.chat{display:grid;gap:12px}
+/* ── chat container ── */
+.chat{display:grid;gap:14px}
 .chat-title{display:flex;align-items:center;gap:8px}
 .chat-quota{font-size:12px}
 .conn{font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--faint)}
-.conn-ok{color:var(--ok);border-color:#2f5f43;background:#13251b}
-.conn-bad{color:var(--warn);border-color:#5f4d28;background:#241d11}
-.chat-turn .meta time,.chat-turn .meta .when{color:var(--faint);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
-.chat-turn .note{color:var(--faint);font-size:12px;margin-bottom:4px}
+.conn-ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
+.conn-bad{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
 .chat-head p{margin:3px 0 0}
-.chat-agents{display:flex;gap:7px;flex:0 0 auto}
-.chat-agents button{width:auto;margin:0;padding:7px 12px;text-align:center}
-.chat-agents button.active{border-color:var(--accent);background:#172033;color:#bcd0ff}
-.chat-turns{display:grid;gap:8px;max-height:360px;overflow:auto;padding-right:4px}
-.chat-turn{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#0f1319}
-.chat-turn.user{border-color:#304364;background:#111a28}
-.chat-turn.manager{border-color:#2c4939;background:#101b15}
-.chat-turn.failed{border-color:#5f3232;background:#211414}
-.chat-turn .meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:var(--faint);font-size:12px}
+/* ── provider segmented toggle ── */
+.chat-agents{display:inline-flex;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px;flex-shrink:0}
+.chat-agents button{width:auto;margin:0;padding:4px 13px;border-radius:999px;border:1px solid transparent;background:transparent;font-size:12px;font-weight:500;color:var(--muted);text-align:center;transition:background .12s,color .12s,border-color .12s}
+.chat-agents button:hover:not(:disabled){background:var(--line);color:var(--text);border-color:transparent}
+.chat-agents button.active{background:var(--accent);color:#fff;border-color:transparent}
+/* ── bubble turn list ── */
+.chat-turns{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:auto;padding:4px 2px}
+.chat-turn{border:1px solid var(--line);border-radius:14px;padding:10px 13px;background:var(--surface-2);max-width:88%}
+.chat-turn.user{border-color:var(--acc-bd);background:var(--acc-bg);border-radius:14px 14px 4px 14px;align-self:flex-end}
+.chat-turn.manager{display:flex;gap:10px;border-color:var(--ok-bd);background:var(--ok-bg);border-radius:14px 14px 14px 4px;align-self:flex-start;max-width:94%}
+.chat-turn.failed{border-color:var(--bad-bd);background:var(--bad-bg);border-radius:14px}
+.manager-avatar{width:26px;height:26px;border-radius:50%;background:var(--accent);opacity:.65;flex-shrink:0;margin-top:2px}
+.turn-content{flex:1;min-width:0}
+.chat-turn .meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:var(--faint);font-size:12px;flex-wrap:wrap}
+.chat-turn .meta time,.chat-turn .meta .when{color:var(--faint);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+.chat-turn .note{color:var(--faint);font-size:12px;margin-bottom:4px}
 .chat-turn .body{white-space:pre-wrap;overflow-wrap:anywhere}
-.proposal-card{margin-top:10px;border:1px solid #3b4a64;border-radius:9px;padding:10px;background:#111827}
-.proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+/* ── proposal card (elevated, accent left border) ── */
+.proposal-card{margin-top:10px;border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:10px 12px;background:var(--surface)}
+.proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
 .proposal-card .proposal-copy{margin:7px 0;color:var(--muted);font-size:12px}
-.proposal-card code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0f15;border:1px solid var(--line);border-radius:7px;padding:8px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.proposal-card code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 .proposal-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
-.proposal-actions button{width:auto;margin:0;padding:7px 10px;text-align:center}
+.proposal-actions button{width:auto;margin:0;padding:6px 10px;text-align:center;font-size:12px}
 .proposal-readiness{margin-top:9px;border-top:1px solid var(--line);padding-top:8px;font-size:12px}
 .proposal-readiness ul{margin:6px 0 0 18px;padding:0}
 .proposal-readiness li{margin:2px 0}
 .proposal-confirm{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:8px}
-.proposal-confirm input{color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:7px;padding:7px 9px;font:inherit}
+.proposal-confirm input{color:var(--text);background:var(--surface-2);border:1px solid var(--line-2);border-radius:7px;padding:7px 9px;font:inherit}
 .proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
-.proposal-history{margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+/* ── proposal history ── */
+.proposal-history{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
 .proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none}
 .proposal-history summary::-webkit-details-marker{display:none}
 .proposal-history-item{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
 .proposal-history-item:last-child{border-bottom:none}
 .proposal-history-item .phi-action{font-weight:600}
 .proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-.chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
-.chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
-.chat-form textarea:focus{outline:none;border-color:var(--accent)}
-.chat-form button{margin:0;text-align:center}
-@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-form{grid-template-columns:1fr}}
+.phi-op.ok{color:var(--ok)}
+.phi-op.bad{color:var(--bad)}
+/* ── pill chat input ── */
+.chat-form{display:flex;align-items:flex-end;gap:8px;background:var(--surface-2);border:1px solid var(--line-2);border-radius:24px;padding:6px 6px 6px 14px;transition:border-color .15s}
+.chat-form:focus-within{border-color:var(--accent)}
+.chat-form textarea{flex:1;resize:none;min-height:24px;max-height:160px;overflow-y:auto;border:none;background:transparent;color:var(--text);padding:4px 0;font:inherit;line-height:1.5;outline:none}
+.chat-form textarea::placeholder{color:var(--faint)}
+#chat-send{width:34px;height:34px;border-radius:50%;background:var(--accent);border:none;color:#fff;display:flex;align-items:center;justify-content:center;margin:0;flex-shrink:0;padding:0;cursor:pointer;transition:opacity .12s}
+#chat-send:disabled{opacity:.4;cursor:not-allowed}
+#chat-send:not(:disabled):hover{opacity:.82}
+#chat-send svg{pointer-events:none}
+/* ── responsive ── */
+@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-agents{flex-wrap:wrap;border-radius:12px}}
 `;
 
 export const dashboardJs = `
@@ -316,6 +368,8 @@ async function refreshConversation(conversationId) {
 function renderChatShell() {
   q("chat-codex").classList.toggle("active", chat.agent === "codex");
   q("chat-claude").classList.toggle("active", chat.agent === "claude");
+  const openaiBtn = q("chat-openai");
+  if (openaiBtn) openaiBtn.classList.toggle("active", chat.agent === "openai");
   setChatEnabled(!chatIsBusyForCurrentView());
 }
 function setChatStatus(message, bad=false) {
@@ -363,7 +417,12 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     const when = turn.createdAt ? new Date(turn.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
-    return '<div class="chat-turn '+esc(turn.role)+(failed ? " failed" : "")+'"><div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>'+note+'<div class="body">'+body+'</div>'+cards+'</div>';
+    const meta = '<div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
+    const inner = meta+note+'<div class="body">'+body+'</div>'+cards;
+    if (turn.role === "manager") {
+      return '<div class="chat-turn manager'+(failed?" failed":"")+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
+    }
+    return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
   }).join("");
   q("chat-turns").innerHTML = turnsHtml + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
@@ -377,7 +436,7 @@ function renderProposalHistory(proposals) {
   if (!inactive.length) return '';
   const items = inactive.map(p => {
     const opLink = p.operationId
-      ? ' <span class="phi-op" data-phi-operation="'+esc(p.operationId)+'">→ op '+esc(p.operationId.slice(0,8))+'</span>'
+      ? ' <span class="phi-op" data-phi-operation="'+esc(p.operationId)+'">\\u2192 op '+esc(p.operationId.slice(0,8))+'</span>'
       : '';
     const when = p.createdAt ? new Date(p.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="phi-op">'+esc(when.toLocaleTimeString())+'</span>' : '';
@@ -399,7 +458,7 @@ async function enrichHistoryOutcomes() {
     try {
       const op = await api("/operations/"+encodeURIComponent(opId));
       if (!["queued","running"].includes(op.status)) {
-        span.textContent = "→ op "+opId.slice(0,8)+" "+op.status;
+        span.textContent = "\\u2192 op "+opId.slice(0,8)+" "+op.status;
         span.className = (op.status === "succeeded") ? "phi-op ok"
           : (op.status === "failed" || op.status === "cancelled" || op.status === "interrupted") ? "phi-op bad"
           : "phi-op";
@@ -413,7 +472,7 @@ function renderProposalCard(proposal) {
     ? '<div class="proposal-copy bad">This suggestion still requires CLI fingerprint confirmation before it can take effect.</div>'
     : "";
   return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'+
-    '<div class="proposal-title"><b>Suggested Duet action</b>'+badge(actionLabel(proposal.action))+badge(proposal.tier || "ordinary")+'<span class="kv">'+esc(target)+'</span></div>'+
+    '<div class="proposal-title">Suggested action&nbsp;'+badge(actionLabel(proposal.action))+badge(proposal.tier || "ordinary")+'<span class="kv">'+esc(target)+'</span></div>'+
     '<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'+
     '<div class="proposal-copy">Run this in your terminal if you choose to proceed.</div>'+
     fingerprint+
@@ -573,6 +632,7 @@ q("chat-form").addEventListener("submit", async (event) => {
   const text = q("chat-input").value.trim();
   if (!text || !selected || chatIsBusyForCurrentView()) return;
   q("chat-input").value = "";
+  q("chat-input").style.height = "auto";
   setChatEnabled(false);
   setChatStatus("Sending...");
   try {
@@ -589,6 +649,10 @@ q("chat-input").addEventListener("keydown", (event) => {
     else q("chat-form").dispatchEvent(new Event("submit", { cancelable: true }));
   }
 });
+q("chat-input").addEventListener("input", function() {
+  this.style.height = "auto";
+  this.style.height = Math.min(this.scrollHeight, 160) + "px";
+});
 q("chat-codex").onclick = async () => {
   chat.agent = "codex";
   await loadChat().catch(error => setChatStatus(error.message, true));
@@ -596,6 +660,23 @@ q("chat-codex").onclick = async () => {
 q("chat-claude").onclick = async () => {
   chat.agent = "claude";
   await loadChat().catch(error => setChatStatus(error.message, true));
+};
+q("chat-openai").onclick = async () => {
+  chat.agent = "openai";
+  await loadChat().catch(error => setChatStatus(error.message, true));
+};
+/* ── theme toggle ── */
+(function() {
+  const saved = localStorage.getItem("duet-theme") || "dark";
+  document.documentElement.setAttribute("data-theme", saved);
+  const btn = q("theme-toggle");
+  if (btn) btn.innerHTML = saved === "light" ? "&#9790;" : "&#9728;";
+})();
+q("theme-toggle").onclick = () => {
+  const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("duet-theme", next);
+  q("theme-toggle").innerHTML = next === "light" ? "&#9790;" : "&#9728;";
 };
 async function connectEvents() {
   const targetRunId = selected || "";
