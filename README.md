@@ -31,8 +31,9 @@ considered, but Windows is the main development target right now.
 Manager chat is being added now. The dashboard can run read-only manager
 conversations with summarized run, task, usage, event, verification, and
 message context. It can also show suggested Duet CLI action cards that you can
-copy or dismiss. Cards do not execute anything; approval, execution, retry,
-cancel, cleanup, conflict resolution, and merge controls still stay in the CLI.
+check, copy, or dismiss. Cards do not execute anything; approval, execution,
+retry, cancel, cleanup, conflict resolution, and merge controls still stay in
+the CLI.
 
 ## What It Does Not Do Yet
 
@@ -358,8 +359,9 @@ The dashboard currently focuses on inspection:
 - approval state
 
 The manager-chat panel is read-only. It can explain what is happening in a run
-and may show suggested Duet CLI action cards. You can copy a suggested command
-or dismiss the card, but the dashboard does not run it for you.
+and may show suggested Duet CLI action cards. You can check whether a suggestion
+still looks current, copy the command, or dismiss the card, but the dashboard
+does not run it for you.
 
 Manager chat may use provider quota when you send a message. Treat it like a
 real Claude/Codex turn, even though it cannot approve, run, cancel, or merge

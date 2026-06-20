@@ -128,6 +128,9 @@ pre{white-space:pre-wrap;background:#0e1217;border:1px solid var(--line);padding
 .proposal-card code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0f15;border:1px solid var(--line);border-radius:7px;padding:8px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
 .proposal-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
 .proposal-actions button{width:auto;margin:0;padding:7px 10px;text-align:center}
+.proposal-readiness{margin-top:9px;border-top:1px solid var(--line);padding-top:8px;font-size:12px}
+.proposal-readiness ul{margin:6px 0 0 18px;padding:0}
+.proposal-readiness li{margin:2px 0}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -371,8 +374,20 @@ function renderProposalCard(proposal) {
     '<div class="proposal-copy">Run this in your terminal if you choose to proceed.</div>'+
     fingerprint+
     '<code>'+visibleText(proposal.commandCli, 1000)+'</code>'+
-    '<div class="proposal-actions"><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'+
+    '<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'+
+    '<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'+
   '</div>';
+}
+function renderReadiness(prepared) {
+  const state = prepared.available ? '<span class="ok">Ready to copy</span>' : '<span class="bad">Not ready</span>';
+  const run = prepared.run ? '<div class="kv">run <b>'+esc(prepared.run.id)+'</b> '+badge(prepared.run.status)+' version '+esc(prepared.run.version)+'</div>' : "";
+  const task = prepared.task ? '<div class="kv">task <b>'+esc(prepared.task.id)+'</b> '+badge(prepared.task.status)+' version '+esc(prepared.task.version)+'</div>' : "";
+  const blocked = prepared.blockedReason ? '<div class="bad">'+visibleText(prepared.blockedReason, 500)+'</div>' : "";
+  const requirements = (prepared.requirements || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
+  const warnings = (prepared.warnings || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
+  return '<div><b>'+state+'</b></div>'+run+task+blocked+
+    (requirements ? '<div class="proposal-copy">Requirements</div><ul>'+requirements+'</ul>' : "")+
+    (warnings ? '<div class="proposal-copy">Warnings</div><ul>'+warnings+'</ul>' : "");
 }
 async function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -400,12 +415,23 @@ async function dismissProposal(proposalId) {
   setChatStatus("Suggestion dismissed.");
   await refreshConversation(conversation.id);
 }
+async function prepareProposal(proposalId) {
+  const conversation = currentConversation();
+  if (!conversation) return;
+  const prepared = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/prepare");
+  const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
+  if (panel) panel.innerHTML = renderReadiness(prepared);
+  setChatStatus(prepared.available ? "Suggestion checked. Copy the CLI command if you choose to proceed." : "Suggestion checked, but it is not currently ready.");
+}
 q("chat-turns").addEventListener("click", async (event) => {
+  const prepare = event.target.closest("[data-proposal-prepare]");
   const copy = event.target.closest("[data-proposal-copy]");
   const dismiss = event.target.closest("[data-proposal-dismiss]");
-  if (!copy && !dismiss) return;
+  if (!prepare && !copy && !dismiss) return;
   try {
-    if (copy) {
+    if (prepare) {
+      await prepareProposal(prepare.dataset.proposalPrepare);
+    } else if (copy) {
       const card = copy.closest(".proposal-card");
       const command = card?.dataset.command || "";
       await copyText(command);
