@@ -1905,3 +1905,56 @@ test("chat event payloads carry snippets only, not full bodies or full errors", 
     await failed.cleanup();
   }
 });
+
+test("global conversation accepts turns and is discoverable without a runId filter", async () => {
+  const h = await startService();
+  try {
+    // Create a global (unscoped) conversation.
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+    const conversation = h.store.getConversation(conversationId);
+    assert.equal(conversation.runId, undefined);
+
+    // POST a turn to the global conversation.
+    const turnResponse = await postTurn(h.base, conversationId, "what can you do?", "global-turn-key-1");
+    assert.equal(turnResponse.status, 202);
+
+    // GET /chat/conversations without runId filter returns the global conversation.
+    const listResponse = await fetch(`${h.base}/api/v1/chat/conversations`, { headers: bearer() });
+    assert.equal(listResponse.status, 200);
+    const listed = ((await listResponse.json()) as { data: Array<{ id: string; runId?: string }> }).data;
+    assert.ok(listed.some((item) => item.id === conversationId && !item.runId));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("global conversation can generate proposals pointing to a specific run", async () => {
+  const h = await startService({
+    text: proposalReply("execute_run", { runId: "proposal-run" }),
+  });
+  try {
+    seedRunWithTask(h.store);
+    // Global conversation has no runId — the proposal's runId is validated against the store.
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+
+    const turnResponse = await postTurn(h.base, conversationId, "suggest an action", "global-proposal-turn-1");
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    // Wait for the operation to complete.
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const opState = h.store.listActiveOperations();
+      if (!opState.some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "execute_run");
+    assert.equal(proposals[0].runId, "proposal-run");
+  } finally {
+    await h.cleanup();
+  }
+});

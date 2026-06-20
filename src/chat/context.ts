@@ -3,6 +3,7 @@ import type {
   ConversationTurnRecord,
   DuetEvent,
   ProviderName,
+  RunRecord,
   TaskRecord,
   UsageSummary,
 } from "../core/domain.js";
@@ -167,6 +168,10 @@ function formatBudget(budget: ManagerBudget): string {
     `codex_max_input_tokens_per_day: ${budget.codexMaxInputTokensPerDay}`,
     `codex_max_output_tokens_per_day: ${budget.codexMaxOutputTokensPerDay}`,
   ].join("\n");
+}
+
+function formatRunSummary(run: RunRecord): string {
+  return `run ${run.id} goal=${truncateText(run.goal, 200).text} status=${run.status} lead=${run.leadProvider}`;
 }
 
 function formatEvent(event: DuetEvent): string {
@@ -389,6 +394,14 @@ export function buildManagerChatContext(
     metadata.omitted.push("Usage And Limits");
     metadata.omitted.push("Recent Events");
     metadata.omitted.push("Verification And Messages");
+    const runs = store.listRuns().slice(0, 10);
+    addSection(
+      "Available Runs",
+      runs.length ? runs.map(formatRunSummary).join("\n") : "none",
+      options.runSectionCap,
+      sections,
+      metadata,
+    );
   }
 
   let prompt = sections.join("\n\n");

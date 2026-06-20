@@ -314,6 +314,45 @@ test("field-level truncation is reflected in context metadata", async () => {
   });
 });
 
+test("global context includes Available Runs section listing recent runs by id and status", async () => {
+  await withStore((store, directory) => {
+    const stamp = new Date().toISOString();
+    const makeRun = (id: string, goal: string, status: string): RunRecord => ({
+      id,
+      repoPath: directory,
+      repoRoot: directory,
+      goal,
+      status: status as RunRecord["status"],
+      leadProvider: "codex",
+      baseBranch: "main",
+      baseCommit: "abc",
+      integrationBranch: `duet/${id}/integration`,
+      configJson: "{}",
+      cancellationRequested: false,
+      createdAt: stamp,
+      updatedAt: stamp,
+    });
+    store.createRun(makeRun("run-alpha", "Implement alpha feature", "running"), []);
+    store.createRun(makeRun("run-beta", "Fix beta bug", "completed"), []);
+
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "codex",
+      title: "global chat",
+    });
+
+    const context = buildManagerChatContext(store, conversation, defaultManagerBudget);
+
+    assert.ok(context.sections.includes("Available Runs"), "Available Runs section should be present");
+    assert.match(context.prompt, /run-alpha/);
+    assert.match(context.prompt, /run-beta/);
+    assert.match(context.prompt, /Implement alpha feature/);
+    assert.match(context.prompt, /Fix beta bug/);
+    assert.ok(context.metadata.omitted.includes("Run And Tasks"), "Run And Tasks should be omitted");
+    assert.ok(!context.sections.includes("Run And Tasks"), "Run And Tasks section absent");
+  });
+});
+
 test("ChatEngine sends the bounded context prompt to the provider", async () => {
   await withStore(async (store) => {
     const conversation = store.createConversation({
