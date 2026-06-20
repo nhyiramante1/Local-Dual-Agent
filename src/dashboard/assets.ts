@@ -20,7 +20,7 @@ export const dashboardHtml = `<!doctype html>
         <div class="chat-head">
           <div>
             <div class="chat-title"><b>Read-only manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
-            <p class="muted">Ask about the selected run. Approve, run, cancel, resolve, cleanup, and merge still happen in the CLI.</p>
+            <p class="muted">Ask about your runs, or select one for run-scoped context. Approve, run, cancel, resolve, cleanup, and merge still happen in the CLI.</p>
             <p class="faint chat-quota">Manager chat may consume provider quota.</p>
           </div>
           <div class="chat-agents" role="group" aria-label="Manager voice">
@@ -28,10 +28,10 @@ export const dashboardHtml = `<!doctype html>
             <button id="chat-claude" type="button" data-agent="claude">Claude</button>
           </div>
         </div>
-        <div id="chat-status" class="muted" role="status" aria-live="polite">Select a run to start chatting.</div>
+        <div id="chat-status" class="muted" role="status" aria-live="polite">Ask a question. Select a run for run-scoped context.</div>
         <div id="chat-turns" class="chat-turns" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
-          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="Ask the Manager about this run. Enter sends, Shift+Enter for a newline." disabled></textarea>
+          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="Ask the Manager. Enter sends, Shift+Enter for a newline." disabled></textarea>
           <button id="chat-send" type="submit" disabled>Send</button>
         </form>
       </div>
@@ -231,14 +231,13 @@ async function selectRun(id) {
   connectEvents();
 }
 function conversationKey(runId, agent) {
-  return runId + ":" + agent;
+  return (runId || "global") + ":" + agent;
 }
 function currentConversation() {
   if (!selected) return null;
   return chat.conversations.get(conversationKey(selected, chat.agent)) || null;
 }
 function rememberConversation(conversation) {
-  if (!conversation.runId) return;
   const key = conversationKey(conversation.runId, conversation.interfaceAgent);
   const existing = chat.conversations.get(key);
   const updatedAt = String(conversation.updatedAt || "");
@@ -253,9 +252,8 @@ function rememberConversation(conversation) {
 }
 function isCurrentConversation(conversation) {
   return Boolean(
-    selected &&
-      conversation.runId === selected &&
-      conversation.interfaceAgent === chat.agent
+    conversation.interfaceAgent === chat.agent &&
+    (selected ? conversation.runId === selected : !conversation.runId)
   );
 }
 function chatIsBusyForCurrentView() {
@@ -264,14 +262,16 @@ function chatIsBusyForCurrentView() {
 async function loadChat() {
   clearTimeout(chat.polling);
   renderChatShell();
-  if (!selected) return;
-  const conversations = await api("/chat/conversations?runId="+encodeURIComponent(selected));
+  const params = selected ? "?runId="+encodeURIComponent(selected) : "";
+  const conversations = await api("/chat/conversations"+params);
   for (const item of conversations) {
+    if (!selected && item.runId) continue;
     rememberConversation(item);
   }
   const conversation = currentConversation();
   if (!conversation) {
-    q("chat-turns").innerHTML='<span class="empty">No '+esc(chat.agent)+' manager conversation for this run yet. Send a message to create one.</span>';
+    const scope = selected ? esc(chat.agent)+" manager" : "global";
+    q("chat-turns").innerHTML='<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>';
     setChatStatus("Ready. Manager voice: "+chat.agent+".");
     setChatEnabled(!chatIsBusyForCurrentView());
     return;
@@ -281,14 +281,15 @@ async function loadChat() {
 async function ensureConversation() {
   const existing = currentConversation();
   if (existing) return existing;
+  const body = {
+    interfaceAgent: chat.agent,
+    title: selected ? "Dashboard manager chat" : "Global manager chat",
+  };
+  if (selected) body.runId = selected;
   const created = await api("/chat/conversations", {
     method: "POST",
     idempotencyKey: requestKey("dashboard-chat-conversation"),
-    body: {
-      runId: selected,
-      interfaceAgent: chat.agent,
-      title: "Dashboard manager chat"
-    }
+    body,
   });
   rememberConversation(created);
   return created;
@@ -308,11 +309,7 @@ async function refreshConversation(conversationId) {
 function renderChatShell() {
   q("chat-codex").classList.toggle("active", chat.agent === "codex");
   q("chat-claude").classList.toggle("active", chat.agent === "claude");
-  setChatEnabled(Boolean(selected) && !chatIsBusyForCurrentView());
-  if (!selected) {
-    setChatStatus("Select a run to start chatting.");
-    q("chat-turns").innerHTML="";
-  }
+  setChatEnabled(!chatIsBusyForCurrentView());
 }
 function setChatStatus(message, bad=false) {
   q("chat-status").className = bad ? "bad" : "muted";
@@ -594,6 +591,6 @@ async function connectEvents() {
 }
 await authenticate();
 renderChatShell();
-try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected)connectEvents()}
+try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
 catch(error){q("health").textContent=error.message;q("health").className="pill bad"}
 `;
