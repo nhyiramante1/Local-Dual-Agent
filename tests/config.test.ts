@@ -106,6 +106,58 @@ profile = "turbo-mode"
   );
 });
 
+test("loadConfig returns codex as default manager provider when [manager] is absent", async () => {
+  await withToml("", async (tomlPath) => {
+    const config = await loadConfig(tomlPath);
+    assert.equal(config.manager.provider, "codex");
+  });
+});
+
+test("loadConfig reads manager provider = openai from TOML", async () => {
+  await withToml(
+    `
+[manager]
+provider = "openai"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.provider, "openai");
+    },
+  );
+});
+
+test("loadConfig falls back to codex for unrecognised manager provider", async () => {
+  await withToml(
+    `
+[manager]
+provider = "gpt-wizard"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.provider, "codex");
+    },
+  );
+});
+
+test("loadConfig reads openai_model and openai budget fields", async () => {
+  await withToml(
+    `
+[manager]
+provider = "openai"
+openai_model = "gpt-4o"
+openai_max_usd_per_turn = 0.20
+openai_max_usd_per_day = 5.0
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.openaiModel, "gpt-4o");
+      const budget = resolveManagerBudget(config);
+      assert.equal(budget.openaiMaxUsdPerTurn, 0.20);
+      assert.equal(budget.openaiMaxUsdPerDay, 5.0);
+    },
+  );
+});
+
 test("loadConfig rejects [manager] values below minimum", async () => {
   await withToml(
     `

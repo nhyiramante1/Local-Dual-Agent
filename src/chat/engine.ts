@@ -6,6 +6,7 @@ import type {
   ConversationRecord,
   ConversationTurnRecord,
   ManagerBudget,
+  ManagerProviderName,
   ProviderName,
 } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
@@ -30,9 +31,13 @@ export const defaultManagerBudget: ManagerBudget = {
   codexMaxOutputTokensPerDay: 100_000,
   codexMaxRuntimeSeconds: 120,
   maxTurnsPerDay: 200,
+  openaiMaxUsdPerTurn: 0.1,
+  openaiMaxUsdPerDay: 2,
 };
 
-export type ChatProviders = Record<ProviderName, ProviderAdapter>;
+export type ChatProviders = Record<ProviderName, ProviderAdapter> & {
+  openai?: ProviderAdapter;
+};
 
 function oneDayAgo(): string {
   return new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
@@ -68,7 +73,7 @@ export class ChatEngine {
 
   private readonly contextBuilder: ChatContextBuilder;
 
-  assertBudget(provider: ProviderName): void {
+  assertBudget(provider: ManagerProviderName): void {
     const since = oneDayAgo();
     const reservedTurns = this.store.countActiveManagerTurns();
     if (
@@ -88,6 +93,9 @@ export class ChatEngine {
           "BUDGET_EXCEEDED",
         );
       }
+    } else if (provider === "openai") {
+      // OpenAI: turn-limit gate above covers cost control.
+      // USD per-day gate deferred until cost tracking is added (costKnown: false).
     } else {
       const usage = this.store.sumManagerUsage("codex", since);
       if (
@@ -114,7 +122,16 @@ export class ChatEngine {
     if (shouldCancel?.()) {
       throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
     }
-    const adapter = this.providers[provider];
+    const adapter =
+      provider === "openai"
+        ? this.providers.openai
+        : this.providers[provider as ProviderName];
+    if (!adapter) {
+      throw new DuetError(
+        `Manager provider "${provider}" is not configured.`,
+        "CONFIGURATION_ERROR",
+      );
+    }
     const cwd = this.cwdFor(conversation);
     const before = conversation.runId
       ? await fingerprintRepository(cwd)
@@ -125,9 +142,16 @@ export class ChatEngine {
         cwd,
         prompt: this.contextBuilder(conversation).prompt,
         mode: "read-only",
-        timeoutMs: this.budget.codexMaxRuntimeSeconds * 1_000,
+        timeoutMs:
+          provider === "codex"
+            ? this.budget.codexMaxRuntimeSeconds * 1_000
+            : 60_000,
         maxBudgetUsd:
-          provider === "claude" ? this.budget.claudeMaxUsdPerTurn : undefined,
+          provider === "claude"
+            ? this.budget.claudeMaxUsdPerTurn
+            : provider === "openai"
+              ? this.budget.openaiMaxUsdPerTurn
+              : undefined,
         shouldCancel,
       });
       if (shouldCancel?.()) {

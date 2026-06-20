@@ -12,7 +12,7 @@ import {
   defaultManagerBudget,
   type ChatProviders,
 } from "../chat/engine.js";
-import type { ManagerBudget } from "../core/domain.js";
+import type { ManagerBudget, ManagerProviderName } from "../core/domain.js";
 import {
   prepareProposalAction,
   startProposalAction,
@@ -39,6 +39,7 @@ interface ServerOptions {
   onStop?: () => void;
   chatProviders?: ChatProviders;
   managerBudget?: ManagerBudget;
+  managerProvider?: ManagerProviderName;
 }
 
 interface JsonBody {
@@ -375,15 +376,18 @@ export class DuetService {
       if (request.method === "POST") {
         const bodyText = await readBody(request);
         const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
-        const interfaceAgent =
-          body.interfaceAgent === undefined || body.interfaceAgent === "codex"
-            ? "codex"
-            : body.interfaceAgent === "claude"
-              ? "claude"
+        const validAgents = new Set<ManagerProviderName>(["claude", "codex", "openai"]);
+        const defaultAgent: ManagerProviderName =
+          this.options.managerProvider ?? "codex";
+        const interfaceAgent: ManagerProviderName | undefined =
+          body.interfaceAgent === undefined
+            ? defaultAgent
+            : validAgents.has(body.interfaceAgent as ManagerProviderName)
+              ? (body.interfaceAgent as ManagerProviderName)
               : undefined;
         if (!interfaceAgent) {
           throw new DuetError(
-            "interfaceAgent must be 'claude' or 'codex'.",
+            "interfaceAgent must be 'claude', 'codex', or 'openai'.",
             "INVALID_ARGUMENT",
           );
         }

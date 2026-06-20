@@ -1958,3 +1958,111 @@ test("global conversation can generate proposals pointing to a specific run", as
     await h.cleanup();
   }
 });
+
+test("openai provider mock completes a manager turn successfully", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    async run() {
+      return {
+        provider: "openai",
+        sessionId: "chatcmpl-test",
+        finalText: "Hello from OpenAI mock.",
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+        usage: { inputTokens: 20, outputTokens: 10, costKnown: false },
+      };
+    },
+  };
+  const chatProviders = { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-test",
+    idleTimeoutMs: 60_000,
+    chatProviders,
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const conversation = store.getConversation(conversationId);
+    assert.equal(conversation.interfaceAgent, "openai");
+
+    const turnResponse = await postTurn(base, conversationId, "hello", "openai-turn-1");
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const turns = store.listConversationTurns(conversationId);
+    const managerTurn = turns.find((t) => t.role === "manager");
+    assert.ok(managerTurn, "manager turn should be stored");
+    assert.equal(managerTurn?.content, "Hello from OpenAI mock.");
+    assert.equal(managerTurn?.interfaceAgent, "openai");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("missing openai adapter returns CONFIGURATION_ERROR when interfaceAgent is openai", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-noopenai-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const fallback: ProviderAdapter = {
+    name: "codex" as const,
+    async run() {
+      return {
+        provider: "codex",
+        sessionId: "s",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        usage: {},
+      };
+    },
+  };
+  // chatProviders has no "openai" key — only claude and codex.
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "noopenai-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: fallback, codex: fallback },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+
+    const turnResponse = await postTurn(base, conversationId, "test", "noopenai-turn-1");
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const turns = store.listConversationTurns(conversationId);
+    const failedTurn = turns.find((t) => t.role === "manager");
+    assert.ok(failedTurn, "a failed manager turn should be recorded");
+    assert.equal(failedTurn?.status, "failed");
+    assert.ok(failedTurn?.errorJson?.includes("CONFIGURATION_ERROR"));
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

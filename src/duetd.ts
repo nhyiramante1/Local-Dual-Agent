@@ -6,6 +6,10 @@ import { rm } from "node:fs/promises";
 import { nodeVersionError } from "./bootstrap.js";
 import { loadConfig, resolveManagerBudget } from "./config.js";
 import { Store } from "./persistence/store.js";
+import { ClaudeAdapter } from "./providers/claude.js";
+import { CodexAdapter } from "./providers/codex.js";
+import { OpenAIManagerAdapter } from "./providers/openai-manager.js";
+import type { ChatProviders } from "./chat/engine.js";
 import { serviceInfoPath } from "./paths.js";
 import {
   acquireServiceLock,
@@ -66,12 +70,26 @@ async function main(): Promise<void> {
     const secret = await loadOrCreateServiceSecret();
     const config = await loadConfig();
     const managerBudget = resolveManagerBudget(config);
+    const chatProviders: ChatProviders = {
+      claude: new ClaudeAdapter(),
+      codex: new CodexAdapter(),
+    };
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (config.manager.provider === "openai") {
+      if (openaiKey) {
+        chatProviders.openai = new OpenAIManagerAdapter(openaiKey, config.manager.openaiModel);
+      } else {
+        await serviceLog("warning", "manager provider is openai but OPENAI_API_KEY is not set; falling back to codex", {});
+      }
+    }
     service = new DuetService({
       store,
       secret,
       instanceId,
       idleTimeoutMs: Number(process.env.DUET_IDLE_TIMEOUT_MS ?? 15 * 60_000),
       managerBudget,
+      managerProvider: config.manager.provider,
+      chatProviders,
       onStop: () => {
         void stop().finally(() => process.exit(0));
       },
