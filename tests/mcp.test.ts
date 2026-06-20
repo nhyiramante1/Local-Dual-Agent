@@ -510,7 +510,7 @@ test("paid plan intent is idempotent and conflicting reuse is rejected", async (
   const intentId = randomUUID();
   const base = {
     intentId,
-    repositoryPath: "C:\\repo with spaces",
+    repositoryPath: path.join(os.tmpdir(), "repo with spaces"),
     goal: "Create a bounded plan",
     planningLead: "codex",
     maxTasks: 3,

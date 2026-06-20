@@ -16,9 +16,7 @@ import {
 test("service secret, lock owner, and process identity are locally verifiable", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-discovery-"));
   const previous = process.env.DUET_HOME;
-  const previousPath = process.env.PATH;
   process.env.DUET_HOME = directory;
-  process.env.PATH = directory;
   try {
     const secret = await loadOrCreateServiceSecret();
     assert.ok(secret.length >= 40);
@@ -42,7 +40,6 @@ test("service secret, lock owner, and process identity are locally verifiable", 
   } finally {
     if (previous === undefined) delete process.env.DUET_HOME;
     else process.env.DUET_HOME = previous;
-    process.env.PATH = previousPath;
     await rm(directory, { recursive: true, force: true });
   }
 });
