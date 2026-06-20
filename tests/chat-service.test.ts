@@ -1271,7 +1271,7 @@ test("proposal start rejects proposals swept to expired status by expireProposal
   }
 });
 
-test("dashboard session cannot start proposals or mutate runs directly", async () => {
+test("dashboard session can start proposals through chat routes but not mutate runs directly", async () => {
   const h = await startService();
   try {
     seedRunWithTask(h.store);
@@ -1301,7 +1301,11 @@ test("dashboard session cannot start proposals or mutate runs directly", async (
         }),
       },
     );
-    assert.equal(start.status, 403);
+    assert.equal(start.status, 202);
+    const operation = ((await start.json()) as { data: OperationRecord }).data;
+    assert.equal(operation.kind, "execute");
+    assert.equal(h.store.getProposal(proposalId).status, "started");
+    assert.equal(h.store.getProposal(proposalId).operationId, operation.id);
 
     const runMutation = await fetch(
       `${h.base}/api/v1/runs/proposal-run/cancel`,
@@ -2011,6 +2015,42 @@ test("openai provider mock completes a manager turn successfully", async () => {
     await service.close();
     store.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("proposal start stores operationId on the proposal and listProposalsHistory includes it", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId, {
+      action: "execute_run",
+    });
+    const run = h.store.getRun("proposal-run");
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": "start-history-test-1" },
+        body: JSON.stringify({ confirm: "start", expectedRunVersion: run.version }),
+      },
+    );
+    assert.equal(response.status, 202);
+    const operation = ((await response.json()) as { data: OperationRecord }).data;
+
+    const proposal = h.store.getProposal(proposalId);
+    assert.equal(proposal.status, "started");
+    assert.equal(proposal.operationId, operation.id);
+
+    const history = h.store.listProposalsHistory(conversationId);
+    const record = history.find((p) => p.id === proposalId);
+    assert.ok(record, "started proposal should appear in history");
+    assert.equal(record?.operationId, operation.id);
+  } finally {
+    await h.cleanup();
   }
 });
 
