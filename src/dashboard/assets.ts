@@ -4,7 +4,6 @@ export const dashboardHtml = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Duet</title>
-  <script>(function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();</script>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
@@ -201,6 +200,7 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 `;
 
 export const dashboardJs = `
+(function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();
 const q = (id) => document.getElementById(id);
 let selected = new URL(location.href).searchParams.get("run");
 const chat = {
