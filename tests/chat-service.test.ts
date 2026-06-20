@@ -976,6 +976,58 @@ test("proposal prepare blocks while the linked run has an active operation", asy
   }
 });
 
+test("proposal prepare returns 404 for a non-existent conversation", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId);
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/nonexistent-conversation/proposals/${proposalId}/prepare`,
+      { headers: bearer() },
+    );
+    assert.equal(response.status, 404);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "CONVERSATION_NOT_FOUND");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("proposal prepare reports unavailable when the linked run no longer exists", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    // Conversation has no runId so it survives the run deletion below.
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId);
+    // Disable FK enforcement temporarily so the cascade does not remove the
+    // proposal when we hard-delete the run, simulating a post-creation deletion.
+    const db = (h.store as unknown as { db: { exec: (sql: string) => void } }).db;
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("DELETE FROM runs WHERE id = 'proposal-run'");
+    db.exec("PRAGMA foreign_keys = ON");
+
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/prepare`,
+      { headers: bearer() },
+    );
+    assert.equal(response.status, 200);
+    const data = ((await response.json()) as {
+      data: { available: boolean; blockedReason: string };
+    }).data;
+    assert.equal(data.available, false);
+    assert.match(data.blockedReason, /run no longer exists/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("active conversations reject overlapping manager turns", async () => {
   const started = deferred();
   const release = deferred();
