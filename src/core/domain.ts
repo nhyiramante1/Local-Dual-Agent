@@ -1,5 +1,7 @@
 export type ProviderName = "claude" | "codex";
 
+export type ManagerProviderName = ProviderName | "openai";
+
 export type AgentProfile = "cheap" | "balanced" | "reasoning" | "max";
 
 export type RunStatus =
@@ -71,7 +73,7 @@ export interface UsageRecord {
 }
 
 export interface AgentResult {
-  provider: ProviderName;
+  provider: ManagerProviderName;
   sessionId: string;
   finalText: string;
   stdout: string;
@@ -161,7 +163,7 @@ export type ConversationStatus = "active" | "archived";
 export interface ConversationRecord {
   id: string;
   runId?: string;
-  interfaceAgent: ProviderName;
+  interfaceAgent: ManagerProviderName;
   title?: string;
   summary?: string;
   status: ConversationStatus;
@@ -177,7 +179,7 @@ export interface ConversationTurnRecord {
   conversationId: string;
   seq: number;
   role: TurnRole;
-  interfaceAgent?: ProviderName;
+  interfaceAgent?: ManagerProviderName;
   content: string;
   status: TurnStatus;
   errorJson?: string;
@@ -306,4 +308,6 @@ export interface ManagerBudget {
   codexMaxOutputTokensPerDay: number;
   codexMaxRuntimeSeconds: number;
   maxTurnsPerDay: number;
+  openaiMaxUsdPerTurn: number;
+  openaiMaxUsdPerDay: number;
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { parse } from "smol-toml";
 
-import type { AgentProfile, ManagerBudget, ProviderName } from "./core/domain.js";
+import type { AgentProfile, ManagerBudget, ManagerProviderName, ProviderName } from "./core/domain.js";
 import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 
@@ -31,6 +31,10 @@ export interface DuetConfig {
     env: Record<string, string>;
   };
   manager: {
+    provider: ManagerProviderName;
+    openaiModel: string;
+    openaiMaxUsdPerTurn: number;
+    openaiMaxUsdPerDay: number;
     claudeMaxUsdPerTurn: number;
     claudeMaxUsdPerDay: number;
     codexMaxInputTokensPerDay: number;
@@ -48,6 +52,7 @@ export function recommendedTurnBudget(
 }
 
 const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", "max"]);
+const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex", "openai"]);
 
 export const defaultConfig: DuetConfig = {
   orchestration: {
@@ -73,6 +78,10 @@ export const defaultConfig: DuetConfig = {
     env: {},
   },
   manager: {
+    provider: "codex" as ManagerProviderName,
+    openaiModel: "gpt-4o-mini",
+    openaiMaxUsdPerTurn: 0.1,
+    openaiMaxUsdPerDay: 2,
     claudeMaxUsdPerTurn: 0.5,
     claudeMaxUsdPerDay: 5,
     codexMaxInputTokensPerDay: 500_000,
@@ -331,6 +340,23 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
       env: parseEnvironment(verification.env),
     },
     manager: {
+      provider: VALID_MANAGER_PROVIDERS.has(manager.provider as ManagerProviderName)
+        ? (manager.provider as ManagerProviderName)
+        : defaultConfig.manager.provider,
+      openaiModel:
+        typeof manager.openai_model === "string"
+          ? manager.openai_model
+          : defaultConfig.manager.openaiModel,
+      openaiMaxUsdPerTurn: numberInRange(
+        manager.openai_max_usd_per_turn,
+        defaultConfig.manager.openaiMaxUsdPerTurn,
+        0.01,
+      ),
+      openaiMaxUsdPerDay: numberInRange(
+        manager.openai_max_usd_per_day,
+        defaultConfig.manager.openaiMaxUsdPerDay,
+        0.01,
+      ),
       claudeMaxUsdPerTurn: numberInRange(
         manager.claude_max_usd_per_turn,
         defaultConfig.manager.claudeMaxUsdPerTurn,
@@ -372,5 +398,6 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
 }
 
 export function resolveManagerBudget(config: DuetConfig): ManagerBudget {
-  return { ...config.manager };
+  const { provider: _provider, openaiModel: _model, ...budget } = config.manager;
+  return budget;
 }

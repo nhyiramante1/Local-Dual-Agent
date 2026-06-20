@@ -14,6 +14,7 @@ import type {
   DuetEvent,
   LeaseRecord,
   ManagerActionProposal,
+  ManagerProviderName,
   OperationRecord,
   OperationStatus,
   ProposalAction,
@@ -1763,7 +1764,7 @@ export class Store {
   createConversation(input: {
     id: string;
     runId?: string;
-    interfaceAgent: ProviderName;
+    interfaceAgent: ManagerProviderName;
     title?: string;
   }): ConversationRecord {
     return this.transaction(() => {
@@ -1831,7 +1832,7 @@ export class Store {
   updateConversation(
     id: string,
     fields: Partial<{
-      interfaceAgent: ProviderName;
+      interfaceAgent: ManagerProviderName;
       summary: string;
       title: string;
       status: ConversationStatus;
@@ -1857,7 +1858,7 @@ export class Store {
     conversationId: string;
     role: TurnRole;
     content: string;
-    interfaceAgent?: ProviderName;
+    interfaceAgent?: ManagerProviderName;
     status?: TurnStatus;
     errorJson?: string;
     providerSessionId?: string;
@@ -2299,7 +2300,7 @@ export class Store {
     return {
       id: String(row.id),
       runId: row.run_id ? String(row.run_id) : undefined,
-      interfaceAgent: row.interface_agent as ProviderName,
+      interfaceAgent: row.interface_agent as ManagerProviderName,
       title: row.title ? String(row.title) : undefined,
       summary: row.summary ? String(row.summary) : undefined,
       status: row.status as ConversationStatus,

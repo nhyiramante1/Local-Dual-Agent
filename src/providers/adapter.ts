@@ -1,4 +1,4 @@
-import type { AgentProfile, AgentResult, ProviderName } from "../core/domain.js";
+import type { AgentProfile, AgentResult, ManagerProviderName, ProviderName } from "../core/domain.js";
 
 export type AgentMode = "read-only" | "workspace-write";
 
@@ -18,6 +18,6 @@ export interface AgentTurn {
 }
 
 export interface ProviderAdapter {
-  readonly name: ProviderName;
+  readonly name: ManagerProviderName;
   run(turn: AgentTurn): Promise<AgentResult>;
 }

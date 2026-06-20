@@ -30,6 +30,14 @@ commands = [
 CI = "true"
 
 [manager]
+# Which provider voices the manager: openai | claude | codex.
+# Set to "openai" and export OPENAI_API_KEY to avoid consuming Claude/Codex worker quota.
+provider = "codex"
+# OpenAI model used when provider = "openai".
+openai_model = "gpt-4o-mini"
+# Per-turn and daily OpenAI spend caps (USD).
+openai_max_usd_per_turn = 0.10
+openai_max_usd_per_day = 2.0
 # Maximum USD a single manager turn may spend via Claude.
 claude_max_usd_per_turn = 0.5
 # Daily Claude spend cap across all manager turns.
