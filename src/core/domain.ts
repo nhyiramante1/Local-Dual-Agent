@@ -218,6 +218,7 @@ export interface ManagerActionProposal {
   commandJson: string;
   tier: ProposalTier;
   status: ProposalStatus;
+  operationId?: string;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
