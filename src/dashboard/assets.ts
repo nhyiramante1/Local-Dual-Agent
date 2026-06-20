@@ -365,7 +365,7 @@ function renderProposalCard(proposal) {
   const fingerprint = proposal.tier === "fingerprint"
     ? '<div class="proposal-copy bad">This suggestion still requires CLI fingerprint confirmation before it can take effect.</div>'
     : "";
-  return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'">'+
+  return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'+
     '<div class="proposal-title"><b>Suggested Duet action</b>'+badge(actionLabel(proposal.action))+badge(proposal.tier || "ordinary")+'<span class="kv">'+esc(target)+'</span></div>'+
     '<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'+
     '<div class="proposal-copy">Run this in your terminal if you choose to proceed.</div>'+
@@ -407,7 +407,7 @@ q("chat-turns").addEventListener("click", async (event) => {
   try {
     if (copy) {
       const card = copy.closest(".proposal-card");
-      const command = card?.querySelector("code")?.textContent || "";
+      const command = card?.dataset.command || "";
       await copyText(command);
       setChatStatus("Command copied. Paste it into your terminal if you choose to run it.");
     } else if (dismiss) {
