@@ -29,9 +29,9 @@ considered, but Windows is the main development target right now.
   runs and start bounded planning operations.
 - Store local durable history so runs can survive service restarts.
 
-Manager chat is being added now. The dashboard can run read-only manager
-conversations with summarized run, task, usage, event, verification, and
-message context. It can also show suggested Duet action cards. Ordinary
+Manager chat is available now. The dashboard can run global or run-scoped
+manager conversations with summarized run, task, usage, event, verification,
+and message context. It can also show suggested Duet action cards. Ordinary
 suggestions can be checked and started from the dashboard after you type a
 confirmation. Fingerprint-gated approvals and merge still stay in the CLI.
 
@@ -358,14 +358,15 @@ The dashboard currently focuses on inspection:
 - conflicts
 - approval state
 
-The manager-chat panel can explain what is happening in a run and may show
-suggested Duet action cards. You can check whether a suggestion still looks
-current, copy the command, dismiss the card, or start an ordinary operation
-after typing `start`.
+The manager-chat panel can explain what is happening globally or in a selected
+run and may show suggested Duet action cards. You can check whether a
+suggestion still looks current, copy the command, dismiss the card, or start an
+ordinary operation after typing `start`.
 
-Manager chat may use provider quota when you send a message. Treat it like a
-real Claude/Codex turn. It can suggest ordinary actions that you may start from
-the dashboard, but fingerprint-gated actions stay in the terminal.
+Manager chat may use provider quota when you send a message. Today the manager
+voice is Claude or Codex, so treat it like a real provider turn. It can suggest
+ordinary actions that you may start from the dashboard, but fingerprint-gated
+actions stay in the terminal.
 
 Plan approval, merge approval, and merge still happen through the ordinary Duet
 CLI. Fingerprint-gated actions still require terminal confirmation and are not
@@ -429,5 +430,5 @@ npx playwright install chromium
 ```
 
 Keep this README updated as new user-visible features land, especially the
-manager-chat dashboard, dashboard controls, stronger approval options, and app
-packaging.
+manager-chat dashboard, manager provider options, dashboard controls, stronger
+approval options, and app packaging.
