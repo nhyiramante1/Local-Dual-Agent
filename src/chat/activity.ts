@@ -71,21 +71,24 @@ export class ChatActivityManager {
         "CHAT_PROVIDER_ACTIVE",
       );
     }
-    this.store.appendConversationTurn({
-      conversationId: input.conversationId,
-      role: "user",
-      content: input.userMessage,
+    const operation: OperationRecord = this.store.transaction(() => {
+      this.store.appendConversationTurn({
+        conversationId: input.conversationId,
+        role: "user",
+        content: input.userMessage,
+      });
+      const op: OperationRecord = {
+        id: randomUUID(),
+        runId: conversation.runId,
+        kind: "manager_turn",
+        status: "queued",
+        serviceInstanceId: this.serviceInstanceId,
+        inputHash: input.inputHash,
+        createdAt: new Date().toISOString(),
+      };
+      this.store.createOperation(op);
+      return op;
     });
-    const operation: OperationRecord = {
-      id: randomUUID(),
-      runId: conversation.runId,
-      kind: "manager_turn",
-      status: "queued",
-      serviceInstanceId: this.serviceInstanceId,
-      inputHash: input.inputHash,
-      createdAt: new Date().toISOString(),
-    };
-    this.store.createOperation(operation);
     const controller = new AbortController();
     this.activeConversations.set(input.conversationId, operation.id);
     this.activeProviders.set(conversation.interfaceAgent, operation.id);
