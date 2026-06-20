@@ -17,7 +17,8 @@
     "doctor:live": "tsx src/cli.ts doctor --live",
     "service": "tsx src/duetd.ts",
     "test": "tsx --test tests/**/*.test.ts",
-    "test:dashboard": "tsx --test tests/browser/**/*.smoke.ts"
+    "test:dashboard": "tsx --test tests/browser/**/*.smoke.ts",
+    "up": "duet service stop 2>nul & npm run build && duet service start && duet dashboard"
   },
   "engines": {
     "node": ">=24 <25"

@@ -15,16 +15,61 @@ export const dashboardHtml = `<!doctype html>
     </div>
   </header>
   <main>
-    <aside><h2>Runs</h2><div id="runs"></div></aside>
+    <aside>
+      <div class="aside-rail">
+        <button class="aside-rail-btn rail-top" id="sidebar-toggle" title="Expand sidebar">&#9654;</button>
+        <button class="aside-rail-btn" data-section="runs" title="Runs">&#9776;</button>
+        <button class="aside-rail-btn" data-section="tasks" title="Tasks">&#10003;</button>
+        <button class="aside-rail-btn" data-section="timeline" title="Timeline">&#9711;</button>
+        <button class="aside-rail-btn" data-section="verification" title="Verification">&#9881;</button>
+        <button class="aside-rail-btn" data-section="messages" title="Messages">&#9993;</button>
+        <button class="aside-rail-btn" data-section="artifacts" title="Artifacts">&#9671;</button>
+        <button class="aside-rail-btn" data-section="conflicts" title="Conflicts">&#9651;</button>
+        <button class="aside-rail-btn" data-section="diff" title="Diff">&#177;</button>
+      </div>
+      <div class="aside-inner">
+        <div id="summary"><p class="muted aside-hint">Select a run.</p></div>
+        <div class="aside-section" id="aside-sec-runs">
+          <div class="aside-sec-head"><span class="aside-dot"></span><h2>Runs</h2></div>
+          <div id="runs"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-tasks">
+          <div class="aside-sec-head"><h2>Tasks</h2></div>
+          <div id="tasks"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-timeline">
+          <div class="aside-sec-head"><h2>Timeline</h2></div>
+          <div id="events"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-verification">
+          <div class="aside-sec-head"><h2>Verification</h2></div>
+          <div id="verification"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-messages">
+          <div class="aside-sec-head"><h2>Messages</h2></div>
+          <div id="messages"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-artifacts">
+          <div class="aside-sec-head"><h2>Artifacts</h2></div>
+          <div id="artifacts"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-conflicts">
+          <div class="aside-sec-head"><h2>Conflicts</h2></div>
+          <div id="conflicts"></div>
+        </div>
+        <div class="aside-section" id="aside-sec-diff">
+          <div class="aside-sec-head"><h2>Diff</h2></div>
+          <pre id="diff"></pre>
+        </div>
+      </div>
+    </aside>
     <section>
-      <div id="summary"><h2>Local orchestrator</h2><p class="muted">Select a run.</p></div>
-      <h2>Manager Chat</h2>
+      <div class="chat-resize-handle" id="chat-resize-handle"></div>
       <div id="chat" class="chat card">
         <div class="chat-head">
           <div>
             <div class="chat-title"><b>Manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
-            <p class="muted">Ask about your runs, or select one for run-scoped context. Approve, run, cancel, resolve, cleanup, and merge still happen in the CLI.</p>
-            <p class="faint chat-quota">Manager chat may consume provider quota.</p>
+            <p class="muted">Ask about your runs, or select one for run-scoped context.</p>
           </div>
           <div class="chat-agents" role="group" aria-label="Manager voice">
             <button id="chat-codex" type="button" data-agent="codex">Codex</button>
@@ -41,13 +86,6 @@ export const dashboardHtml = `<!doctype html>
           </button>
         </form>
       </div>
-      <h2>Tasks</h2><div id="tasks"></div>
-      <h2>Timeline</h2><div id="events"></div>
-      <h2>Verification</h2><div id="verification"></div>
-      <h2>Messages</h2><div id="messages"></div>
-      <h2>Artifacts</h2><div id="artifacts"></div>
-      <h2>Conflicts</h2><div id="conflicts"></div>
-      <h2>Diff</h2><pre id="diff"></pre>
     </section>
   </main>
   <div id="approval-modal" class="modal-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="approval-modal-title">
@@ -113,12 +151,35 @@ header{display:flex;align-items:center;justify-content:space-between;padding:14p
 .header-right{display:flex;align-items:center;gap:10px}
 .theme-btn{display:flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;margin:0;border-radius:50%;border:1px solid var(--line-2);background:var(--surface-2);color:var(--muted);cursor:pointer;font-size:15px;transition:background .12s,border-color .12s,color .12s}
 .theme-btn:hover{background:var(--line);color:var(--text);border-color:var(--line-2)}
-main{display:grid;grid-template-columns:300px 1fr;min-height:calc(100vh - 56px)}
-aside{padding:18px;border-right:1px solid var(--line);background:var(--surface)}
-section{padding:22px 26px;overflow:auto}
-section>h2{margin-top:24px}section>h2:first-child{margin-top:0}
+main{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 56px);overflow:hidden;transition:grid-template-columns .2s}
+aside{display:flex;flex-direction:row;border-right:1px solid var(--line);background:var(--surface);overflow:hidden}
+.aside-rail{width:48px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;padding:6px 0;gap:2px;border-right:1px solid var(--line)}
+.aside-rail-btn{display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;border:none;background:transparent;color:var(--faint);cursor:pointer;padding:0;margin:0;font-size:15px;transition:background .12s,color .12s}
+.aside-rail-btn:hover{background:var(--line);color:var(--text)}
+.aside-rail-btn.active{background:var(--acc-bg);color:var(--accent)}
+.aside-rail-btn.rail-top{border-radius:6px;margin-bottom:6px}
+.aside-inner{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+#summary{padding:10px 14px 0;flex-shrink:0}
+.aside-hint{font-size:12px;margin:0;color:var(--faint)}
+.aside-section{display:none;flex:1;flex-direction:column;overflow:hidden}
+.aside-section.active{display:flex}
+.aside-sec-head{display:flex;align-items:center;gap:8px;padding:12px 14px 8px;border-bottom:1px solid var(--line);flex-shrink:0}
+.aside-sec-head h2{margin:0}
+.aside-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.aside-section>div:last-child,.aside-section>pre{flex:1;overflow-y:auto;padding:10px 14px}
+main.sidebar-collapsed{grid-template-columns:48px 1fr}
+main.sidebar-collapsed .aside-inner{display:none}
+section{display:flex;flex-direction:column;height:100%;overflow:hidden;padding:12px 20px 16px}
+.chat-resize-handle{height:4px;background:var(--line);cursor:ns-resize;flex-shrink:0;border-radius:2px;margin:0 0 10px;transition:background .15s}
+.chat-resize-handle:hover{background:var(--accent)}
+#chat{flex:1;display:flex;flex-direction:column;overflow:hidden;margin:0}
 #summary{margin-bottom:4px}
 #summary h2{font-size:16px;text-transform:none;letter-spacing:0;color:var(--text);margin-bottom:10px}
+.timeline-details>summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;margin-bottom:6px}
+.timeline-details>summary::-webkit-details-marker{display:none}
+.timeline-details>summary h2{margin:0;pointer-events:none}
+.timeline-details>summary::after{content:"▸";font-size:10px;color:var(--faint);transition:transform .15s}
+.timeline-details[open]>summary::after{transform:rotate(90deg)}
 /* ── shared components ── */
 .pill{font-size:12px;font-weight:500;padding:4px 11px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
 .pill.ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
@@ -129,6 +190,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
 button.sel{border-color:var(--accent);background:var(--acc-bg)}
 button b{font-weight:600}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 8px;background:var(--surface)}
+.run-btn{display:flex;flex-direction:column;gap:5px;padding:10px 11px;margin:0 0 6px;text-align:left}
+.run-goal{font-size:13px;font-weight:500;color:var(--text);line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.run-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.run-id{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint)}
 .muted{color:var(--muted)}.ok{color:var(--ok)}.bad{color:var(--bad)}
 .faint{color:var(--faint)}
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -169,17 +234,27 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-agents button:hover:not(:disabled){background:var(--line);color:var(--text);border-color:transparent}
 .chat-agents button.active{background:var(--accent);color:#fff;border-color:transparent}
 /* ── bubble turn list ── */
-.chat-turns{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:auto;padding:4px 2px}
-.chat-turn{border:1px solid var(--line);border-radius:14px;padding:10px 13px;background:var(--surface-2);max-width:88%}
-.chat-turn.user{border-color:var(--acc-bd);background:var(--acc-bg);border-radius:14px 14px 4px 14px;align-self:flex-end}
-.chat-turn.manager{display:flex;gap:10px;border-color:var(--ok-bd);background:var(--ok-bg);border-radius:14px 14px 14px 4px;align-self:flex-start;max-width:94%}
-.chat-turn.failed{border-color:var(--bad-bd);background:var(--bad-bg);border-radius:14px}
-.manager-avatar{width:26px;height:26px;border-radius:50%;background:var(--accent);opacity:.65;flex-shrink:0;margin-top:2px}
+.chat-turns{display:flex;flex-direction:column;gap:8px;flex:1;overflow-y:auto;padding:4px 2px;min-height:60px}
+.chat-turn{max-width:88%}
+.chat-turn.user{background:var(--acc-bg);border:1px solid var(--acc-bd);border-radius:14px 14px 4px 14px;padding:9px 13px;align-self:flex-end}
+.chat-turn.manager{align-self:flex-start;max-width:96%;padding:4px 0}
+.chat-turn.failed{background:var(--bad-bg);border:1px solid var(--bad-bd);border-radius:10px;padding:9px 13px}
+.manager-avatar{display:none}
 .turn-content{flex:1;min-width:0}
-.chat-turn .meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:var(--faint);font-size:12px;flex-wrap:wrap}
+.chat-turn .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;color:var(--faint);font-size:11px;flex-wrap:wrap}
 .chat-turn .meta time,.chat-turn .meta .when{color:var(--faint);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
 .chat-turn .note{color:var(--faint);font-size:12px;margin-bottom:4px}
-.chat-turn .body{white-space:pre-wrap;overflow-wrap:anywhere}
+.chat-turn .body{overflow-wrap:anywhere;font-size:13px;line-height:1.65}
+.chat-turn .body p{margin:0 0 8px}.chat-turn .body p:last-child{margin:0}
+.chat-turn .body h1,.chat-turn .body h2,.chat-turn .body h3{font-size:13px;font-weight:600;text-transform:none;letter-spacing:0;color:var(--text);margin:10px 0 4px}
+.chat-turn .body ul,.chat-turn .body ol{margin:4px 0 8px 18px;padding:0}
+.chat-turn .body li{margin:2px 0}
+.chat-turn .body code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.chat-turn .body pre{margin:6px 0;padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;overflow-x:auto}
+.chat-turn .body pre code{background:none;border:none;padding:0}
+.chat-turn .body hr{border:none;border-top:1px solid var(--line);margin:10px 0}
+.chat-turn .body strong{font-weight:600;color:var(--text)}
+.chat-turn .body em{font-style:italic;color:var(--muted)}
 /* ── proposal card (elevated, accent left border) ── */
 .proposal-card{margin-top:10px;border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:10px 12px;background:var(--surface)}
 .proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
@@ -232,7 +307,7 @@ code.inline-code{display:inline;padding:2px 5px}
 #chat-send:not(:disabled):hover{opacity:.82}
 #chat-send svg{pointer-events:none}
 /* ── responsive ── */
-@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-agents{flex-wrap:wrap;border-radius:12px}}
+@media(max-width:760px){main{grid-template-columns:1fr;height:auto;overflow:auto}aside{height:auto}.aside-bottom{height:auto;max-height:none}.section{height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-agents{flex-wrap:wrap;border-radius:12px}}
 `;
 
 export const dashboardJs = `
@@ -292,7 +367,7 @@ async function authenticate() {
 }
 async function loadRuns(options = {}) {
   const runs=await api("/runs");
-  q("runs").innerHTML=runs.map(r=>'<button data-id="'+esc(r.id)+'" class="'+(r.id===selected?"sel":"")+'"><b>'+esc(r.goal)+'</b><br><span class="muted">'+esc(r.id)+'</span> '+badge(r.status)+'</button>').join("")||'<span class="empty">No runs yet.</span>';
+  q("runs").innerHTML=runs.map(r=>'<button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>').join("")||'<span class="empty">No runs yet.</span>';
   q("runs").querySelectorAll("button").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
   if(selected && options.selectCurrent) await selectRun(selected);
 }
@@ -329,7 +404,6 @@ function conversationKey(runId, agent) {
   return (runId || "global") + ":" + agent;
 }
 function currentConversation() {
-  if (!selected) return null;
   return chat.conversations.get(conversationKey(selected, chat.agent)) || null;
 }
 function rememberConversation(conversation) {
@@ -423,6 +497,42 @@ function setConn(state) {
   else if (state === "reconnecting") { el.textContent = "reconnecting"; el.className = "conn conn-bad"; }
   else { el.textContent = "connecting"; el.className = "conn"; }
 }
+function renderMarkdown(text) {
+  const lines = String(text).split("\\n");
+  let html = "", inCode = false, codeLang = "", codeBuf = [], inList = null;
+  function flushList() { if(inList){html+="</"+inList+">";inList=null;} }
+  function inlineFormat(s) {
+    return s
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/\`([^\`]+)\`/g,'<code>$1</code>')
+      .replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>')
+      .replace(/__([^_]+)__/g,'<strong>$1</strong>')
+      .replace(/\\*([^*]+)\\*/g,'<em>$1</em>')
+      .replace(/_([^_]+)_/g,'<em>$1</em>');
+  }
+  for (let i=0;i<lines.length;i++) {
+    const line=lines[i];
+    if (!inCode && line.startsWith("\`\`\`")) {
+      flushList(); inCode=true; codeLang=line.slice(3).trim(); codeBuf=[]; continue;
+    }
+    if (inCode) {
+      if (line.startsWith("\`\`\`")) {
+        html+='<pre><code>'+(codeBuf.map(l=>l.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")).join("\\n"))+'</code></pre>';
+        inCode=false; codeBuf=[]; codeLang="";
+      } else { codeBuf.push(line); }
+      continue;
+    }
+    if (/^#{1,3}\s/.test(line)) { flushList(); const lvl=line.match(/^(#{1,3})/)[1].length; html+='<h'+lvl+'>'+inlineFormat(line.replace(/^#{1,3}\s/,""))+'</h'+lvl+'>'; continue; }
+    if (/^[-*]\s/.test(line)) { if(inList!=="ul"){flushList();html+="<ul>";inList="ul";} html+='<li>'+inlineFormat(line.slice(2))+'</li>'; continue; }
+    if (/^\d+\.\s/.test(line)) { if(inList!=="ol"){flushList();html+="<ol>";inList="ol";} html+='<li>'+inlineFormat(line.replace(/^\d+\.\s/,""))+'</li>'; continue; }
+    if (/^---+$/.test(line.trim())) { flushList(); html+='<hr>'; continue; }
+    flushList();
+    if (line.trim()==="") { html+='<p></p>'; } else { html+='<p>'+inlineFormat(line)+'</p>'; }
+  }
+  if (inCode && codeBuf.length) html+='<pre><code>'+(codeBuf.map(l=>l.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")).join("\\n"))+'</code></pre>';
+  flushList();
+  return html;
+}
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
     q("chat-turns").innerHTML='<span class="empty">No turns yet.</span>';
@@ -448,7 +558,9 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
       note = '<div class="note">'+esc(code)+'</div>';
       body = visibleText(message, 4000);
     } else {
-      body = visibleText(turn.content, 4000);
+      body = turn.role === "manager"
+        ? renderMarkdown(turn.content || "")
+        : visibleText(turn.content, 4000);
     }
     const when = turn.createdAt ? new Date(turn.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
@@ -738,7 +850,7 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
     setChatStatus(error.message, true);
   } finally {
     if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
-    setChatEnabled(Boolean(selected) && !chatIsBusyForCurrentView());
+    setChatEnabled(!chatIsBusyForCurrentView());
   }
 }
 async function sendChat(message) {
@@ -754,7 +866,7 @@ async function sendChat(message) {
 q("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = q("chat-input").value.trim();
-  if (!text || !selected || chatIsBusyForCurrentView()) return;
+  if (!text || chatIsBusyForCurrentView()) return;
   q("chat-input").value = "";
   q("chat-input").style.height = "auto";
   setChatEnabled(false);
@@ -763,7 +875,7 @@ q("chat-form").addEventListener("submit", async (event) => {
     await sendChat(text);
   } catch (error) {
     setChatStatus(error.message, true);
-    setChatEnabled(Boolean(selected) && !chatIsBusyForCurrentView());
+    setChatEnabled(!chatIsBusyForCurrentView());
   }
 });
 q("chat-input").addEventListener("keydown", (event) => {
@@ -843,6 +955,48 @@ async function connectEvents() {
   stream.addEventListener("duet.reset",()=>location.reload());
   stream.onerror=()=>{ if(eventStream===stream) setConn("reconnecting"); setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000); };
 }
+(function(){
+  const chatHandle=document.getElementById("chat-resize-handle");
+  const chatEl=document.getElementById("chat");
+  const section=chatEl&&chatEl.parentElement;
+  if(chatHandle&&chatEl&&section){
+    let dragging=false,startY=0,startH=0;
+    chatHandle.addEventListener("mousedown",e=>{dragging=true;startY=e.clientY;startH=chatEl.offsetHeight;document.body.style.cursor="ns-resize";e.preventDefault();});
+    document.addEventListener("mousemove",e=>{if(!dragging)return;const delta=startY-e.clientY;chatEl.style.flex="none";chatEl.style.height=Math.max(200,Math.min(window.innerHeight*0.9,startH+delta))+"px";});
+    document.addEventListener("mouseup",()=>{if(dragging){dragging=false;document.body.style.cursor="";}});
+  }
+})();
+(function(){
+  const toggleBtn=document.getElementById("sidebar-toggle");
+  const mainEl=document.querySelector("main");
+  const sectionNames=["runs","tasks","timeline","verification","messages","artifacts","conflicts","diff"];
+  let activeSection=localStorage.getItem("duet-aside-section")||"runs";
+  function setSection(name){
+    activeSection=name;
+    sectionNames.forEach(function(s){
+      const sec=document.getElementById("aside-sec-"+s);
+      if(sec)sec.classList.toggle("active",s===name);
+      const rail=document.querySelector(".aside-rail-btn[data-section='"+s+"']");
+      if(rail)rail.classList.toggle("active",s===name);
+    });
+    try{localStorage.setItem("duet-aside-section",name);}catch(e){}
+  }
+  function setCollapsed(collapsed){
+    if(!mainEl)return;
+    mainEl.classList.toggle("sidebar-collapsed",collapsed);
+    if(toggleBtn){toggleBtn.innerHTML=collapsed?"&#9654;":"&#9664;";toggleBtn.title=collapsed?"Expand sidebar":"Collapse sidebar";}
+    try{localStorage.setItem("duet-sidebar-collapsed",collapsed?"1":"0");}catch(e){}
+  }
+  setCollapsed(localStorage.getItem("duet-sidebar-collapsed")==="1");
+  setSection(activeSection);
+  if(toggleBtn)toggleBtn.addEventListener("click",function(){setCollapsed(!mainEl.classList.contains("sidebar-collapsed"));});
+  document.querySelectorAll(".aside-rail-btn[data-section]").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      setCollapsed(false);
+      setSection(btn.getAttribute("data-section"));
+    });
+  });
+})();
 await authenticate();
 renderChatShell();
 try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}

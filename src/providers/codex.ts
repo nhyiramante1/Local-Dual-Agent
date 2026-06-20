@@ -133,6 +133,7 @@ export function buildCodexArgs(turn: AgentTurn): string[] {
     'approval_policy="never"',
     ...modelArgs,
     ...effortArgs,
+    ...(turn.mode === "read-only" ? ["--skip-git-repo-check"] : []),
     "--cd",
     turn.cwd,
     turn.prompt,

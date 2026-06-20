@@ -246,7 +246,13 @@ export async function serviceMain(): Promise<void> {
       { unique: true },
     );
     const query = runId ? `?run=${encodeURIComponent(runId)}` : "";
-    console.log(`http://127.0.0.1:${client.info.port}/${query}#${ticket}`);
+    const url = `http://127.0.0.1:${client.info.port}/${query}#${ticket}`;
+    console.log(url);
+    const { spawn } = await import("node:child_process");
+    const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]]
+      : process.platform === "darwin" ? ["open", [url]]
+      : ["xdg-open", [url]];
+    spawn(opener[0] as string, opener[1] as string[], { detached: true, stdio: "ignore" }).unref();
     return;
   }
   if (command === "plan") {
