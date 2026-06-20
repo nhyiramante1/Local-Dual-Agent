@@ -193,6 +193,7 @@ export class Orchestrator {
       baseCommit: snapshot.head,
       integrationBranch: `duet/${id}/integration`,
       configJson: JSON.stringify(options.config),
+      profile: options.config.orchestration.profile,
       cancellationRequested: false,
       createdAt: stamp,
       updatedAt: stamp,
@@ -1332,6 +1333,7 @@ export class Orchestrator {
           provider === "claude"
             ? config.budgets.claudeMaxUsdPerTurn
             : undefined,
+        profile: run.profile ?? "balanced",
         onStart: (pid) =>
           this.store.updateAttemptProcess(attempt, { pid }),
         onStdout: (chunk) => {

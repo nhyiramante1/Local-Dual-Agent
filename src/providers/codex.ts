@@ -9,6 +9,7 @@ import type {
 } from "./adapter.js";
 import { resolveCodexCommand } from "./commands.js";
 import { sanitizedAgentEnvironment } from "./environment.js";
+import { CODEX_MODELS } from "./profiles.js";
 
 interface CodexEvent {
   type?: string;
@@ -100,6 +101,8 @@ export class CodexAdapter implements ProviderAdapter {
 }
 
 export function buildCodexArgs(turn: AgentTurn): string[] {
+  const modelFlag = CODEX_MODELS[turn.profile ?? "balanced"];
+  const modelArgs = modelFlag ? ["-m", modelFlag] : [];
   if (turn.sessionId) {
     return [
       "exec",
@@ -111,6 +114,7 @@ export function buildCodexArgs(turn: AgentTurn): string[] {
       `sandbox_mode="${turn.mode}"`,
       "-c",
       'approval_policy="never"',
+      ...modelArgs,
       turn.sessionId,
       turn.prompt,
     ];
@@ -124,6 +128,7 @@ export function buildCodexArgs(turn: AgentTurn): string[] {
     "--ignore-rules",
     "-c",
     'approval_policy="never"',
+    ...modelArgs,
     "--cd",
     turn.cwd,
     turn.prompt,

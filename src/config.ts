@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { parse } from "smol-toml";
 
-import type { ManagerBudget, ProviderName } from "./core/domain.js";
+import type { AgentProfile, ManagerBudget, ProviderName } from "./core/domain.js";
 import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 
@@ -14,6 +14,7 @@ export interface DuetConfig {
     agentTimeoutSeconds: number;
     maxParallelTasks: number;
     maxTasks: number;
+    profile: AgentProfile;
   };
   budgets: {
     runWallClockSeconds: number;
@@ -46,6 +47,8 @@ export function recommendedTurnBudget(
   return 1 + maxTasks * (2 + 2 * maxRevisions);
 }
 
+const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", "max"]);
+
 export const defaultConfig: DuetConfig = {
   orchestration: {
     defaultLead: "claude",
@@ -53,6 +56,7 @@ export const defaultConfig: DuetConfig = {
     agentTimeoutSeconds: 600,
     maxParallelTasks: 2,
     maxTasks: 6,
+    profile: "balanced",
   },
   budgets: {
     runWallClockSeconds: 3_600,
@@ -268,6 +272,9 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
           6,
         ),
       ),
+      profile: VALID_PROFILES.has(orchestration.profile as AgentProfile)
+        ? (orchestration.profile as AgentProfile)
+        : defaultConfig.orchestration.profile,
     },
     budgets: {
       runWallClockSeconds: numberInRange(
