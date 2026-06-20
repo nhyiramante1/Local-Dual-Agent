@@ -134,6 +134,13 @@ pre{white-space:pre-wrap;background:#0e1217;border:1px solid var(--line);padding
 .proposal-confirm{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:8px}
 .proposal-confirm input{color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:7px;padding:7px 9px;font:inherit}
 .proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
+.proposal-history{margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none}
+.proposal-history summary::-webkit-details-marker{display:none}
+.proposal-history-item{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
+.proposal-history-item:last-child{border-bottom:none}
+.proposal-history-item .phi-action{font-weight:600}
+.proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -298,7 +305,7 @@ async function refreshConversation(conversationId) {
   const data = await api("/chat/conversations/"+encodeURIComponent(conversationId));
   rememberConversation(data.conversation);
   if (!isCurrentConversation(data.conversation)) return data;
-  renderTurns(data.turns, data.proposals || []);
+  renderTurns(data.turns, data.proposals || [], data.proposalHistory || []);
   const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
   const failure = failedTurnMessage(failed);
   if (failure) setChatStatus(failure, true);
@@ -326,7 +333,7 @@ function setConn(state) {
   else if (state === "reconnecting") { el.textContent = "reconnecting"; el.className = "conn conn-bad"; }
   else { el.textContent = "connecting"; el.className = "conn"; }
 }
-function renderTurns(turns, proposals = []) {
+function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
     q("chat-turns").innerHTML='<span class="empty">No turns yet.</span>';
     return;
@@ -337,7 +344,7 @@ function renderTurns(turns, proposals = []) {
     list.push(proposal);
     proposalsByTurn.set(proposal.turnId, list);
   }
-  q("chat-turns").innerHTML = turns.map(turn => {
+  const turnsHtml = turns.map(turn => {
     const who = turn.role === "manager"
       ? "Manager: "+(turn.interfaceAgent || chat.agent)
       : (turn.role === "user" ? "You" : turn.role);
@@ -358,10 +365,30 @@ function renderTurns(turns, proposals = []) {
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
     return '<div class="chat-turn '+esc(turn.role)+(failed ? " failed" : "")+'"><div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>'+note+'<div class="body">'+body+'</div>'+cards+'</div>';
   }).join("");
+  q("chat-turns").innerHTML = turnsHtml + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
 }
 function actionLabel(action) {
   return String(action || "").replaceAll("_", " ");
+}
+function renderProposalHistory(proposals) {
+  const inactive = proposals.filter(p => p.status !== 'proposed');
+  if (!inactive.length) return '';
+  const items = inactive.map(p => {
+    const opLink = p.operationId
+      ? ' <span class="phi-op">→ op '+esc(p.operationId.slice(0,8))+'</span>'
+      : '';
+    const when = p.createdAt ? new Date(p.createdAt) : null;
+    const ts = when && !isNaN(when.getTime()) ? '<span class="phi-op">'+esc(when.toLocaleTimeString())+'</span>' : '';
+    return '<div class="proposal-history-item">'
+      +'<span class="phi-action">'+esc(actionLabel(p.action))+'</span>'
+      +badge(p.status)
+      +opLink
+      +ts
+      +'</div>';
+  }).join('');
+  const count = inactive.length;
+  return '<details class="proposal-history"><summary>'+count+' past suggestion'+(count===1?'':'s')+'</summary>'+items+'</details>';
 }
 function renderProposalCard(proposal) {
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");

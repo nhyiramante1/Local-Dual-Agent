@@ -11,6 +11,7 @@ import {
 } from "../src/chat/proposals.js";
 import type {
   ConversationRecord,
+  ProposalAction,
   RunRecord,
   TaskRecord,
 } from "../src/core/domain.js";
@@ -186,5 +187,68 @@ test("tryValidateAndSynthesize assigns fingerprint tiers to approval and merge a
       assert.ok(proposal);
       assert.equal(proposal.tier, "fingerprint");
     }
+  });
+});
+
+test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {
+  await withStore(async (store) => {
+    const conversation = seed(store);
+
+    function makeProposal(action: ProposalAction, expiresAt: string): string {
+      const turn = store.appendConversationTurn({
+        conversationId: conversation.id,
+        role: "manager",
+        interfaceAgent: "codex",
+        content: "suggestion",
+      });
+      const id = randomUUID();
+      store.createProposal({
+        id,
+        conversationId: conversation.id,
+        turnId: turn.id,
+        runId: "run-1",
+        action,
+        summary: "test",
+        commandCli: `duet run run-1`,
+        commandJson: JSON.stringify({ action, runId: "run-1" }),
+        tier: "ordinary",
+        expiresAt,
+      });
+      return id;
+    }
+
+    const future = new Date(Date.now() + 15 * 60_000).toISOString();
+    const past = new Date(Date.now() - 60_000).toISOString();
+
+    const dismissedId = makeProposal("execute_run", future);
+    store.dismissProposal(conversation.id, dismissedId);
+
+    const startedId = makeProposal("resume_run", future);
+    const fakeOperationId = randomUUID();
+    store.markProposalStarted(conversation.id, startedId, fakeOperationId);
+
+    const expiredId = makeProposal("cancel_run", past);
+    store.expireProposals();
+
+    // listProposals should show none (all inactive)
+    assert.deepEqual(store.listProposals(conversation.id), []);
+
+    // listProposalsHistory should show all three
+    const history = store.listProposalsHistory(conversation.id);
+    assert.equal(history.length, 3);
+
+    const started = history.find((p) => p.id === startedId);
+    assert.ok(started);
+    assert.equal(started?.status, "started");
+    assert.equal(started?.operationId, fakeOperationId);
+
+    const dismissed = history.find((p) => p.id === dismissedId);
+    assert.ok(dismissed);
+    assert.equal(dismissed?.status, "dismissed");
+    assert.equal(dismissed?.operationId, undefined);
+
+    const expired = history.find((p) => p.id === expiredId);
+    assert.ok(expired);
+    assert.equal(expired?.status, "expired");
   });
 });

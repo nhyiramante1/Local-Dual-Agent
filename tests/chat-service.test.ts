@@ -2014,6 +2014,42 @@ test("openai provider mock completes a manager turn successfully", async () => {
   }
 });
 
+test("proposal start stores operationId on the proposal and listProposalsHistory includes it", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    const proposalId = createStoredProposal(h.store, conversationId, {
+      action: "execute_run",
+    });
+    const run = h.store.getRun("proposal-run");
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": "start-history-test-1" },
+        body: JSON.stringify({ confirm: "start", expectedRunVersion: run.version }),
+      },
+    );
+    assert.equal(response.status, 202);
+    const operation = ((await response.json()) as { data: OperationRecord }).data;
+
+    const proposal = h.store.getProposal(proposalId);
+    assert.equal(proposal.status, "started");
+    assert.equal(proposal.operationId, operation.id);
+
+    const history = h.store.listProposalsHistory(conversationId);
+    const record = history.find((p) => p.id === proposalId);
+    assert.ok(record, "started proposal should appear in history");
+    assert.equal(record?.operationId, operation.id);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("missing openai adapter returns CONFIGURATION_ERROR when interfaceAgent is openai", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-noopenai-"));
   const store = new Store(path.join(directory, "state.sqlite"));

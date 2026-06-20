@@ -523,6 +523,7 @@ export class DuetService {
               limit: 200,
             }),
             proposals: this.options.store.listProposals(conversationId),
+            proposalHistory: this.options.store.listProposalsHistory(conversationId),
           }),
         );
         return;

@@ -495,6 +495,16 @@ export class Store {
       );
       this.db.exec("PRAGMA user_version = 5");
     });
+
+    this.transaction(() => {
+      const version = (
+        this.db.prepare("PRAGMA user_version").get() as { user_version: number }
+      ).user_version;
+      if (version < 6) {
+        this.addColumn("manager_action_proposals", "operation_id TEXT");
+        this.db.exec("PRAGMA user_version = 6");
+      }
+    });
   }
 
   private appendEvent(options: {
@@ -2172,6 +2182,18 @@ export class Store {
     return rows.map((row) => this.mapProposal(row));
   }
 
+  listProposalsHistory(conversationId: string): ManagerActionProposal[] {
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM manager_action_proposals
+        WHERE conversation_id = ?
+        ORDER BY created_at DESC
+        LIMIT 100
+      `)
+      .all(conversationId) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapProposal(row));
+  }
+
   dismissProposal(conversationId: string, proposalId: string): void {
     this.transaction(() => {
       const proposal = this.getProposal(proposalId);
@@ -2224,9 +2246,9 @@ export class Store {
       this.db
         .prepare(`
           UPDATE manager_action_proposals
-          SET status = 'started', updated_at = ? WHERE id = ?
+          SET status = 'started', operation_id = ?, updated_at = ? WHERE id = ?
         `)
-        .run(now(), proposalId);
+        .run(operationId, now(), proposalId);
       this.appendEvent({
         type: "chat.proposal.started",
         runId: proposal.runId,
@@ -2290,6 +2312,7 @@ export class Store {
       commandJson: String(row.command_json),
       tier: row.tier as ProposalTier,
       status: row.status as ProposalStatus,
+      operationId: row.operation_id ? String(row.operation_id) : undefined,
       expiresAt: String(row.expires_at),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
