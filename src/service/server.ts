@@ -117,6 +117,7 @@ export class DuetService {
   private readonly streams = new Set<ServerResponse>();
   private lastRequestAt = Date.now();
   private idleTimer?: NodeJS.Timeout;
+  private sweepTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: ServerOptions) {
     this.app = new ApplicationCommands(options.store);
@@ -145,6 +146,18 @@ export class DuetService {
       this.server.listen(0, "127.0.0.1", () => resolve());
     });
     this.idleTimer = setInterval(() => this.checkIdle(), 10_000);
+    this.sweepTimer = setInterval(() => {
+      try {
+        const expired = this.options.store.expireProposals();
+        if (expired > 0) {
+          void serviceLog("info", "expired stale proposals", { count: expired });
+        }
+      } catch (error) {
+        void serviceLog("warning", "proposal expiry sweep failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }, 60_000);
     const address = this.server.address();
     if (!address || typeof address === "string") {
       throw new DuetError("Could not determine service port.", "SERVICE_START_FAILED");
@@ -154,6 +167,7 @@ export class DuetService {
 
   async close(): Promise<void> {
     if (this.idleTimer) clearInterval(this.idleTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     for (const stream of this.streams) stream.end();
     this.streams.clear();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
@@ -326,6 +340,7 @@ export class DuetService {
                   "RUN_NOT_FOUND",
                   "CONVERSATION_NOT_FOUND",
                   "OPERATION_NOT_FOUND",
+                  "PROPOSAL_NOT_FOUND",
                 ].includes(error.code)
               ? 404
               : 400;
@@ -392,6 +407,34 @@ export class DuetService {
       }
       throw new DuetError("Not found.", "NOT_FOUND");
     }
+    const proposalDismissMatch =
+      /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/dismiss$/.exec(
+        route,
+      );
+    if (proposalDismissMatch) {
+      if (request.method !== "POST") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const conversationId = decodeURIComponent(proposalDismissMatch[1]);
+      const proposalId = decodeURIComponent(proposalDismissMatch[2]);
+      const bodyText = await readBody(request);
+      await this.mutate(
+        request,
+        response,
+        requestId,
+        route,
+        bodyText,
+        () => {
+          this.options.store.getConversation(conversationId);
+          this.options.store.dismissProposal(conversationId, proposalId);
+          return {
+            status: 200,
+            data: { proposalId, status: "dismissed" },
+          };
+        },
+      );
+      return;
+    }
     const chatMatch = /^\/chat\/conversations\/([^/]+)(\/turns)?$/.exec(route);
     if (chatMatch) {
       const conversationId = decodeURIComponent(chatMatch[1]);
@@ -407,6 +450,7 @@ export class DuetService {
             turns: this.options.store.listConversationTurns(conversationId, {
               limit: 200,
             }),
+            proposals: this.options.store.listProposals(conversationId),
           }),
         );
         return;

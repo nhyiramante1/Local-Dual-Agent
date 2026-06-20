@@ -1,4 +1,5 @@
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 
 import type {
   AgentResult,
@@ -18,6 +19,8 @@ import {
   type ChatContextBuilder,
   type ChatContextOptions,
 } from "./context.js";
+import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
+import { serviceLog } from "../service/logger.js";
 
 /**
  * Per-provider manager-chat budgets. Claude is metered in USD; Codex has no
@@ -147,19 +150,65 @@ export class ChatEngine {
         throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
       }
     } finally {
-      if (before) {
+      // Only assert fingerprint when the provider call completed (result is set).
+      // If the provider itself threw, skip asserting to avoid masking the original error.
+      if (before && result) {
         const after = await fingerprintRepository(cwd);
         assertFingerprintUnchanged(before, after);
       }
     }
-    return this.store.appendConversationTurn({
-      conversationId,
-      role: "manager",
-      interfaceAgent: provider,
-      content: result.finalText,
-      providerSessionId: result.sessionId,
-      usageJson: JSON.stringify(result.usage),
-      operationId,
+    // Parse any proposal block from the reply. Strip it from visible content.
+    const parseResult = parseProposalBlock(result.finalText);
+    const contentToStore =
+      parseResult.kind === "parsed"
+        ? parseResult.strippedText
+        : result.finalText;
+    const synthesized =
+      parseResult.kind === "parsed"
+        ? tryValidateAndSynthesize(parseResult.raw, conversation, this.store)
+        : null;
+    if (parseResult.kind === "invalid") {
+      void serviceLog("warning", "manager proposal block was malformed", {
+        conversationId,
+        reason: parseResult.reason,
+      });
+    } else if (parseResult.kind === "parsed" && synthesized === null) {
+      void serviceLog("warning", "manager proposal failed validation", {
+        conversationId,
+        action: parseResult.raw.action,
+        runId: parseResult.raw.runId,
+      });
+    }
+
+    // Persist turn + optional proposal atomically.
+    // If a valid proposal fails to persist (DB error), the whole transaction
+    // rolls back so the turn is not silently stored without its proposal.
+    return this.store.transaction(() => {
+      const turn = this.store.appendConversationTurn({
+        conversationId,
+        role: "manager",
+        interfaceAgent: provider,
+        content: contentToStore,
+        providerSessionId: result.sessionId,
+        usageJson: JSON.stringify(result.usage),
+        operationId,
+      });
+      if (synthesized) {
+        this.store.createProposal({
+          id: randomUUID(),
+          conversationId,
+          turnId: turn.id,
+          runId: synthesized.runId,
+          taskId: synthesized.taskId,
+          action: synthesized.action,
+          summary: synthesized.summary,
+          commandCli: synthesized.commandCli,
+          commandJson: synthesized.commandJson,
+          tier: synthesized.tier,
+          expiresAt: synthesized.expiresAt,
+        });
+      }
+      return turn;
     });
   }
 

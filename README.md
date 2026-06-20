@@ -30,7 +30,9 @@ considered, but Windows is the main development target right now.
 
 Manager chat is being added now. The dashboard can run read-only manager
 conversations with summarized run, task, usage, event, verification, and
-message context. Approval, execution, and merge controls still stay in the CLI.
+message context. It can also show suggested Duet CLI action cards that you can
+copy or dismiss. Cards do not execute anything; approval, execution, retry,
+cancel, cleanup, conflict resolution, and merge controls still stay in the CLI.
 
 ## What It Does Not Do Yet
 
@@ -355,9 +357,30 @@ The dashboard currently focuses on inspection:
 - conflicts
 - approval state
 
-The manager-chat panel is read-only. It can explain what is happening in a run,
-but dashboard write controls are still planned and approvals/execution remain
-terminal commands.
+The manager-chat panel is read-only. It can explain what is happening in a run
+and may show suggested Duet CLI action cards. You can copy a suggested command
+or dismiss the card, but the dashboard does not run it for you.
+
+Manager chat may use provider quota when you send a message. Treat it like a
+real Claude/Codex turn, even though it cannot approve, run, cancel, or merge
+work from the dashboard.
+
+Approvals, execution, retry, cancellation, cleanup, conflict resolution, and
+merge still happen through the ordinary Duet CLI. Fingerprint-gated actions
+still require terminal confirmation.
+
+### Manual Dashboard Chat Smoke Check
+
+Before relying on a new dashboard-chat build with real providers, try one small
+local run and confirm:
+
+- A real manager reply appears after normal provider latency.
+- Provider or budget failures show a readable error.
+- The repository remains unchanged after a read-only manager chat turn.
+- Typing `/approve plan`, `/run`, `/merge`, or `/cancel` sends plain chat text
+  and does not perform those actions.
+- Refreshing or briefly disconnecting the browser does not duplicate timeline
+  events.
 
 ## Practical Tips
 
@@ -392,7 +415,15 @@ For contributors:
 npm run check
 npm test
 npm run build
+npm run test:dashboard
 npm audit
+```
+
+`npm run test:dashboard` launches a local browser smoke test. If Chromium is not
+installed for Playwright, run:
+
+```powershell
+npx playwright install chromium
 ```
 
 Keep this README updated as new user-visible features land, especially the

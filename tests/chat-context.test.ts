@@ -136,6 +136,10 @@ test("context includes recent conversation turns chronologically without a run",
     assert.match(context.prompt, /## Manager Rules/);
     assert.match(context.prompt, /read-only and informational/);
     assert.match(context.prompt, /untrusted/);
+    assert.match(context.prompt, /## Action Proposal Format/);
+    assert.match(context.prompt, /Proposals are suggestions only/);
+    assert.match(context.prompt, /server synthesizes/);
+    assert.match(context.prompt, /Do NOT propose create_plan/);
     assert.match(context.prompt, /## Conversation/);
     assert.doesNotMatch(context.prompt, /message 1/);
     assert.match(context.prompt, /message 4/);
