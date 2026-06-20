@@ -3,8 +3,7 @@ import path from "node:path";
 
 import { parse } from "smol-toml";
 
-import type { ManagerBudget } from "./chat/engine.js";
-import type { ProviderName } from "./core/domain.js";
+import type { ManagerBudget, ProviderName } from "./core/domain.js";
 import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 

@@ -294,3 +294,13 @@ export interface UsageSummary {
   totalTurns: number;
   totalDurationMs: number;
 }
+
+
+export interface ManagerBudget {
+  claudeMaxUsdPerTurn: number;
+  claudeMaxUsdPerDay: number;
+  codexMaxInputTokensPerDay: number;
+  codexMaxOutputTokensPerDay: number;
+  codexMaxRuntimeSeconds: number;
+  maxTurnsPerDay: number;
+}
