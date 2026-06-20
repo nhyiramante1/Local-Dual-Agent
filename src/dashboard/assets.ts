@@ -367,6 +367,7 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
   }).join("");
   q("chat-turns").innerHTML = turnsHtml + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
+  enrichHistoryOutcomes().catch(() => {});
 }
 function actionLabel(action) {
   return String(action || "").replaceAll("_", " ");
@@ -376,7 +377,7 @@ function renderProposalHistory(proposals) {
   if (!inactive.length) return '';
   const items = inactive.map(p => {
     const opLink = p.operationId
-      ? ' <span class="phi-op">→ op '+esc(p.operationId.slice(0,8))+'</span>'
+      ? ' <span class="phi-op" data-phi-operation="'+esc(p.operationId)+'">→ op '+esc(p.operationId.slice(0,8))+'</span>'
       : '';
     const when = p.createdAt ? new Date(p.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="phi-op">'+esc(when.toLocaleTimeString())+'</span>' : '';
@@ -389,6 +390,22 @@ function renderProposalHistory(proposals) {
   }).join('');
   const count = inactive.length;
   return '<details class="proposal-history"><summary>'+count+' past suggestion'+(count===1?'':'s')+'</summary>'+items+'</details>';
+}
+async function enrichHistoryOutcomes() {
+  const spans = q("chat-turns").querySelectorAll("[data-phi-operation]");
+  for (const span of spans) {
+    const opId = span.dataset.phiOperation;
+    if (!opId) continue;
+    try {
+      const op = await api("/operations/"+encodeURIComponent(opId));
+      if (!["queued","running"].includes(op.status)) {
+        span.textContent = "→ op "+opId.slice(0,8)+" "+op.status;
+        span.className = (op.status === "succeeded") ? "phi-op ok"
+          : (op.status === "failed" || op.status === "cancelled" || op.status === "interrupted") ? "phi-op bad"
+          : "phi-op";
+      }
+    } catch { /* operation not found or network error — leave label as-is */ }
+  }
 }
 function renderProposalCard(proposal) {
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
@@ -610,6 +627,11 @@ async function connectEvents() {
       const conversation = currentConversation();
       if (conversation && item.payload && item.payload.conversationId === conversation.id) {
         refreshConversation(conversation.id).catch(()=>{});
+      }
+    }
+    if(item.type==="operation.updated" && item.operationId) {
+      if(q("chat-turns").querySelector('[data-phi-operation="'+CSS.escape(item.operationId)+'"]')) {
+        enrichHistoryOutcomes().catch(()=>{});
       }
     }
   });
