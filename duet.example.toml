@@ -25,3 +25,17 @@ commands = [
 
 [verification.env]
 CI = "true"
+
+[manager]
+# Maximum USD a single manager turn may spend via Claude.
+claude_max_usd_per_turn = 0.5
+# Daily Claude spend cap across all manager turns.
+claude_max_usd_per_day = 5.0
+# Daily Codex input token cap for manager turns.
+codex_max_input_tokens_per_day = 500000
+# Daily Codex output token cap for manager turns.
+codex_max_output_tokens_per_day = 100000
+# Wall-clock seconds a single Codex manager turn may run.
+codex_runtime_seconds = 120
+# Maximum manager turns per day (all interface agents combined).
+max_turns_per_day = 200
