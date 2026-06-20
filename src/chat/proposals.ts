@@ -285,6 +285,9 @@ export function prepareProposalAction(
     return unavailable(prepared, "This suggestion is no longer active.");
   }
 
+  if (conversation.runId && proposal.runId !== conversation.runId) {
+    return unavailable(prepared, "This suggestion no longer matches the conversation run.");
+  }
   let run: RunRecord | undefined;
   if (proposal.runId) {
     try {
@@ -297,9 +300,6 @@ export function prepareProposalAction(
     } catch {
       return unavailable(prepared, "The linked run no longer exists.");
     }
-  }
-  if (conversation.runId && proposal.runId !== conversation.runId) {
-    return unavailable(prepared, "This suggestion no longer matches the conversation run.");
   }
 
   if (proposal.taskId) {
@@ -377,5 +377,15 @@ function unavailable(
 }
 
 function runChangingAction(action: ProposalAction): boolean {
-  return Boolean(action);
+  switch (action) {
+    case "execute_run":
+    case "resume_run":
+    case "retry_task":
+    case "resolve_task":
+    case "cleanup_run":
+    case "merge_run":
+      return true;
+    default:
+      return false;
+  }
 }
