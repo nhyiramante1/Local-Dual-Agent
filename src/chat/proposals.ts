@@ -487,6 +487,8 @@ function runChangingAction(action: ProposalAction): boolean {
     case "resume_run":
     case "retry_task":
     case "resolve_task":
+    case "cancel_run":
+    case "cancel_task":
     case "cleanup_run":
     case "merge_run":
       return true;

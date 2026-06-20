@@ -1182,6 +1182,43 @@ test("proposal start rejects fingerprint, inactive, active-run, and ownership mi
   }
 });
 
+test("proposal start rejects proposals swept to expired status by expireProposals", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "codex",
+      runId: "proposal-run",
+    });
+    // Create a proposal whose expiresAt is already in the past so the sweep
+    // will pick it up. The status is still 'proposed' at this point.
+    const proposalId = createStoredProposal(h.store, conversationId, {
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    assert.equal(h.store.getProposal(proposalId).status, "proposed");
+
+    // Simulate the periodic expiry sweep.
+    const swept = h.store.expireProposals();
+    assert.equal(swept, 1);
+    assert.equal(h.store.getProposal(proposalId).status, "expired");
+
+    const run = h.store.getRun("proposal-run");
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": "start-swept-proposal" },
+        body: JSON.stringify({ confirm: "start", expectedRunVersion: run.version }),
+      },
+    );
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "PROPOSAL_NOT_ACTIVE");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("dashboard session cannot start proposals or mutate runs directly", async () => {
   const h = await startService();
   try {
