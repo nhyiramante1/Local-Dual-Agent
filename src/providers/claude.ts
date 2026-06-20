@@ -8,7 +8,7 @@ import type {
   AgentTurn,
   ProviderAdapter,
 } from "./adapter.js";
-import { CLAUDE_MODELS } from "./profiles.js";
+import { CLAUDE_EFFORT, CLAUDE_MODELS } from "./profiles.js";
 
 interface ClaudeResultEvent {
   type?: string;
@@ -55,6 +55,8 @@ export class ClaudeAdapter implements ProviderAdapter {
     }
     const model = CLAUDE_MODELS[turn.profile ?? "balanced"];
     if (model) args.push("--model", model);
+    const effort = CLAUDE_EFFORT[turn.profile ?? "balanced"];
+    if (effort) args.push("--effort", effort);
     args.push(turn.prompt);
 
     const result = await runCommand(command.command, args, {

@@ -119,7 +119,7 @@ export class ChatEngine {
     const before = conversation.runId
       ? await fingerprintRepository(cwd)
       : undefined;
-    let result: AgentResult;
+    let result: AgentResult | undefined;
     try {
       result = await adapter.run({
         cwd,
@@ -141,6 +141,9 @@ export class ChatEngine {
         assertFingerprintUnchanged(before, after);
       }
     }
+    // result is always set here — the try block throws on provider failure,
+    // and the finally guard already checks `result` before asserting fingerprint.
+    if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
     // Parse any proposal block from the reply. Strip it from visible content.
     const parseResult = parseProposalBlock(result.finalText);
     const contentToStore =

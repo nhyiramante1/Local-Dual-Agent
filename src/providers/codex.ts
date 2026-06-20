@@ -9,7 +9,7 @@ import type {
 } from "./adapter.js";
 import { resolveCodexCommand } from "./commands.js";
 import { sanitizedAgentEnvironment } from "./environment.js";
-import { CODEX_MODELS } from "./profiles.js";
+import { CODEX_EFFORT, CODEX_MODELS } from "./profiles.js";
 
 interface CodexEvent {
   type?: string;
@@ -103,6 +103,8 @@ export class CodexAdapter implements ProviderAdapter {
 export function buildCodexArgs(turn: AgentTurn): string[] {
   const modelFlag = CODEX_MODELS[turn.profile ?? "balanced"];
   const modelArgs = modelFlag ? ["-m", modelFlag] : [];
+  const effortFlag = CODEX_EFFORT[turn.profile ?? "balanced"];
+  const effortArgs = effortFlag ? ["--reasoning-effort", effortFlag] : [];
   if (turn.sessionId) {
     return [
       "exec",
@@ -115,6 +117,7 @@ export function buildCodexArgs(turn: AgentTurn): string[] {
       "-c",
       'approval_policy="never"',
       ...modelArgs,
+      ...effortArgs,
       turn.sessionId,
       turn.prompt,
     ];
@@ -129,6 +132,7 @@ export function buildCodexArgs(turn: AgentTurn): string[] {
     "-c",
     'approval_policy="never"',
     ...modelArgs,
+    ...effortArgs,
     "--cd",
     turn.cwd,
     turn.prompt,
