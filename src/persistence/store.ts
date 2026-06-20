@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
+  AgentProfile,
   AgentResult,
   ArtifactRecord,
   ConversationRecord,
@@ -50,6 +51,7 @@ interface RunRow {
   final_commit: string | null;
   error: string | null;
   config_json: string;
+  profile: string;
   cancellation_requested: number;
   created_at: string;
   updated_at: string;
@@ -486,6 +488,10 @@ export class Store {
         "truncated INTEGER NOT NULL DEFAULT 0",
       );
       this.addColumn("conversation_turns", "original_length INTEGER");
+      this.addColumn(
+        "runs",
+        "profile TEXT NOT NULL DEFAULT 'balanced'",
+      );
       this.db.exec("PRAGMA user_version = 5");
     });
   }
@@ -525,9 +531,9 @@ export class Store {
             id, repo_path, repo_root, goal, status, lead_provider,
             worker_provider, base_branch, base_commit, integration_branch,
             worktree_path, integration_worktree_path, plan_json, review_json,
-            revision_count, final_commit, error, config_json,
+            revision_count, final_commit, error, config_json, profile,
             cancellation_requested, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           run.id,
@@ -548,6 +554,7 @@ export class Store {
           run.finalCommit ?? null,
           run.error ?? null,
           run.configJson,
+          run.profile ?? "balanced",
           run.cancellationRequested ? 1 : 0,
           run.createdAt,
           run.updatedAt,
@@ -2598,6 +2605,7 @@ export class Store {
       finalCommit: row.final_commit ?? undefined,
       error: row.error ?? undefined,
       configJson: row.config_json,
+      profile: (row.profile as AgentProfile | undefined) ?? "balanced",
       cancellationRequested: row.cancellation_requested === 1,
       version: row.version,
       createdAt: row.created_at,

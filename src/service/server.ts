@@ -11,8 +11,8 @@ import {
   ChatEngine,
   defaultManagerBudget,
   type ChatProviders,
-  type ManagerBudget,
 } from "../chat/engine.js";
+import type { ManagerBudget } from "../core/domain.js";
 import {
   prepareProposalAction,
   startProposalAction,

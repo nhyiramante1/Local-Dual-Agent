@@ -92,6 +92,18 @@ export class ActivityManager {
     return this.activities.size > 0;
   }
 
+  cancelActive(operationId: string): void {
+    const operation = this.app.store.getOperation(operationId);
+    if (operation.status !== "queued" && operation.status !== "running") return;
+    this.app.store.updateOperation(operationId, {
+      status: "cancelled",
+      errorJson: JSON.stringify({ code: "CANCELLED", message: "Cancelled before start." }),
+      finishedAt: new Date().toISOString(),
+    });
+    if (operation.runId) this.activeRuns.delete(operation.runId);
+    this.activities.delete(operationId);
+  }
+
   async wait(operationId: string): Promise<OperationRecord> {
     await this.activities.get(operationId);
     return this.get(operationId);

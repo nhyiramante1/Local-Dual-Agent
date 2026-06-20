@@ -4,6 +4,9 @@ max_revisions = 1
 agent_timeout_seconds = 600
 max_parallel_tasks = 2
 max_tasks = 6
+# Agent profile: cheap | balanced | reasoning | max
+# Controls Claude model (haiku/opus) and Codex model selection.
+profile = "balanced"
 
 [budgets]
 run_wall_clock_seconds = 3600

@@ -2,13 +2,13 @@ import type {
   ConversationRecord,
   ConversationTurnRecord,
   DuetEvent,
+  ManagerBudget,
   ProviderName,
   RunRecord,
   TaskRecord,
   UsageSummary,
 } from "../core/domain.js";
 import type { Store } from "../persistence/store.js";
-import type { ManagerBudget } from "./engine.js";
 
 export interface ChatContextOptions {
   totalPromptCap: number;
@@ -307,6 +307,7 @@ export function buildManagerChatContext(
         valueLine("repo_root", run.repoRoot, 1_000),
         `base_branch: ${run.baseBranch}`,
         `base_commit: ${run.baseCommit}`,
+        `profile: ${run.profile ?? "balanced"}`,
         `plan_approved: ${store.isApproved(run.id, "plan")}`,
         `merge_approved: ${store.isApproved(run.id, "merge")}`,
         `plan_binding_known: ${Boolean(store.getApprovalBinding(run.id, "plan"))}`,

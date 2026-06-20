@@ -73,6 +73,39 @@ max_turns_per_day = 100
   );
 });
 
+test("loadConfig returns balanced profile when [orchestration] has no profile", async () => {
+  await withToml("", async (tomlPath) => {
+    const config = await loadConfig(tomlPath);
+    assert.equal(config.orchestration.profile, "balanced");
+  });
+});
+
+test("loadConfig reads profile from [orchestration]", async () => {
+  await withToml(
+    `
+[orchestration]
+profile = "reasoning"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.orchestration.profile, "reasoning");
+    },
+  );
+});
+
+test("loadConfig falls back to balanced for unrecognised profile", async () => {
+  await withToml(
+    `
+[orchestration]
+profile = "turbo-mode"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.orchestration.profile, "balanced");
+    },
+  );
+});
+
 test("loadConfig rejects [manager] values below minimum", async () => {
   await withToml(
     `

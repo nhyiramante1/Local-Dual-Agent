@@ -1,5 +1,7 @@
 export type ProviderName = "claude" | "codex";
 
+export type AgentProfile = "cheap" | "balanced" | "reasoning" | "max";
+
 export type RunStatus =
   | "planning"
   | "awaiting_plan_approval"
@@ -100,6 +102,7 @@ export interface RunRecord {
   finalCommit?: string;
   error?: string;
   configJson: string;
+  profile?: AgentProfile;
   cancellationRequested: boolean;
   version?: number;
   createdAt: string;

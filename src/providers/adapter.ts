@@ -1,4 +1,4 @@
-import type { AgentResult, ProviderName } from "../core/domain.js";
+import type { AgentProfile, AgentResult, ProviderName } from "../core/domain.js";
 
 export type AgentMode = "read-only" | "workspace-write";
 
@@ -8,6 +8,7 @@ export interface AgentTurn {
   mode: AgentMode;
   timeoutMs: number;
   maxBudgetUsd?: number;
+  profile?: AgentProfile;
   sessionId?: string;
   onStart?: (pid: number) => void;
   onStdout?: (chunk: string) => void;
