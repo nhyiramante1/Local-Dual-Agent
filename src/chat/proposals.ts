@@ -1,4 +1,7 @@
 import type {
+  LongRunningCommand,
+} from "../application/activities.js";
+import type {
   ConversationRecord,
   ManagerActionProposal,
   ProposalAction,
@@ -54,6 +57,17 @@ export interface PreparedProposalAction {
     status: TaskRecord["status"];
     version: number;
   };
+}
+
+export interface StartProposalInput {
+  confirm?: unknown;
+  expectedRunVersion?: unknown;
+  expectedTaskVersion?: unknown;
+}
+
+export interface StartProposalResult {
+  proposal: ManagerActionProposal;
+  command: LongRunningCommand;
 }
 
 type ActionSpec = {
@@ -334,6 +348,97 @@ export function prepareProposalAction(
   return prepared;
 }
 
+export function startProposalAction(
+  store: Store,
+  conversationId: string,
+  proposalId: string,
+  input: StartProposalInput,
+): StartProposalResult {
+  if (input.confirm !== "start") {
+    throw new DuetError(
+      "Type start to confirm this proposal.",
+      "INVALID_ARGUMENT",
+    );
+  }
+  const conversation = store.getConversation(conversationId);
+  const proposal = store.getProposal(proposalId);
+  if (proposal.conversationId !== conversationId) {
+    throw new DuetError(
+      `Proposal ${proposalId} is not in conversation ${conversationId}.`,
+      "PROPOSAL_NOT_FOUND",
+    );
+  }
+  if (conversation.runId && proposal.runId !== conversation.runId) {
+    throw new DuetError(
+      "This suggestion no longer matches the conversation run.",
+      "PROPOSAL_NOT_ACTIVE",
+    );
+  }
+  if (proposal.status === "started") {
+    throw new DuetError(
+      `Proposal ${proposalId} has already been started.`,
+      "PROPOSAL_ALREADY_STARTED",
+    );
+  }
+  if (proposal.status !== "proposed" || Date.parse(proposal.expiresAt) <= Date.now()) {
+    throw new DuetError(
+      `Proposal ${proposalId} is no longer active.`,
+      "PROPOSAL_NOT_ACTIVE",
+    );
+  }
+  if (proposal.tier === "fingerprint") {
+    throw new DuetError(
+      "Fingerprint-gated proposals must be completed in the CLI.",
+      "FINGERPRINT_PROPOSAL_CLI_ONLY",
+    );
+  }
+  if (!proposal.runId) {
+    throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
+  }
+  const run = store.getRun(proposal.runId);
+  const expectedRunVersion = Number(input.expectedRunVersion);
+  if (!Number.isInteger(expectedRunVersion)) {
+    throw new DuetError(
+      "expectedRunVersion is required.",
+      "INVALID_ARGUMENT",
+    );
+  }
+  if ((run.version ?? 1) !== expectedRunVersion) {
+    throw new DuetError("Run version changed.", "VERSION_CONFLICT");
+  }
+  const task = proposal.taskId
+    ? store.listTasks(proposal.runId).find((item) => item.id === proposal.taskId)
+    : undefined;
+  if (proposal.taskId && !task) {
+    throw new DuetError("The linked task no longer exists.", "TASK_NOT_FOUND");
+  }
+  if (task) {
+    const expectedTaskVersion = Number(input.expectedTaskVersion);
+    if (!Number.isInteger(expectedTaskVersion)) {
+      throw new DuetError(
+        "expectedTaskVersion is required.",
+        "INVALID_ARGUMENT",
+      );
+    }
+    if ((task.version ?? 1) !== expectedTaskVersion) {
+      throw new DuetError("Task version changed.", "VERSION_CONFLICT");
+    }
+  }
+  const active = store
+    .listActiveOperations()
+    .find((operation) => operation.runId === proposal.runId);
+  if (active) {
+    throw new DuetError(
+      `Run ${proposal.runId} already has active operation ${active.id}.`,
+      "RUN_ACTIVITY_ACTIVE",
+    );
+  }
+  return {
+    proposal,
+    command: commandForProposal(proposal),
+  };
+}
+
 function basePrepared(proposal: ManagerActionProposal): PreparedProposalAction {
   const requirements =
     proposal.tier === "fingerprint"
@@ -382,10 +487,50 @@ function runChangingAction(action: ProposalAction): boolean {
     case "resume_run":
     case "retry_task":
     case "resolve_task":
+    case "cancel_run":
+    case "cancel_task":
     case "cleanup_run":
     case "merge_run":
       return true;
     default:
       return false;
+  }
+}
+
+function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand {
+  if (!proposal.runId) {
+    throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
+  }
+  switch (proposal.action) {
+    case "execute_run":
+      return { kind: "execute", runId: proposal.runId };
+    case "resume_run":
+      return { kind: "resume", runId: proposal.runId };
+    case "retry_task":
+      if (!proposal.taskId) {
+        throw new DuetError("Retry proposal is missing a task.", "INVALID_PROPOSAL");
+      }
+      return { kind: "retry", runId: proposal.runId, taskId: proposal.taskId };
+    case "resolve_task":
+      if (!proposal.taskId) {
+        throw new DuetError("Resolve proposal is missing a task.", "INVALID_PROPOSAL");
+      }
+      return { kind: "resolve", runId: proposal.runId, taskId: proposal.taskId };
+    case "cancel_run":
+      return { kind: "cancel", runId: proposal.runId };
+    case "cancel_task":
+      if (!proposal.taskId) {
+        throw new DuetError("Cancel proposal is missing a task.", "INVALID_PROPOSAL");
+      }
+      return { kind: "cancel", runId: proposal.runId, taskId: proposal.taskId };
+    case "cleanup_run":
+      return { kind: "cleanup", runId: proposal.runId };
+    case "approve_plan":
+    case "approve_merge":
+    case "merge_run":
+      throw new DuetError(
+        "Fingerprint-gated proposals must be completed in the CLI.",
+        "FINGERPRINT_PROPOSAL_CLI_ONLY",
+      );
   }
 }

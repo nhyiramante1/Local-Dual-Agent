@@ -199,7 +199,7 @@ export type ProposalAction =
   | "merge_run";
 
 export type ProposalTier = "ordinary" | "fingerprint";
-export type ProposalStatus = "proposed" | "dismissed" | "expired";
+export type ProposalStatus = "proposed" | "dismissed" | "expired" | "started";
 
 export interface ManagerActionProposal {
   id: string;

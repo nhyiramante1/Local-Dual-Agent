@@ -131,6 +131,9 @@ pre{white-space:pre-wrap;background:#0e1217;border:1px solid var(--line);padding
 .proposal-readiness{margin-top:9px;border-top:1px solid var(--line);padding-top:8px;font-size:12px}
 .proposal-readiness ul{margin:6px 0 0 18px;padding:0}
 .proposal-readiness li{margin:2px 0}
+.proposal-confirm{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:8px}
+.proposal-confirm input{color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:7px;padding:7px 9px;font:inherit}
+.proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -385,9 +388,13 @@ function renderReadiness(prepared) {
   const blocked = prepared.blockedReason ? '<div class="bad">'+visibleText(prepared.blockedReason, 500)+'</div>' : "";
   const requirements = (prepared.requirements || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
   const warnings = (prepared.warnings || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
+  const start = prepared.available && prepared.tier === "ordinary"
+    ? '<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(prepared.proposalId)+'"><button type="button" disabled data-proposal-start="'+esc(prepared.proposalId)+'" data-run-version="'+esc(prepared.run?.version ?? "")+'" data-task-version="'+esc(prepared.task?.version ?? "")+'">Start operation</button></div>'
+    : "";
   return '<div><b>'+state+'</b></div>'+run+task+blocked+
     (requirements ? '<div class="proposal-copy">Requirements</div><ul>'+requirements+'</ul>' : "")+
-    (warnings ? '<div class="proposal-copy">Warnings</div><ul>'+warnings+'</ul>' : "");
+    (warnings ? '<div class="proposal-copy">Warnings</div><ul>'+warnings+'</ul>' : "")+
+    start;
 }
 async function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -423,14 +430,33 @@ async function prepareProposal(proposalId) {
   if (panel) panel.innerHTML = renderReadiness(prepared);
   setChatStatus(prepared.available ? "Suggestion checked. Copy the CLI command if you choose to proceed." : "Suggestion checked, but it is not currently ready.");
 }
+async function startProposal(proposalId, button) {
+  const conversation = currentConversation();
+  if (!conversation) return;
+  const body = { confirm: "start" };
+  if (button.dataset.runVersion) body.expectedRunVersion = Number(button.dataset.runVersion);
+  if (button.dataset.taskVersion) body.expectedTaskVersion = Number(button.dataset.taskVersion);
+  const operation = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/start", {
+    method: "POST",
+    idempotencyKey: requestKey("dashboard-proposal-start"),
+    body
+  });
+  const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
+  if (panel) panel.innerHTML = '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
+  await pollOperation(operation.id, conversation.id, "Duet operation");
+  if (selected) await selectRun(selected);
+}
 q("chat-turns").addEventListener("click", async (event) => {
   const prepare = event.target.closest("[data-proposal-prepare]");
+  const start = event.target.closest("[data-proposal-start]");
   const copy = event.target.closest("[data-proposal-copy]");
   const dismiss = event.target.closest("[data-proposal-dismiss]");
-  if (!prepare && !copy && !dismiss) return;
+  if (!prepare && !start && !copy && !dismiss) return;
   try {
     if (prepare) {
       await prepareProposal(prepare.dataset.proposalPrepare);
+    } else if (start) {
+      await startProposal(start.dataset.proposalStart, start);
     } else if (copy) {
       const card = copy.closest(".proposal-card");
       const command = card?.dataset.command || "";
@@ -443,6 +469,13 @@ q("chat-turns").addEventListener("click", async (event) => {
     setChatStatus(error.message, true);
   }
 });
+q("chat-turns").addEventListener("input", (event) => {
+  const input = event.target.closest("[data-proposal-start-input]");
+  if (!input) return;
+  const card = input.closest(".proposal-card");
+  const button = card?.querySelector('[data-proposal-start="'+CSS.escape(input.dataset.proposalStartInput)+'"]');
+  if (button) button.disabled = input.value.trim() !== "start";
+});
 function failedTurnMessage(turn) {
   if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
   try {
@@ -452,10 +485,10 @@ function failedTurnMessage(turn) {
     return turn.errorJson;
   }
 }
-async function pollOperation(operationId, conversationId) {
+async function pollOperation(operationId, conversationId, label="Manager turn") {
   chat.activeOperation = { id: operationId, conversationId };
   setChatEnabled(false);
-  setChatStatus("Manager turn running...");
+  setChatStatus(label+" running...");
   try {
     while (true) {
       const operation = await api("/operations/"+encodeURIComponent(operationId));
@@ -466,7 +499,7 @@ async function pollOperation(operationId, conversationId) {
             setChatStatus("Ready. Manager voice: "+chat.agent+".");
           }
         } else {
-          let message = "Manager turn "+operation.status+".";
+          let message = label+" "+operation.status+".";
           if (operation.errorJson) {
             try { message += " " + JSON.parse(operation.errorJson).message; }
             catch { message += " " + operation.errorJson; }

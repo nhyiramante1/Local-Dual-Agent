@@ -23,21 +23,21 @@ considered, but Windows is the main development target right now.
 - Require human approval before executing a plan and before final merge.
 - Pause safely for budget limits, failed tests, conflicts, or cancellation.
 - Resume, retry, cancel, clean up, and inspect previous runs.
-- Provide a read-only local browser dashboard.
+- Provide a local browser dashboard for inspection, manager chat, and starting
+  ordinary proposal actions.
 - Provide a restricted MCP bridge so Claude Code or Codex can inspect Duet
   runs and start bounded planning operations.
 - Store local durable history so runs can survive service restarts.
 
 Manager chat is being added now. The dashboard can run read-only manager
 conversations with summarized run, task, usage, event, verification, and
-message context. It can also show suggested Duet CLI action cards that you can
-check, copy, or dismiss. Cards do not execute anything; approval, execution,
-retry, cancel, cleanup, conflict resolution, and merge controls still stay in
-the CLI.
+message context. It can also show suggested Duet action cards. Ordinary
+suggestions can be checked and started from the dashboard after you type a
+confirmation. Fingerprint-gated approvals and merge still stay in the CLI.
 
 ## What It Does Not Do Yet
 
-- No dashboard buttons for approve/run/merge yet.
+- No dashboard buttons for plan approval, merge approval, or merge yet.
 - No automatic conflict resolver.
 - No remote/cloud service.
 - No support for untrusted repositories as a security sandbox.
@@ -187,8 +187,8 @@ npm run dev -- dashboard RUN_ID
 ```
 
 The dashboard URL is local and temporary. Paste it into your browser. The
-dashboard is read-only today, so approvals and execution still happen in the
-terminal.
+dashboard can inspect runs and start ordinary Manager proposal actions. Plan
+approval, merge approval, and merge still happen in the terminal.
 
 ## Approve And Run
 
@@ -358,18 +358,18 @@ The dashboard currently focuses on inspection:
 - conflicts
 - approval state
 
-The manager-chat panel is read-only. It can explain what is happening in a run
-and may show suggested Duet CLI action cards. You can check whether a suggestion
-still looks current, copy the command, or dismiss the card, but the dashboard
-does not run it for you.
+The manager-chat panel can explain what is happening in a run and may show
+suggested Duet action cards. You can check whether a suggestion still looks
+current, copy the command, dismiss the card, or start an ordinary operation
+after typing `start`.
 
 Manager chat may use provider quota when you send a message. Treat it like a
-real Claude/Codex turn, even though it cannot approve, run, cancel, or merge
-work from the dashboard.
+real Claude/Codex turn. It can suggest ordinary actions that you may start from
+the dashboard, but fingerprint-gated actions stay in the terminal.
 
-Approvals, execution, retry, cancellation, cleanup, conflict resolution, and
-merge still happen through the ordinary Duet CLI. Fingerprint-gated actions
-still require terminal confirmation.
+Plan approval, merge approval, and merge still happen through the ordinary Duet
+CLI. Fingerprint-gated actions still require terminal confirmation and are not
+started by the dashboard.
 
 ### Manual Dashboard Chat Smoke Check
 
