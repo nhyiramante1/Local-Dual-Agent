@@ -1851,11 +1851,304 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.doesNotMatch(dashboardJs, /setChatEnabled\(true\)/);
   assert.doesNotMatch(dashboardJs, /activeOperationId/);
   assert.doesNotMatch(dashboardJs, /action-ticket/);
-  assert.doesNotMatch(dashboardJs, /\/approve/);
+  // /approve is intentionally present — 6B adds browser-confirm approval path
+  assert.match(dashboardJs, /\/approve/);
+  assert.match(dashboardJs, /approval-preview/);
+  assert.match(dashboardJs, /data-proposal-approve/);
+  // direct run-mutation routes remain absent from the dashboard
   assert.doesNotMatch(dashboardJs, /\/merge/);
   assert.doesNotMatch(dashboardJs, /\/cancel/);
   assert.doesNotMatch(dashboardJs, /\/resolve/);
   assert.doesNotMatch(dashboardJs, /\/cleanup/);
+});
+
+test("approval-preview returns plan stage binding hash and run/task context", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const run = h.store.getRun("proposal-run");
+    const tasks = h.store.listTasks("proposal-run");
+    const response = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    assert.equal(response.status, 200);
+    const data = ((await response.json()) as { data: unknown }).data as Record<string, unknown>;
+    assert.equal(data.stage, "plan");
+    assert.equal(data.runVersion, run.version ?? 1);
+    assert.ok(typeof data.bindingHash === "string" && data.bindingHash.length === 64);
+    assert.deepEqual((data.run as Record<string, unknown>).baseBranch, run.baseBranch);
+    assert.ok(Array.isArray(data.tasks) && (data.tasks as unknown[]).length === tasks.length);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("approval-preview merge stage includes integration commit and task commits", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const response = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=merge`,
+      { headers: bearer() },
+    );
+    assert.equal(response.status, 200);
+    const data = ((await response.json()) as { data: unknown }).data as Record<string, unknown>;
+    assert.equal(data.stage, "merge");
+    assert.ok(typeof data.bindingHash === "string" && data.bindingHash.length === 64);
+    const run = data.run as Record<string, unknown>;
+    assert.ok("integrationBranch" in run);
+    assert.ok(Array.isArray(data.tasks));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+function seedRunAwaitingPlanApproval(store: Store): void {
+  const stamp = "2026-06-01T00:00:00.000Z";
+  store.createRun({
+    id: "proposal-run",
+    repoPath: "/repo",
+    repoRoot: "/repo",
+    goal: "proposal run",
+    status: "awaiting_plan_approval",
+    leadProvider: "codex",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: "duet/proposal-run/integration",
+    configJson: "{}",
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  }, [{
+    runId: "proposal-run",
+    id: "task-1",
+    ordinal: 0,
+    plan: {
+      id: "task-1",
+      title: "Task",
+      objective: "Do it",
+      acceptanceCriteria: ["done"],
+      allowedPaths: ["src/**"],
+      dependencies: [],
+    },
+    status: "failed",
+    provider: "codex",
+    reviewerProvider: "claude",
+    revisionCount: 0,
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  }]);
+}
+
+test("browser-confirm approve path accepts correct prefix and approves the run", async () => {
+  const h = await startService();
+  try {
+    seedRunAwaitingPlanApproval(h.store);
+    const previewRes = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    const preview = ((await previewRes.json()) as { data: Record<string, unknown> }).data;
+    const bindingHash = preview.bindingHash as string;
+    const runVersion = preview.runVersion as number;
+
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-approve-correct" },
+      body: JSON.stringify({
+        stage: "plan",
+        bindingHash,
+        runVersion,
+        confirm: bindingHash.slice(0, 8),
+      }),
+    });
+    assert.equal(approveRes.status, 200);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), true);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("browser-confirm approve path rejects wrong hash prefix with 400", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const previewRes = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    const preview = ((await previewRes.json()) as { data: Record<string, unknown> }).data;
+    const bindingHash = preview.bindingHash as string;
+    const runVersion = preview.runVersion as number;
+
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-approve-wrong" },
+      body: JSON.stringify({
+        stage: "plan",
+        bindingHash,
+        runVersion,
+        confirm: "00000000",
+      }),
+    });
+    assert.equal(approveRes.status, 400);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("browser-confirm approve path rejects stale runVersion with 409", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const previewRes = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    const preview = ((await previewRes.json()) as { data: Record<string, unknown> }).data;
+    const bindingHash = preview.bindingHash as string;
+
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-approve-stale" },
+      body: JSON.stringify({
+        stage: "plan",
+        bindingHash,
+        runVersion: 9999,
+        confirm: bindingHash.slice(0, 8),
+      }),
+    });
+    assert.equal(approveRes.status, 409);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("browser-confirm approve path is accessible from a dashboard session", async () => {
+  const h = await startService();
+  try {
+    seedRunAwaitingPlanApproval(h.store);
+    const previewRes = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    const preview = ((await previewRes.json()) as { data: Record<string, unknown> }).data;
+    const bindingHash = preview.bindingHash as string;
+    const runVersion = preview.runVersion as number;
+
+    const cookie = await sessionCookie(h.base);
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "test-approve-session",
+      },
+      body: JSON.stringify({
+        stage: "plan",
+        bindingHash,
+        runVersion,
+        confirm: bindingHash.slice(0, 8),
+      }),
+    });
+    assert.equal(approveRes.status, 200);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), true);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard session cannot use the action-ticket approval path", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const cookie = await sessionCookie(h.base);
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "test-approve-session-ticket",
+      },
+      body: JSON.stringify({
+        stage: "plan",
+        actionTicket: "some-fake-ticket",
+        expectedVersion: 1,
+      }),
+    });
+    assert.equal(approveRes.status, 403);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("browser-confirm approve path rate-limits after 3 failed prefix attempts", async () => {
+  const h = await startService();
+  try {
+    seedRunWithTask(h.store);
+    const previewRes = await fetch(
+      `${h.base}/api/v1/runs/proposal-run/approval-preview?stage=plan`,
+      { headers: bearer() },
+    );
+    const preview = ((await previewRes.json()) as { data: Record<string, unknown> }).data;
+    const bindingHash = preview.bindingHash as string;
+    const runVersion = preview.runVersion as number;
+
+    for (let i = 0; i < 3; i++) {
+      await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": `test-approve-bad-${i}` },
+        body: JSON.stringify({ stage: "plan", bindingHash, runVersion, confirm: "00000000" }),
+      });
+    }
+
+    const blocked = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-approve-blocked" },
+      body: JSON.stringify({ stage: "plan", bindingHash, runVersion, confirm: "00000000" }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("CLI action-ticket approve path still works for bearer (unaffected by 6B)", async () => {
+  const h = await startService();
+  try {
+    seedRunAwaitingPlanApproval(h.store);
+    const run = h.store.getRun("proposal-run");
+    const tasks = h.store.listTasks("proposal-run");
+    // Issue an action ticket (CLI path)
+    const ticketRes = await fetch(`${h.base}/api/v1/runs/proposal-run/action-ticket`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-ticket-6b" },
+      body: JSON.stringify({ action: "approve_plan", expectedVersion: run.version ?? 1 }),
+    });
+    assert.equal(ticketRes.status, 200);
+    const ticketData = ((await ticketRes.json()) as { data: { ticket: string } }).data;
+
+    // Use the ticket to approve
+    const approveRes = await fetch(`${h.base}/api/v1/runs/proposal-run/approve`, {
+      method: "POST",
+      headers: { ...bearer(), "idempotency-key": "test-approve-ticket-6b" },
+      body: JSON.stringify({
+        stage: "plan",
+        actionTicket: ticketData.ticket,
+        expectedVersion: run.version ?? 1,
+      }),
+    });
+    assert.equal(approveRes.status, 200);
+    assert.equal(h.store.isApproved("proposal-run", "plan"), true);
+  } finally {
+    await h.cleanup();
+  }
 });
 
 test("cross-origin chat POST is rejected", async () => {
