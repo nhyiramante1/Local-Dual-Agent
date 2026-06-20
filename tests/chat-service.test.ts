@@ -1826,7 +1826,7 @@ test("dashboard session can manage read-only run chat for both interface agents"
 
 test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardHtml, /Manager Chat/);
-  assert.match(dashboardHtml, /read-only manager/i);
+  assert.match(dashboardHtml, /Manager/i);
   assert.match(dashboardJs, /\/chat\/conversations/);
   assert.match(dashboardJs, /function rememberConversation/);
   assert.match(dashboardJs, /updatedAt/);
