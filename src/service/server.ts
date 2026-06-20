@@ -295,12 +295,10 @@ export class DuetService {
         this.send(response, 401, apiFailure(requestId, new DuetError("Unauthorized.", "UNAUTHORIZED")));
         return;
       }
-      // Sessions are read-only for runs. Chat-state mutations (/api/v1/chat/*)
-      // are session-allowed, but proposal /start submits run work and must
-      // stay bearer-only.
-      const chatRoute =
-        url.pathname.startsWith("/api/v1/chat/") &&
-        !url.pathname.endsWith("/start");
+      // Sessions may use the chat surface, including ordinary proposal starts.
+      // Direct run-mutation routes remain blocked to keep the dashboard on the
+      // proposal path instead of calling orchestration endpoints directly.
+      const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       if (
         credential === "session" &&
         request.method !== "GET" &&
@@ -312,7 +310,7 @@ export class DuetService {
           apiFailure(
             requestId,
             new DuetError(
-              "Dashboard sessions are read-only for runs.",
+              "Dashboard sessions cannot call direct run-mutation routes.",
               "READ_ONLY_SESSION",
             ),
           ),

@@ -1271,7 +1271,7 @@ test("proposal start rejects proposals swept to expired status by expireProposal
   }
 });
 
-test("dashboard session cannot start proposals or mutate runs directly", async () => {
+test("dashboard session can start proposals through chat routes but not mutate runs directly", async () => {
   const h = await startService();
   try {
     seedRunWithTask(h.store);
@@ -1301,7 +1301,11 @@ test("dashboard session cannot start proposals or mutate runs directly", async (
         }),
       },
     );
-    assert.equal(start.status, 403);
+    assert.equal(start.status, 202);
+    const operation = ((await start.json()) as { data: OperationRecord }).data;
+    assert.equal(operation.kind, "execute");
+    assert.equal(h.store.getProposal(proposalId).status, "started");
+    assert.equal(h.store.getProposal(proposalId).operationId, operation.id);
 
     const runMutation = await fetch(
       `${h.base}/api/v1/runs/proposal-run/cancel`,
