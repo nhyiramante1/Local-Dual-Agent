@@ -121,6 +121,7 @@ export class DuetService {
   private readonly streams = new Set<ServerResponse>();
   private lastRequestAt = Date.now();
   private idleTimer?: NodeJS.Timeout;
+  private sweepTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: ServerOptions) {
     this.app = new ApplicationCommands(options.store);
@@ -149,6 +150,18 @@ export class DuetService {
       this.server.listen(0, "127.0.0.1", () => resolve());
     });
     this.idleTimer = setInterval(() => this.checkIdle(), 10_000);
+    this.sweepTimer = setInterval(() => {
+      try {
+        const expired = this.options.store.expireProposals();
+        if (expired > 0) {
+          void serviceLog("info", "expired stale proposals", { count: expired });
+        }
+      } catch (error) {
+        void serviceLog("warning", "proposal expiry sweep failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }, 60_000);
     const address = this.server.address();
     if (!address || typeof address === "string") {
       throw new DuetError("Could not determine service port.", "SERVICE_START_FAILED");
@@ -158,6 +171,7 @@ export class DuetService {
 
   async close(): Promise<void> {
     if (this.idleTimer) clearInterval(this.idleTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     for (const stream of this.streams) stream.end();
     this.streams.clear();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));

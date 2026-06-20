@@ -20,6 +20,7 @@ import {
   type ChatContextOptions,
 } from "./context.js";
 import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
+import { serviceLog } from "../service/logger.js";
 
 /**
  * Per-provider manager-chat budgets. Claude is metered in USD; Codex has no
@@ -166,6 +167,18 @@ export class ChatEngine {
       parseResult.kind === "parsed"
         ? tryValidateAndSynthesize(parseResult.raw, conversation, this.store)
         : null;
+    if (parseResult.kind === "invalid") {
+      void serviceLog("warning", "manager proposal block was malformed", {
+        conversationId,
+        reason: parseResult.reason,
+      });
+    } else if (parseResult.kind === "parsed" && synthesized === null) {
+      void serviceLog("warning", "manager proposal failed validation", {
+        conversationId,
+        action: parseResult.raw.action,
+        runId: parseResult.raw.runId,
+      });
+    }
 
     // Persist turn + optional proposal atomically.
     // If a valid proposal fails to persist (DB error), the whole transaction
