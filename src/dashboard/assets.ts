@@ -50,6 +50,23 @@ export const dashboardHtml = `<!doctype html>
       <h2>Diff</h2><pre id="diff"></pre>
     </section>
   </main>
+  <div id="approval-modal" class="modal-overlay" hidden aria-modal="true" role="dialog" aria-labelledby="approval-modal-title">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="approval-modal-title">Approve in browser</h2>
+        <button type="button" id="approval-modal-close" aria-label="Close">&#x2715;</button>
+      </div>
+      <div id="approval-modal-body" class="modal-body"></div>
+      <div id="approval-modal-error" class="bad" hidden></div>
+      <div class="modal-foot">
+        <label for="approval-confirm-input">Type the first 8 characters of the hash to confirm</label>
+        <div class="proposal-confirm">
+          <input id="approval-confirm-input" type="text" autocomplete="off" maxlength="8" placeholder="e.g. a1b2c3d4" spellcheck="false">
+          <button type="button" id="approval-confirm-submit" disabled>Approve</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script type="module" src="/dashboard.js"></script>
 </body>
 </html>`;
@@ -184,6 +201,25 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-history-item:last-child{border-bottom:none}
 .proposal-history-item .phi-action{font-weight:600}
 .proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
+.chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
+.chat-form textarea:focus{outline:none;border-color:var(--accent)}
+.chat-form button{margin:0;text-align:center}
+@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-form{grid-template-columns:1fr}}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal-overlay[hidden]{display:none}
+.modal{background:var(--surface);border:1px solid var(--line-2);border-radius:12px;padding:20px;width:min(600px,92vw);max-height:80vh;display:grid;gap:14px;overflow:auto}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.modal-head h2{font-size:14px;text-transform:none;letter-spacing:0;color:var(--text);margin:0}
+.modal-head button{width:auto;margin:0;padding:4px 10px;color:var(--faint);border-color:transparent;background:transparent}
+.modal-head button:hover{color:var(--text);background:var(--surface-2);border-color:var(--line)}
+.modal-body{font-size:13px;display:grid;gap:8px}
+.modal-body pre{margin:0;max-height:200px}
+.modal-foot{display:grid;gap:8px}
+.modal-foot label{font-size:12px;color:var(--muted)}
+.approval-task-list{margin:4px 0 0 18px;padding:0;font-size:12px}
+.approval-hash-label{font-size:12px;margin-top:4px}
+code.inline-code{display:inline;padding:2px 5px}
 .phi-op.ok{color:var(--ok)}
 .phi-op.bad{color:var(--bad)}
 /* ── pill chat input ── */
@@ -468,17 +504,28 @@ async function enrichHistoryOutcomes() {
 }
 function renderProposalCard(proposal) {
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
-  const fingerprint = proposal.tier === "fingerprint"
-    ? '<div class="proposal-copy bad">This suggestion still requires CLI fingerprint confirmation before it can take effect.</div>'
+  const isMerge = proposal.action === "merge_run";
+  const isFingerprint = proposal.tier === "fingerprint";
+  const stage = proposal.action === "approve_plan" ? "plan" : proposal.action === "approve_merge" ? "merge" : null;
+  let fingerprintSection = "";
+  if (isMerge) {
+    fingerprintSection = '<div class="proposal-copy bad">This is a high-consequence action. Run <code class="inline-code">duet merge '+esc(proposal.runId || "RUN_ID")+'</code> in your terminal — merge stays CLI-only.</div>';
+  } else if (isFingerprint && stage) {
+    fingerprintSection = '<div class="proposal-copy bad">Fingerprint approval required.</div>';
+  } else if (isFingerprint) {
+    fingerprintSection = '<div class="proposal-copy bad">This suggestion still requires CLI fingerprint confirmation before it can take effect.</div>';
+  }
+  const approveBtn = stage && !isMerge && proposal.runId
+    ? '<button type="button" data-proposal-approve="'+esc(proposal.id)+'" data-run-id="'+esc(proposal.runId)+'" data-stage="'+esc(stage)+'">Approve in browser</button>'
     : "";
   return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'+
     '<div class="proposal-title">Suggested action&nbsp;'+badge(actionLabel(proposal.action))+badge(proposal.tier || "ordinary")+'<span class="kv">'+esc(target)+'</span></div>'+
     '<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'+
     '<div class="proposal-copy">Run this in your terminal if you choose to proceed.</div>'+
-    fingerprint+
-    '<code>'+visibleText(proposal.commandCli, 1000)+'</code>'+
+    fingerprintSection+
+    (isMerge ? '' : '<code>'+visibleText(proposal.commandCli, 1000)+'</code>')+
     '<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'+
-    '<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'+
+    '<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button>'+approveBtn+'<button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'+
   '</div>';
 }
 function renderReadiness(prepared) {
@@ -546,12 +593,87 @@ async function startProposal(proposalId, button) {
   await pollOperation(operation.id, conversation.id, "Duet operation");
   if (selected) await selectRun(selected);
 }
+let approvalModal = { proposalId: null, runId: null, stage: null, bindingHash: null, runVersion: null };
+function openApprovalModal(proposalId, runId, stage) {
+  approvalModal = { proposalId, runId, stage, bindingHash: null, runVersion: null };
+  const modal = q("approval-modal");
+  const body = q("approval-modal-body");
+  const input = q("approval-confirm-input");
+  const submit = q("approval-confirm-submit");
+  const err = q("approval-modal-error");
+  body.innerHTML = '<div class="muted">Loading approval preview…</div>';
+  input.value = "";
+  submit.disabled = true;
+  err.hidden = true;
+  err.textContent = "";
+  modal.hidden = false;
+  api("/runs/"+encodeURIComponent(runId)+"/approval-preview?stage="+encodeURIComponent(stage)).then(preview => {
+    approvalModal.bindingHash = preview.bindingHash;
+    approvalModal.runVersion = preview.runVersion;
+    const taskRows = stage === "plan"
+      ? (preview.tasks || []).map(t => '<li>'+esc(t.id)+' — paths: '+esc((t.allowedPaths||[]).join(", ") || "none")+'</li>').join("")
+      : (preview.tasks || []).map(t => '<li>'+esc(t.id)+' commit '+esc(t.taskCommit||"—")+'</li>').join("");
+    const runInfo = stage === "plan"
+      ? '<div><span class="muted">branch</span> '+esc(preview.run.baseBranch||"—")+'  <span class="muted">base</span> '+esc((preview.run.baseCommit||"").slice(0,12)+'…')+'</div>'
+      : '<div><span class="muted">integration</span> '+esc(preview.run.integrationBranch||"—")+'  <span class="muted">commit</span> '+esc((preview.run.finalCommit||"").slice(0,12)+'…')+'</div>';
+    body.innerHTML =
+      '<div><span class="muted">Stage</span> <b>'+esc(stage)+'</b></div>'+
+      '<div>'+esc(preview.run.goal||"")+'</div>'+
+      runInfo+
+      (taskRows ? '<ul class="approval-task-list">'+taskRows+'</ul>' : '')+
+      '<div class="approval-hash-label muted">Binding hash — verify this matches what the CLI would show</div>'+
+      '<pre>'+esc(preview.bindingHash)+'</pre>';
+  }).catch(err2 => {
+    body.innerHTML = '<div class="bad">Failed to load preview: '+esc(err2.message)+'</div>';
+  });
+}
+q("approval-modal-close").onclick = () => { q("approval-modal").hidden = true; };
+q("approval-modal").addEventListener("click", (e) => { if (e.target === q("approval-modal")) q("approval-modal").hidden = true; });
+q("approval-confirm-input").addEventListener("input", () => {
+  const val = q("approval-confirm-input").value;
+  q("approval-confirm-submit").disabled = !approvalModal.bindingHash || val !== approvalModal.bindingHash.slice(0, 8);
+});
+q("approval-confirm-submit").addEventListener("click", async () => {
+  const { proposalId, runId, stage, bindingHash, runVersion } = approvalModal;
+  if (!runId || !stage || !bindingHash) return;
+  const err = q("approval-modal-error");
+  const input = q("approval-confirm-input");
+  const submit = q("approval-confirm-submit");
+  err.style.display = "none";
+  submit.disabled = true;
+  try {
+    await api("/runs/"+encodeURIComponent(runId)+"/approve", {
+      method: "POST",
+      idempotencyKey: requestKey("dashboard-approve"),
+      body: { stage, bindingHash, runVersion, confirm: input.value },
+    });
+    if (proposalId) {
+      const conversation = currentConversation();
+      if (conversation) {
+        await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/dismiss", {
+          method: "POST",
+          idempotencyKey: requestKey("dashboard-approve-dismiss"),
+          body: {},
+        });
+      }
+    }
+    q("approval-modal").hidden = true;
+    setChatStatus("Approved. The run state has been updated.");
+    if (selected) await selectRun(selected);
+  } catch (error) {
+    err.textContent = error.message;
+    err.hidden = false;
+    input.value = "";
+    submit.disabled = true;
+  }
+});
 q("chat-turns").addEventListener("click", async (event) => {
   const prepare = event.target.closest("[data-proposal-prepare]");
   const start = event.target.closest("[data-proposal-start]");
   const copy = event.target.closest("[data-proposal-copy]");
   const dismiss = event.target.closest("[data-proposal-dismiss]");
-  if (!prepare && !start && !copy && !dismiss) return;
+  const approve = event.target.closest("[data-proposal-approve]");
+  if (!prepare && !start && !copy && !dismiss && !approve) return;
   try {
     if (prepare) {
       await prepareProposal(prepare.dataset.proposalPrepare);
@@ -564,6 +686,8 @@ q("chat-turns").addEventListener("click", async (event) => {
       setChatStatus("Command copied. Paste it into your terminal if you choose to run it.");
     } else if (dismiss) {
       await dismissProposal(dismiss.dataset.proposalDismiss);
+    } else if (approve) {
+      openApprovalModal(approve.dataset.proposalApprove, approve.dataset.runId, approve.dataset.stage);
     }
   } catch (error) {
     setChatStatus(error.message, true);

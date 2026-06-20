@@ -117,6 +117,7 @@ export class DuetService {
   });
   private readonly tickets = new Map<string, number>();
   private readonly sessions = new Map<string, number>();
+  private readonly approvalFailures = new Map<string, { count: number; blockedUntil: number }>();
   private readonly idleTimeoutMs: number;
   private activeStreams = 0;
   private readonly streams = new Set<ServerResponse>();
@@ -295,16 +296,17 @@ export class DuetService {
         this.send(response, 401, apiFailure(requestId, new DuetError("Unauthorized.", "UNAUTHORIZED")));
         return;
       }
-      // Sessions are read-only for runs. Chat-state mutations (/api/v1/chat/*)
-      // are session-allowed, but proposal /start submits run work and must
-      // stay bearer-only.
-      const chatRoute =
-        url.pathname.startsWith("/api/v1/chat/") &&
-        !url.pathname.endsWith("/start");
+      // Sessions may use the chat surface (including ordinary proposal starts)
+      // and the browser fingerprint-confirm approval path.
+      // Direct run-mutation routes remain blocked to keep the dashboard on the
+      // proposal path instead of calling orchestration endpoints directly.
+      const chatRoute = url.pathname.startsWith("/api/v1/chat/");
+      const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
       if (
         credential === "session" &&
         request.method !== "GET" &&
-        !chatRoute
+        !chatRoute &&
+        !approveRoute
       ) {
         this.send(
           response,
@@ -312,7 +314,7 @@ export class DuetService {
           apiFailure(
             requestId,
             new DuetError(
-              "Dashboard sessions are read-only for runs.",
+              "Dashboard sessions cannot call direct run-mutation routes.",
               "READ_ONLY_SESSION",
             ),
           ),
@@ -336,22 +338,24 @@ export class DuetService {
           "PROPOSAL_ALREADY_STARTED",
         ].includes(error.code)
           ? 409
-          : error instanceof DuetError &&
-              ["UNAUTHORIZED", "INVALID_TICKET"].includes(error.code)
-            ? 401
+          : error instanceof DuetError && error.code === "APPROVAL_RATE_LIMITED"
+            ? 429
             : error instanceof DuetError &&
-                error.code === "READ_ONLY_SESSION"
-              ? 403
-            : error instanceof DuetError &&
-                [
-                  "NOT_FOUND",
-                  "RUN_NOT_FOUND",
-                  "CONVERSATION_NOT_FOUND",
-                  "OPERATION_NOT_FOUND",
-                  "PROPOSAL_NOT_FOUND",
-                ].includes(error.code)
-              ? 404
-              : 400;
+                ["UNAUTHORIZED", "INVALID_TICKET"].includes(error.code)
+              ? 401
+              : error instanceof DuetError &&
+                  error.code === "READ_ONLY_SESSION"
+                ? 403
+                : error instanceof DuetError &&
+                    [
+                      "NOT_FOUND",
+                      "RUN_NOT_FOUND",
+                      "CONVERSATION_NOT_FOUND",
+                      "OPERATION_NOT_FOUND",
+                      "PROPOSAL_NOT_FOUND",
+                    ].includes(error.code)
+                  ? 404
+                  : 400;
       this.send(response, status, apiFailure(requestId, error));
     }
   }
@@ -754,6 +758,50 @@ export class DuetService {
         }));
         return;
       }
+      if (suffix === "/approval-preview") {
+        const stage = url.searchParams.get("stage") === "merge" ? "merge" : "plan";
+        const run = this.options.store.getRun(runId);
+        const tasks = this.options.store.listTasks(runId);
+        const bindingHash = approvalBinding(run, tasks, stage);
+        const runVersion = run.version ?? 1;
+        if (stage === "plan") {
+          this.send(response, 200, apiSuccess(requestId, {
+            bindingHash,
+            stage,
+            runVersion,
+            run: {
+              id: run.id,
+              goal: run.goal,
+              baseBranch: run.baseBranch,
+              baseCommit: run.baseCommit,
+            },
+            tasks: tasks.map((t) => ({
+              id: t.id,
+              allowedPaths: t.plan.allowedPaths,
+              dependencies: t.plan.dependencies,
+            })),
+          }));
+        } else {
+          this.send(response, 200, apiSuccess(requestId, {
+            bindingHash,
+            stage,
+            runVersion,
+            run: {
+              id: run.id,
+              goal: run.goal,
+              integrationBranch: run.integrationBranch,
+              finalCommit: run.finalCommit,
+            },
+            tasks: tasks.map((t) => ({
+              id: t.id,
+              taskCommit: t.taskCommit,
+              integratedCommit: t.integratedCommit,
+              diffHash: t.reviewedArtifact?.diffHash,
+            })),
+          }));
+        }
+        return;
+      }
     }
     if (request.method !== "POST") throw new DuetError("Not found.", "NOT_FOUND");
     const bodyText = await readBody(request);
@@ -762,6 +810,7 @@ export class DuetService {
       const run = this.options.store.getRun(runId);
       const versionIndependentCancel =
         suffix === "/cancel" ||
+        suffix === "/approve" ||
         /^\/tasks\/[^/]+\/cancel$/.test(suffix);
       if (
         !versionIndependentCancel &&
@@ -805,11 +854,49 @@ export class DuetService {
       }
       if (suffix === "/approve") {
         const stage = body.stage === "merge" ? "merge" : "plan";
-        const fingerprint = approvalBinding(
-          run,
-          this.options.store.listTasks(runId),
-          stage,
-        );
+        const tasks = this.options.store.listTasks(runId);
+        const fingerprint = approvalBinding(run, tasks, stage);
+        const credential = this.credentialKind(request);
+        if (typeof body.confirm === "string" && !body.actionTicket) {
+          // Browser-confirm path: session OR bearer allowed.
+          const rateKey = `${runId}:${stage}`;
+          const entry = this.approvalFailures.get(rateKey);
+          if (entry && entry.blockedUntil > Date.now()) {
+            throw new DuetError(
+              "Too many failed approval attempts. Try again later.",
+              "APPROVAL_RATE_LIMITED",
+            );
+          }
+          const fail = () => {
+            const current = this.approvalFailures.get(rateKey) ?? { count: 0, blockedUntil: 0 };
+            const next = { count: current.count + 1, blockedUntil: current.blockedUntil };
+            if (next.count >= 3) next.blockedUntil = Date.now() + 60_000;
+            this.approvalFailures.set(rateKey, next);
+          };
+          if (body.bindingHash !== fingerprint) {
+            fail();
+            throw new DuetError("Binding hash does not match current run state.", "INVALID_ARGUMENT");
+          }
+          if (Number(body.runVersion) !== (run.version ?? 1)) {
+            throw new DuetError("Run version changed.", "VERSION_CONFLICT");
+          }
+          if (body.confirm !== fingerprint.slice(0, 8)) {
+            fail();
+            throw new DuetError("Confirmation prefix does not match.", "INVALID_ARGUMENT");
+          }
+          this.approvalFailures.delete(rateKey);
+          return {
+            status: 200,
+            data: this.app.approve(runId, stage, Number(body.runVersion)),
+          };
+        }
+        // CLI ticket path: bearer only.
+        if (credential === "session") {
+          throw new DuetError(
+            "Dashboard sessions cannot call the action-ticket approval path.",
+            "READ_ONLY_SESSION",
+          );
+        }
         this.options.store.consumeActionTicket({
           tokenHash: hash(String(body.actionTicket ?? "")),
           runId,
