@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { parse } from "smol-toml";
 
-import type { ProviderName } from "./core/domain.js";
+import type { ManagerBudget, ProviderName } from "./core/domain.js";
 import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 
@@ -28,6 +28,14 @@ export interface DuetConfig {
     commands: string[][];
     timeoutSeconds: number;
     env: Record<string, string>;
+  };
+  manager: {
+    claudeMaxUsdPerTurn: number;
+    claudeMaxUsdPerDay: number;
+    codexMaxInputTokensPerDay: number;
+    codexMaxOutputTokensPerDay: number;
+    codexMaxRuntimeSeconds: number;
+    maxTurnsPerDay: number;
   };
 }
 
@@ -60,12 +68,21 @@ export const defaultConfig: DuetConfig = {
     timeoutSeconds: 300,
     env: {},
   },
+  manager: {
+    claudeMaxUsdPerTurn: 0.5,
+    claudeMaxUsdPerDay: 5,
+    codexMaxInputTokensPerDay: 500_000,
+    codexMaxOutputTokensPerDay: 100_000,
+    codexMaxRuntimeSeconds: 120,
+    maxTurnsPerDay: 200,
+  },
 };
 
 export type PartialDuetConfig = {
   orchestration?: Partial<DuetConfig["orchestration"]>;
   budgets?: Partial<DuetConfig["budgets"]>;
   verification?: Partial<DuetConfig["verification"]>;
+  manager?: Partial<DuetConfig["manager"]>;
 };
 
 export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
@@ -87,6 +104,10 @@ export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
       commands:
         value.verification?.commands ?? defaultConfig.verification.commands,
       env: value.verification?.env ?? defaultConfig.verification.env,
+    },
+    manager: {
+      ...defaultConfig.manager,
+      ...(value.manager ?? {}),
     },
   };
 }
@@ -135,6 +156,7 @@ interface RawConfig {
   orchestration?: Record<string, unknown>;
   budgets?: Record<string, unknown>;
   verification?: Record<string, unknown>;
+  manager?: Record<string, unknown>;
 }
 
 function numberInRange(
@@ -208,6 +230,7 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
   const orchestration = raw.orchestration ?? {};
   const budgets = raw.budgets ?? {};
   const verification = raw.verification ?? {};
+  const manager = raw.manager ?? {};
   const lead =
     orchestration.default_lead === "codex"
       ? "codex"
@@ -300,5 +323,47 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
       ),
       env: parseEnvironment(verification.env),
     },
+    manager: {
+      claudeMaxUsdPerTurn: numberInRange(
+        manager.claude_max_usd_per_turn,
+        defaultConfig.manager.claudeMaxUsdPerTurn,
+        0.01,
+      ),
+      claudeMaxUsdPerDay: numberInRange(
+        manager.claude_max_usd_per_day,
+        defaultConfig.manager.claudeMaxUsdPerDay,
+        0.01,
+      ),
+      codexMaxInputTokensPerDay: Math.floor(
+        numberInRange(
+          manager.codex_max_input_tokens_per_day,
+          defaultConfig.manager.codexMaxInputTokensPerDay,
+          1,
+        ),
+      ),
+      codexMaxOutputTokensPerDay: Math.floor(
+        numberInRange(
+          manager.codex_max_output_tokens_per_day,
+          defaultConfig.manager.codexMaxOutputTokensPerDay,
+          1,
+        ),
+      ),
+      codexMaxRuntimeSeconds: numberInRange(
+        manager.codex_runtime_seconds,
+        defaultConfig.manager.codexMaxRuntimeSeconds,
+        1,
+      ),
+      maxTurnsPerDay: Math.floor(
+        numberInRange(
+          manager.max_turns_per_day,
+          defaultConfig.manager.maxTurnsPerDay,
+          1,
+        ),
+      ),
+    },
   };
+}
+
+export function resolveManagerBudget(config: DuetConfig): ManagerBudget {
+  return { ...config.manager };
 }

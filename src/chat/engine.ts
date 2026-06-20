@@ -5,6 +5,7 @@ import type {
   AgentResult,
   ConversationRecord,
   ConversationTurnRecord,
+  ManagerBudget,
   ProviderName,
 } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
@@ -21,23 +22,6 @@ import {
 } from "./context.js";
 import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
 import { serviceLog } from "../service/logger.js";
-
-/**
- * Per-provider manager-chat budgets. Claude is metered in USD; Codex has no
- * reliable USD in the accounting model, so it is metered by historical token
- * totals before starting another turn. Never infer Codex USD.
- *
- * Injectable (with a default) for Phase 5A; wiring into `src/config.ts` is a
- * later step.
- */
-export interface ManagerBudget {
-  claudeMaxUsdPerTurn: number;
-  claudeMaxUsdPerDay: number;
-  codexMaxInputTokensPerDay: number;
-  codexMaxOutputTokensPerDay: number;
-  codexMaxRuntimeSeconds: number;
-  maxTurnsPerDay: number;
-}
 
 export const defaultManagerBudget: ManagerBudget = {
   claudeMaxUsdPerTurn: 0.5,

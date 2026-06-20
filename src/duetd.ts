@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 
 import { nodeVersionError } from "./bootstrap.js";
+import { loadConfig, resolveManagerBudget } from "./config.js";
 import { Store } from "./persistence/store.js";
 import { serviceInfoPath } from "./paths.js";
 import {
@@ -63,11 +64,14 @@ async function main(): Promise<void> {
   try {
     store = new Store();
     const secret = await loadOrCreateServiceSecret();
+    const config = await loadConfig();
+    const managerBudget = resolveManagerBudget(config);
     service = new DuetService({
       store,
       secret,
       instanceId,
       idleTimeoutMs: Number(process.env.DUET_IDLE_TIMEOUT_MS ?? 15 * 60_000),
+      managerBudget,
       onStop: () => {
         void stop().finally(() => process.exit(0));
       },
