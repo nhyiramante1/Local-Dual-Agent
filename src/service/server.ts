@@ -483,7 +483,17 @@ export class DuetService {
                 orchestration: { ...baseConfig.orchestration, profile: parsed.profile as AgentProfile },
               }
             : baseConfig;
-          command = { kind: "plan", repoPath: parsed.repoPath, goal: parsed.goal, lead: parsed.lead, config: cfg };
+          // Enrich goal with recent user turns so the planner has conversation context
+          const recentTurns = this.options.store
+            .listRecentConversationTurns(conversationId, 6)
+            .filter((t) => t.role === "user")
+            .slice(-3)
+            .map((t) => t.content.slice(0, 300).trim())
+            .filter(Boolean);
+          const enrichedGoal = recentTurns.length > 1
+            ? `${parsed.goal}\n\nConversation context:\n${recentTurns.map((m, i) => `[${i + 1}] ${m}`).join("\n")}`
+            : parsed.goal;
+          command = { kind: "plan", repoPath: parsed.repoPath, goal: enrichedGoal, lead: parsed.lead, config: cfg };
         }
         const operation = this.activities.submit(command);
         try {

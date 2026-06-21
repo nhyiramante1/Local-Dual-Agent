@@ -226,6 +226,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .conn{font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--faint)}
 .conn-ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
 .conn-bad{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
+.conn-muted{color:var(--muted);border-color:var(--line);background:var(--hover)}
+.error-banner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c53030;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;max-width:480px;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
 .chat-head p{margin:3px 0 0}
 /* ── provider segmented toggle ── */
@@ -393,7 +395,7 @@ async function loadRuns(options = {}) {
       await api("/runs/"+encodeURIComponent(b.dataset.deleteRun),{method:"DELETE"});
       if(selected===b.dataset.deleteRun){selected=null;}
       await loadRuns();
-    }catch(err){alert(err.message);}
+    }catch(err){showError(err.message);}
   });
   if(selected && options.selectCurrent) await selectRun(selected);
 }
@@ -433,7 +435,14 @@ async function selectRun(id) {
   q("conflicts").innerHTML=conflicts.map(t=>'<div class="card"><div class="row"><b>'+esc(t.id)+'</b><span class="badge s-conflict">conflict</span></div><div class="bad">'+esc(t.error||"integration conflict")+'</div></div>').join("")||'<span class="empty">No conflicts.</span>';
   q("diff").textContent=(await api("/runs/"+encodeURIComponent(id)+"/diff")).diff||"";
   await loadChat();
-  connectEvents();
+  const terminalStatuses = new Set(["failed","cancelled","merged","cleaned_up"]);
+  if (terminalStatuses.has(detail.run.status)) {
+    if (eventStream) { eventStream.close(); eventStream=null; }
+    setConn("idle");
+    q("events").innerHTML='<div class="ev ev-info"><span class="ty muted">Run is '+esc(detail.run.status)+' — no live events</span></div>';
+  } else {
+    connectEvents();
+  }
 }
 function conversationKey(runId, agent) {
   return (runId || "global") + ":" + agent;
@@ -525,11 +534,25 @@ function setChatEnabled(enabled) {
   q("chat-input").disabled = !enabled;
   q("chat-send").disabled = !enabled;
 }
+function showError(message) {
+  let banner = document.getElementById("error-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "error-banner";
+    banner.className = "error-banner";
+    document.body.appendChild(banner);
+  }
+  banner.textContent = message;
+  banner.hidden = false;
+  clearTimeout(banner._t);
+  banner._t = setTimeout(() => { banner.hidden = true; }, 6000);
+}
 function setConn(state) {
   const el = q("chat-conn");
   if (!el) return;
   if (state === "live") { el.textContent = "live"; el.className = "conn conn-ok"; }
   else if (state === "reconnecting") { el.textContent = "reconnecting"; el.className = "conn conn-bad"; }
+  else if (state === "idle") { el.textContent = "idle"; el.className = "conn conn-muted"; }
   else { el.textContent = "connecting"; el.className = "conn"; }
 }
 function renderMarkdown(text) {
