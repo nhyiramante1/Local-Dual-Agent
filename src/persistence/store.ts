@@ -127,6 +127,7 @@ function opposite(provider: ProviderName): ProviderName {
 
 const VALID_PROPOSAL_ACTIONS = new Set<string>([
   "create_plan",
+  "set_strategy",
   "execute_run",
   "resume_run",
   "retry_task",
@@ -461,6 +462,12 @@ export class Store {
 
         CREATE INDEX IF NOT EXISTS idx_proposals_conversation_status
           ON manager_action_proposals(conversation_id, status);
+
+        CREATE TABLE IF NOT EXISTS service_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
       `);
 
       this.addColumn(
@@ -2076,6 +2083,22 @@ export class Store {
       }
     }
     return { costUsd, inputTokens, outputTokens, turns };
+  }
+
+  getServiceSetting(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM service_settings WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setServiceSetting(key: string, value: string): void {
+    this.db
+      .prepare(`
+        INSERT INTO service_settings (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `)
+      .run(key, value, new Date().toISOString());
   }
 
   createProposal(input: {

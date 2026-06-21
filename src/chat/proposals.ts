@@ -71,7 +71,7 @@ export interface StartProposalInput {
 
 export interface StartProposalResult {
   proposal: ManagerActionProposal;
-  command: LongRunningCommand;
+  command: LongRunningCommand | null;
 }
 
 type ActionSpec = {
@@ -85,6 +85,12 @@ const PROPOSAL_EXPIRY_MS = 15 * 60 * 1_000;
 
 const ACTION_SPECS: Readonly<Record<ProposalAction, ActionSpec>> = {
   create_plan: {
+    tier: "ordinary",
+    requiresTask: false,
+    cli: () => "",
+    jsonFields: () => ({}),
+  },
+  set_strategy: {
     tier: "ordinary",
     requiresTask: false,
     cli: () => "",
@@ -278,6 +284,31 @@ export function tryValidateAndSynthesize(
     };
   }
 
+  if (action === "set_strategy") {
+    if (conversation.runId) return null; // global-chat only
+    const validLeads = new Set(["codex", "claude"]);
+    if (raw.lead && !validLeads.has(raw.lead)) {
+      console.warn(`[set_strategy] unrecognised lead value "${raw.lead}"; rejecting proposal`);
+      return null;
+    }
+    const lead = raw.lead === "codex" ? "codex" : "claude";
+    const validProfiles = new Set(["cheap", "balanced", "reasoning", "max"]);
+    const profile = raw.profile && validProfiles.has(raw.profile) ? raw.profile : "balanced";
+    const commandCli = ``;
+    const commandJson = JSON.stringify({ action: "set_strategy", lead, profile });
+    const summary = raw.rationale
+      ? raw.rationale.slice(0, 500)
+      : `Proposed strategy: lead=${lead} profile=${profile}`;
+    return {
+      action: "set_strategy",
+      commandCli,
+      commandJson,
+      tier: "ordinary",
+      summary,
+      expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
+    };
+  }
+
   if (!raw.runId) return null;
 
   let runId: string;
@@ -338,6 +369,10 @@ export function prepareProposalAction(
 
   if (proposal.action === "create_plan") {
     return prepared; // no run to check, availability is determined by expiry only
+  }
+
+  if (proposal.action === "set_strategy") {
+    return prepared; // no run to check; availability determined by expiry only
   }
 
   if (conversation.runId && proposal.runId !== conversation.runId) {
@@ -435,6 +470,9 @@ export function startProposalAction(
   }
   if (proposal.action === "create_plan") {
     return { proposal, command: { kind: "plan", repoPath: "", goal: "", lead: "claude", config: {} as never } };
+  }
+  if (proposal.action === "set_strategy") {
+    return { proposal, command: null };
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
@@ -537,12 +575,19 @@ function runChangingAction(action: ProposalAction): boolean {
     case "merge_run":
       return true;
     case "create_plan":
+    case "set_strategy":
     default:
       return false;
   }
 }
 
 function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand {
+  if (proposal.action === "set_strategy") {
+    throw new DuetError(
+      "set_strategy proposals are dispatched by the server, not commandForProposal.",
+      "INVALID_PROPOSAL",
+    );
+  }
   if (proposal.action === "create_plan") {
     throw new DuetError(
       "create_plan proposals are dispatched by the server, not commandForProposal.",

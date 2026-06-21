@@ -469,6 +469,29 @@ export class DuetService {
           body,
         );
         let command = defaultCommand;
+        if (proposal.action === "set_strategy") {
+          const parsed = JSON.parse(proposal.commandJson) as { lead: string; profile: string };
+          const now = new Date().toISOString();
+          this.options.store.setServiceSetting(
+            "next_run_strategy",
+            JSON.stringify({ lead: parsed.lead, profile: parsed.profile, setAt: now }),
+          );
+          const operation: OperationRecord = {
+            id: randomUUID(),
+            kind: "set_strategy",
+            status: "succeeded",
+            serviceInstanceId: this.options.instanceId,
+            inputHash: hash(proposal.commandJson),
+            startedAt: now,
+            finishedAt: now,
+            createdAt: now,
+          };
+          // markProposalStarted first: if it throws (e.g. concurrent start), createOperation
+          // hasn't run yet so there is no orphan record to clean up.
+          this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
+          this.options.store.createOperation(operation);
+          return { status: 200, data: operation };
+        }
         if (proposal.action === "create_plan") {
           const parsed = JSON.parse(proposal.commandJson) as {
             goal: string;
@@ -494,6 +517,9 @@ export class DuetService {
             ? `${parsed.goal}\n\nConversation context:\n${recentTurns.map((m, i) => `[${i + 1}] ${m}`).join("\n")}`
             : parsed.goal;
           command = { kind: "plan", repoPath: parsed.repoPath, goal: enrichedGoal, lead: parsed.lead, config: cfg };
+        }
+        if (command === null) {
+          throw new DuetError("Unexpected null command for proposal action.", "INTERNAL_ERROR");
         }
         const operation = this.activities.submit(command);
         try {

@@ -2496,3 +2496,132 @@ test("global chat context includes create_plan in Action Proposal Format", () =>
     store.close();
   }
 });
+
+test("set_strategy proposal is synthesized from manager response", async () => {
+  const strategyProposalText = [
+    "Provider codex is near its limit. I recommend switching lead to claude.",
+    "",
+    "```duet-proposal",
+    JSON.stringify({ action: "set_strategy", lead: "claude", profile: "cheap", rationale: "codex near limit, switching to claude cheap profile" }),
+    "```",
+  ].join("\n");
+  const h = await startService({ text: strategyProposalText });
+  try {
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+
+    const turnResponse = await postTurn(h.base, conversationId, "what strategy?", `set-strategy-turn-${randomUUID()}`);
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!h.store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    const p = proposals[0];
+    assert.equal(p.action, "set_strategy");
+    assert.equal(p.tier, "ordinary");
+    assert.equal(p.commandCli, "", "commandCli should be empty for dashboard-only action");
+    const parsed = JSON.parse(p.commandJson) as { lead: string; profile: string };
+    assert.equal(parsed.lead, "claude");
+    assert.equal(parsed.profile, "cheap");
+    assert.ok(p.summary.includes("codex near limit"), "summary should include rationale");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("set_strategy proposal is rejected in run-scoped chat", () => {
+  const store = new Store(":memory:");
+  try {
+    const conv = {
+      id: randomUUID(),
+      runId: "run123",
+      interfaceAgent: "claude" as const,
+      status: "active" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const result = tryValidateAndSynthesize(
+      { action: "set_strategy", lead: "codex", profile: "cheap" },
+      conv,
+      store,
+    );
+    assert.equal(result, null);
+  } finally {
+    store.close();
+  }
+});
+
+test("set_strategy proposal start stores the strategy preference", async () => {
+  const h = await startService();
+  try {
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+
+    // Create a set_strategy proposal directly in the store
+    const turn = h.store.appendConversationTurn({
+      conversationId,
+      role: "manager",
+      interfaceAgent: "codex",
+      content: "I suggest switching to codex lead with cheap profile.",
+    });
+    const proposalId = randomUUID();
+    const commandJson = JSON.stringify({ action: "set_strategy", lead: "codex", profile: "cheap" });
+    h.store.createProposal({
+      id: proposalId,
+      conversationId,
+      turnId: turn.id,
+      action: "set_strategy",
+      summary: "Proposed strategy: lead=codex profile=cheap",
+      commandCli: "",
+      commandJson,
+      tier: "ordinary",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+
+    const response = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": `start-set-strategy-${randomUUID()}` },
+        body: JSON.stringify({ confirm: "start" }),
+      },
+    );
+    assert.equal(response.status, 200);
+    const operation = ((await response.json()) as { data: OperationRecord }).data;
+    assert.equal(operation.kind, "set_strategy");
+    assert.equal(operation.status, "succeeded");
+
+    assert.equal(h.store.getProposal(proposalId).status, "started");
+    const stored = h.store.getServiceSetting("next_run_strategy");
+    assert.ok(stored, "next_run_strategy setting should be stored");
+    const parsed = JSON.parse(stored!) as { lead: string; profile: string };
+    assert.equal(parsed.lead, "codex");
+    assert.equal(parsed.profile, "cheap");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("global chat context shows stored strategy in System Defaults", () => {
+  const store = new Store(":memory:");
+  try {
+    const budget = defaultManagerBudget;
+    const conv = store.createConversation({ id: randomUUID(), interfaceAgent: "claude" });
+    store.setServiceSetting(
+      "next_run_strategy",
+      JSON.stringify({ lead: "codex", profile: "cheap", setAt: new Date().toISOString() }),
+    );
+    const result = buildManagerChatContext(store, conv, budget);
+    assert.ok(
+      result.prompt.includes("preferred_strategy: lead=codex profile=cheap"),
+      `prompt should include preferred_strategy line, got: ${result.prompt.slice(0, 500)}`,
+    );
+  } finally {
+    store.close();
+  }
+});
