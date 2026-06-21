@@ -22,7 +22,7 @@ export const dashboardHtml = `<!doctype html>
         <button class="aside-rail-btn" data-section="tasks" title="Tasks">&#10003;</button>
         <button class="aside-rail-btn" data-section="timeline" title="Timeline">&#9711;</button>
         <button class="aside-rail-btn" data-section="verification" title="Verification">&#9881;</button>
-        <button class="aside-rail-btn" data-section="messages" title="Messages">&#9993;</button>
+        <button class="aside-rail-btn" data-section="messages" title="Plan">&#9999;</button>
         <button class="aside-rail-btn" data-section="artifacts" title="Artifacts">&#9671;</button>
         <button class="aside-rail-btn" data-section="conflicts" title="Conflicts">&#9651;</button>
         <button class="aside-rail-btn" data-section="diff" title="Diff">&#177;</button>
@@ -46,7 +46,7 @@ export const dashboardHtml = `<!doctype html>
           <div id="verification"></div>
         </div>
         <div class="aside-section" id="aside-sec-messages">
-          <div class="aside-sec-head"><h2>Messages</h2></div>
+          <div class="aside-sec-head"><h2>Plan</h2></div>
           <div id="messages"></div>
         </div>
         <div class="aside-section" id="aside-sec-artifacts">
@@ -259,6 +259,15 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .turn-copy-btn{background:none;border:none;padding:3px 5px;border-radius:5px;cursor:pointer;color:var(--faint);display:flex;align-items:center;gap:4px;font-size:11px;transition:color .12s,background .12s;width:auto;margin:0}
 .turn-copy-btn:hover{color:var(--accent);background:var(--acc-bg)}
 .turn-copy-btn svg{flex-shrink:0}
+/* ── plan card ── */
+.plan-card{padding:10px 14px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
+.plan-summary{font-size:13px;line-height:1.6;color:var(--text);padding-bottom:8px;border-bottom:1px solid var(--line)}
+.plan-section-head{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-top:6px}
+.plan-task{padding:8px 0;border-bottom:1px solid var(--line)}
+.plan-task:last-of-type{border-bottom:none}
+.plan-task-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px}
+.plan-risk{font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)}
+.plan-risk:last-child{border-bottom:none}
 /* ── proposal card (elevated, accent left border) ── */
 .proposal-card{margin-top:10px;border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:10px 12px;background:var(--surface)}
 .proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
@@ -397,7 +406,16 @@ async function selectRun(id) {
     api("/runs/"+encodeURIComponent(id)+"/conflicts")
   ]);
   q("verification").innerHTML=verification.map(v=>'<div class="vr '+(v.passed?"pass":"fail")+'"><span class="tag">'+(v.passed?"PASS":"FAIL")+'</span><span>'+esc(v.command.join(" "))+'</span><span class="muted">'+v.durationMs+'ms</span></div>').join("")||'<span class="empty">No verification results.</span>';
-  q("messages").innerHTML=messages.map(m=>'<div class="card"><b>'+esc(m.kind)+'</b><div class="muted">'+visibleText(m.body,1000)+'</div></div>').join("")||'<span class="empty">No messages.</span>';
+  q("messages").innerHTML=messages.map(m=>{
+    if(m.kind==="plan"){
+      let plan={summary:"",tasks:[],risks:[]};
+      try{plan=JSON.parse(m.body);}catch{}
+      const taskList=plan.tasks.map(t=>'<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted">'+esc(t.objective||"")+'</div></div>').join("");
+      const riskList=plan.risks&&plan.risks.length?'<div class="plan-section-head">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join(""):"";
+      return '<div class="plan-card"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div>';
+    }
+    return '<div class="card"><b>'+esc(m.kind)+'</b><div class="muted">'+visibleText(m.body,1000)+'</div></div>';
+  }).join("")||'<span class="empty">No plan yet.</span>';
   q("artifacts").innerHTML=artifacts.map(a=>'<div class="card"><span class="muted">#'+a.id+'</span> '+esc(a.kind)+' <span class="muted">- '+esc(a.taskId||"run")+'</span></div>').join("")||'<span class="empty">No artifacts.</span>';
   q("conflicts").innerHTML=conflicts.map(t=>'<div class="card"><div class="row"><b>'+esc(t.id)+'</b><span class="badge s-conflict">conflict</span></div><div class="bad">'+esc(t.error||"integration conflict")+'</div></div>').join("")||'<span class="empty">No conflicts.</span>';
   q("diff").textContent=(await api("/runs/"+encodeURIComponent(id)+"/diff")).diff||"";
@@ -931,7 +949,7 @@ q("chat-openai").onclick = async () => {
 };
 /* ── theme toggle ── */
 (function() {
-  const saved = localStorage.getItem("duet-theme") || "dark";
+  const saved = localStorage.getItem("duet-theme") || "light";
   document.documentElement.setAttribute("data-theme", saved);
   const btn = q("theme-toggle");
   if (btn) btn.innerHTML = saved === "light" ? "&#9790;" : "&#9728;";

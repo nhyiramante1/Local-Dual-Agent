@@ -79,7 +79,7 @@ export const defaultConfig: DuetConfig = {
     env: {},
   },
   manager: {
-    provider: "codex" as ManagerProviderName,
+    provider: "openai" as ManagerProviderName,
     openaiModel: "gpt-4o-mini",
     openaiBaseUrl: undefined,
     openaiMaxUsdPerTurn: 0.1,
