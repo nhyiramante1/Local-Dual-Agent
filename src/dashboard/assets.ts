@@ -675,6 +675,19 @@ async function enrichHistoryOutcomes() {
   }
 }
 function renderProposalCard(proposal) {
+  if (proposal.action === "set_strategy") {
+    let meta = {};
+    try { meta = JSON.parse(proposal.commandJson); } catch {}
+    return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("set strategy")+badge("ordinary")+'</div>'
+      +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
+      +'<div class="proposal-kv"><b>Lead:</b> '+esc(meta.lead||"claude")+'&nbsp;&nbsp;<b>Profile:</b> '+esc(meta.profile||"balanced")+'</div>'
+      +'<div class="proposal-copy">Approve to store this as the preferred strategy for the next run. No terminal command needed.</div>'
+      +'<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button>'
+      +'<button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'</div>';
+  }
   if (proposal.action === "create_plan") {
     let meta = {};
     try { meta = JSON.parse(proposal.commandJson); } catch {}

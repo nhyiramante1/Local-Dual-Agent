@@ -271,7 +271,8 @@ export function buildManagerChatContext(
       "Answer from the bounded context below. If context is missing, say what is missing instead of inventing IDs or state.",
       "",
       "Proactive guidance rules:",
-      "- If a worker provider shows near_limit or blocked status in Provider Availability, suggest switching to the other provider or using the cheap profile.",
+      "- If a worker provider shows near_limit or blocked status in Provider Availability, emit a set_strategy proposal (not just text advice) recommending the other provider or cheap profile.",
+      "- In global chat, check preferred_strategy in System Defaults before proposing create_plan — use it as the lead/profile unless the operator specifies otherwise.",
       "- In global chat (no linked run), offer to propose a plan if the operator expresses intent to start new work.",
       "- In run-scoped chat, mention the likely next action in one sentence when answering status questions.",
       "- Keep guidance concise — one sentence per topic.",
@@ -284,6 +285,9 @@ export function buildManagerChatContext(
   const createPlanEntry = conversation.runId
     ? ""
     : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"REPO_PATH","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; omit profile to use balanced';
+  const setStrategyEntry = conversation.runId
+    ? ""
+    : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
 
   addSection(
     "Action Proposal Format",
@@ -295,9 +299,10 @@ export function buildManagerChatContext(
       "- Do NOT include command, commandCli, cli, tier, or commandJson fields - the server synthesizes these.",
       "- Duplicate, nested, or mid-reply blocks are rejected and stored as plain chat.",
       "- If you lack sufficient information to propose, reply with plain text only.",
-      "- create_plan is only valid in global chat (no linked run).",
+      "- create_plan and set_strategy are only valid in global chat (no linked run).",
       "",
       "Supported actions (required fields shown):",
+      ...(setStrategyEntry ? [setStrategyEntry] : []),
       ...(createPlanEntry ? [createPlanEntry] : []),
       '  execute_run   {"action":"execute_run","runId":"RUN_ID"}',
       '  resume_run    {"action":"resume_run","runId":"RUN_ID"}',
@@ -469,11 +474,22 @@ export function buildManagerChatContext(
 
     const runs = store.listRuns().slice(0, 10);
     const repoPaths = [...new Set(runs.map((r) => r.repoRoot))].slice(0, 5);
+    const storedStrategyRaw = store.getServiceSetting("next_run_strategy");
+    let strategyLine = "preferred_strategy: none (propose set_strategy to store a preference)";
+    if (storedStrategyRaw) {
+      try {
+        const storedStrategy = JSON.parse(storedStrategyRaw) as { lead: string; profile: string; setAt: string };
+        strategyLine = `preferred_strategy: lead=${storedStrategy.lead} profile=${storedStrategy.profile} (set ${new Date(storedStrategy.setAt).toLocaleTimeString()})`;
+      } catch {
+        // ignore malformed stored strategy
+      }
+    }
     addSection(
       "System Defaults",
       [
         "default_lead: claude",
         "default_profile: balanced",
+        strategyLine,
         `known_repo_paths: ${repoPaths.length ? repoPaths.join(", ") : "none"}`,
         "Note: Use a known_repo_path in create_plan proposals unless the operator provides a different path.",
       ].join("\n"),

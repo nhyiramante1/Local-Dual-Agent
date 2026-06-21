@@ -139,7 +139,7 @@ test("context includes recent conversation turns chronologically without a run",
     assert.match(context.prompt, /## Action Proposal Format/);
     assert.match(context.prompt, /Proposals are suggestions only/);
     assert.match(context.prompt, /server synthesizes/);
-    assert.match(context.prompt, /create_plan is only valid in global chat/);
+    assert.match(context.prompt, /create_plan and set_strategy are only valid in global chat/);
     assert.match(context.prompt, /## Conversation/);
     assert.doesNotMatch(context.prompt, /message 1/);
     assert.match(context.prompt, /message 4/);

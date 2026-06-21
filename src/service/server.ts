@@ -469,6 +469,27 @@ export class DuetService {
           body,
         );
         let command = defaultCommand;
+        if (proposal.action === "set_strategy") {
+          const parsed = JSON.parse(proposal.commandJson) as { lead: string; profile: string };
+          const now = new Date().toISOString();
+          this.options.store.setServiceSetting(
+            "next_run_strategy",
+            JSON.stringify({ lead: parsed.lead, profile: parsed.profile, setAt: now }),
+          );
+          const operation: OperationRecord = {
+            id: randomUUID(),
+            kind: "set_strategy",
+            status: "succeeded",
+            serviceInstanceId: this.options.instanceId,
+            inputHash: hash(proposal.commandJson),
+            startedAt: now,
+            finishedAt: now,
+            createdAt: now,
+          };
+          this.options.store.createOperation(operation);
+          this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
+          return { status: 202, data: operation };
+        }
         if (proposal.action === "create_plan") {
           const parsed = JSON.parse(proposal.commandJson) as {
             goal: string;
