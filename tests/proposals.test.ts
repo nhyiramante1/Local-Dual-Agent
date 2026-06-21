@@ -154,6 +154,7 @@ test("tryValidateAndSynthesize rejects unknown actions and invalid IDs", async (
         { action: "create_plan", runId: "run-1" },
         conversation,
         store,
+        "create a plan for this",
       ),
       null,
     );
