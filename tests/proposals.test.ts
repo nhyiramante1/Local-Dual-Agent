@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   parseProposalBlock,
   tryValidateAndSynthesize,
+  userIntentAllowsCreatePlan,
 } from "../src/chat/proposals.js";
 import type {
   ConversationRecord,
@@ -188,6 +189,35 @@ test("tryValidateAndSynthesize assigns fingerprint tiers to approval and merge a
       assert.equal(proposal.tier, "fingerprint");
     }
   });
+});
+
+test("create_plan proposals require explicit planning intent in the latest user message", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "codex",
+    });
+    const proposal = tryValidateAndSynthesize(
+      {
+        action: "create_plan",
+        goal: "Add docs",
+        repoPath: "/repo",
+        lead: "claude",
+        profile: "balanced",
+      },
+      conversation,
+      store,
+      "Can you see the time today?",
+    );
+    assert.equal(proposal, null);
+  });
+});
+
+test("userIntentAllowsCreatePlan distinguishes planning requests from ordinary questions", () => {
+  assert.equal(userIntentAllowsCreatePlan("Can you see the time today?"), false);
+  assert.equal(userIntentAllowsCreatePlan("What can you do?"), false);
+  assert.equal(userIntentAllowsCreatePlan("Help me start a plan for this repo"), true);
+  assert.equal(userIntentAllowsCreatePlan("/plan build the feature"), true);
 });
 
 test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {

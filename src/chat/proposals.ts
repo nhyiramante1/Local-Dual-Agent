@@ -40,6 +40,20 @@ export interface SynthesizedProposal {
   expiresAt: string;
 }
 
+const CREATE_PLAN_INTENT_PATTERNS: readonly RegExp[] = [
+  /(^|\s)\/plan\b/i,
+  /\bduet\s+plan\b/i,
+  /\bcreate\s+(?:a\s+)?plan\b/i,
+  /\bmake\s+(?:a\s+)?plan\b/i,
+  /\bstart\s+planning\b/i,
+  /\bstart\s+(?:a\s+)?plan\b/i,
+  /\bhelp\s+me\s+start\s+(?:a\s+)?plan\b/i,
+  /\bpropose\s+(?:a\s+)?plan\b/i,
+  /\bdraft\s+(?:a\s+)?plan\b/i,
+  /\bcome\s+up\s+with\s+(?:a\s+)?plan\b/i,
+  /\bplan\s+(?:for|out)\b/i,
+];
+
 export interface PreparedProposalAction {
   proposalId: string;
   action: ProposalAction;
@@ -256,12 +270,14 @@ export function tryValidateAndSynthesize(
   raw: RawProposal,
   conversation: ConversationRecord,
   store: Store,
+  latestUserMessage?: string,
 ): SynthesizedProposal | null {
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
   const spec = ACTION_SPECS[action];
 
   if (action === "create_plan") {
+    if (!userIntentAllowsCreatePlan(latestUserMessage)) return null;
     const goal = raw.goal?.trim() ?? "";
     const repoPath = raw.repoPath?.trim() ?? "";
     if (!goal || !repoPath) return null;
@@ -346,6 +362,15 @@ export function tryValidateAndSynthesize(
     summary,
     expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
   };
+}
+
+export function userIntentAllowsCreatePlan(
+  latestUserMessage?: string,
+): boolean {
+  if (!latestUserMessage) return false;
+  const message = latestUserMessage.trim();
+  if (!message) return false;
+  return CREATE_PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 export function prepareProposalAction(

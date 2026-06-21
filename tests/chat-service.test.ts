@@ -1830,6 +1830,8 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardHtml, /Manager/);
   assert.match(dashboardHtml, /Manager/i);
   assert.match(dashboardJs, /\/chat\/conversations/);
+  assert.match(dashboardJs, /DEFAULT_MANAGER_AGENT/);
+  assert.match(dashboardJs, /__DUET_DEFAULT_MANAGER_PROVIDER__/);
   assert.match(dashboardJs, /function rememberConversation/);
   assert.match(dashboardJs, /updatedAt/);
   assert.match(dashboardJs, /eventCursor/);
@@ -1841,6 +1843,7 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /data-proposal-dismiss/);
   assert.match(dashboardJs, /data-proposal-prepare/);
   assert.match(dashboardJs, /Check readiness/);
+  assert.match(dashboardJs, /check readiness to reveal Start/i);
   assert.match(dashboardJs, /\/prepare/);
   assert.match(dashboardJs, /data-proposal-start/);
   assert.match(dashboardJs, /Start operation/);
@@ -1862,6 +1865,31 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.doesNotMatch(dashboardJs, /\/cancel/);
   assert.doesNotMatch(dashboardJs, /\/resolve/);
   assert.doesNotMatch(dashboardJs, /\/cleanup/);
+});
+
+test("dashboard javascript boots with the configured manager provider", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-dashboard-js-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "dashboard-js-openai",
+    idleTimeoutMs: 60_000,
+    managerProvider: "openai",
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const response = await fetch(`${base}/dashboard.js`);
+    assert.equal(response.status, 200);
+    const js = await response.text();
+    assert.match(js, /const DEFAULT_MANAGER_AGENT = "openai";/);
+    assert.doesNotMatch(js, /__DUET_DEFAULT_MANAGER_PROVIDER__/);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("approval-preview returns plan stage binding hash and run/task context", async () => {
@@ -2447,6 +2475,48 @@ test("create_plan proposal is synthesized from manager response", async () => {
   }
 });
 
+test("direct global questions do not persist create_plan proposals", async () => {
+  const h = await startService({
+    text: proposalReply("create_plan", {
+      goal: "Add docs to website",
+      repoPath: "C:\\Users\\nhyir\\nhyira-os",
+      lead: "claude",
+      profile: "balanced",
+    }),
+  });
+  try {
+    const conversationId = await createConversation(h.base, {
+      interfaceAgent: "openai",
+    });
+
+    const turnResponse = await postTurn(
+      h.base,
+      conversationId,
+      "Can you see the time today?",
+      `global-direct-question-${randomUUID()}`,
+    );
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!h.store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    assert.equal(h.store.listProposals(conversationId).length, 0);
+    const turns = h.store.listConversationTurns(conversationId);
+    const managerTurns = turns.filter((turn) => turn.role === "manager");
+    assert.equal(managerTurns.length, 1);
+    const managerTurn = managerTurns[0];
+    assert.ok(managerTurn);
+    assert.doesNotMatch(managerTurn?.content ?? "", /duet-proposal/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("create_plan proposal is rejected in run-scoped chat", () => {
   const store = new Store(":memory:");
   try {
@@ -2463,6 +2533,7 @@ test("create_plan proposal is rejected in run-scoped chat", () => {
       { action: "create_plan", goal: "test", repoPath: "/tmp/repo", lead: "claude", profile: "balanced" },
       conv,
       store,
+      "Help me start a plan",
     );
     assert.equal(result, null);
   } finally {

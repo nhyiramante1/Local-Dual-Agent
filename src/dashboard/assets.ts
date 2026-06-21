@@ -328,12 +328,14 @@ code.inline-code{display:inline;padding:2px 5px}
 export const dashboardJs = `
 (function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();
 const q = (id) => document.getElementById(id);
+const DEFAULT_MANAGER_AGENT = "__DUET_DEFAULT_MANAGER_PROVIDER__";
 let selected = new URL(location.href).searchParams.get("run");
 const chat = {
-  agent: "codex",
+  agent: DEFAULT_MANAGER_AGENT,
   conversations: new Map(),
   activeOperation: null,
-  polling: null
+  polling: null,
+  pendingTurn: null
 };
 let eventStream = null;
 let eventRunId = null;
@@ -450,6 +452,24 @@ function conversationKey(runId, agent) {
 function currentConversation() {
   return chat.conversations.get(conversationKey(selected, chat.agent)) || null;
 }
+function pendingMatchesCurrentView() {
+  return Boolean(
+    chat.pendingTurn &&
+    chat.pendingTurn.agent === chat.agent &&
+    ((chat.pendingTurn.runId || null) === (selected || null))
+  );
+}
+function renderPendingTurn() {
+  if (!pendingMatchesCurrentView()) return "";
+  const pending = chat.pendingTurn;
+  const ts = pending.createdAt
+    ? '<span class="when">'+esc(new Date(pending.createdAt).toLocaleTimeString())+'</span>'
+    : "";
+  return '<div class="chat-turn user"><div class="turn-content">'
+    +'<div class="meta"><b>You</b>'+badge("pending")+'<span>#…</span>'+ts+'</div>'
+    +'<div class="body">'+visibleText(pending.content, 4000)+'</div>'
+    +'</div></div>';
+}
 function rememberConversation(conversation) {
   const key = conversationKey(conversation.runId, conversation.interfaceAgent);
   const existing = chat.conversations.get(key);
@@ -475,6 +495,9 @@ function chatIsBusyForCurrentView() {
 async function loadChat() {
   clearTimeout(chat.polling);
   renderChatShell();
+  q("chat-turns").innerHTML = '<span class="empty">Loading '+esc(chat.agent)+' manager conversation&#x2026;</span>';
+  setChatEnabled(false);
+  setChatStatus("Loading manager voice: "+chat.agent+"...");
   const params = selected ? "?runId="+encodeURIComponent(selected) : "";
   const conversations = await api("/chat/conversations"+params);
   for (const item of conversations) {
@@ -484,7 +507,7 @@ async function loadChat() {
   const conversation = currentConversation();
   if (!conversation) {
     const scope = selected ? esc(chat.agent)+" manager" : "global";
-    q("chat-turns").innerHTML='<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>';
+    q("chat-turns").innerHTML=(renderPendingTurn() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
     setChatStatus("Ready. Manager voice: "+chat.agent+".");
     setChatEnabled(!chatIsBusyForCurrentView());
     return;
@@ -593,7 +616,7 @@ function renderMarkdown(text) {
 }
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
-    q("chat-turns").innerHTML='<span class="empty">No turns yet.</span>';
+    q("chat-turns").innerHTML=renderPendingTurn() || '<span class="empty">No turns yet.</span>';
     return;
   }
   const proposalsByTurn = new Map();
@@ -632,7 +655,7 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     }
     return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
   }).join("");
-  q("chat-turns").innerHTML = turnsHtml + renderProposalHistory(proposalHistory);
+  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   enrichHistoryOutcomes().catch(() => {});
 }
@@ -696,7 +719,7 @@ function renderProposalCard(proposal) {
       +'<div class="proposal-kv"><b>Goal:</b> '+visibleText(meta.goal||"", 300)+'</div>'
       +'<div class="proposal-kv"><b>Repo:</b> '+esc(meta.repoPath||"")+'</div>'
       +'<div class="proposal-kv"><b>Lead:</b> '+esc(meta.lead||"claude")+'&nbsp;&nbsp;<b>Profile:</b> '+esc(meta.profile||"balanced")+'</div>'
-      +'<div class="proposal-copy">Run this in your terminal or click Start to begin planning.</div>'
+      +'<div class="proposal-copy">Run this in your terminal, or check readiness to reveal Start.</div>'
       +'<code>'+visibleText(proposal.commandCli, 1000)+'</code>'
       +'<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'
       +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
@@ -950,6 +973,7 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
     while (true) {
       const operation = await api("/operations/"+encodeURIComponent(operationId));
       if (!["queued","running"].includes(operation.status)) {
+        chat.pendingTurn = null;
         await refreshConversation(conversationId);
         if (operation.status === "succeeded") {
           if (currentConversation()?.id === conversationId) {
@@ -970,6 +994,7 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
   } catch (error) {
     setChatStatus(error.message, true);
   } finally {
+    chat.pendingTurn = null;
     if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
     setChatEnabled(!chatIsBusyForCurrentView());
   }
@@ -981,6 +1006,7 @@ async function sendChat(message) {
     idempotencyKey: requestKey("dashboard-chat-turn"),
     body: { message }
   });
+  chat.pendingTurn = null;
   await refreshConversation(conversation.id);
   await pollOperation(operation.id, conversation.id);
 }
@@ -988,13 +1014,30 @@ q("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = q("chat-input").value.trim();
   if (!text || chatIsBusyForCurrentView()) return;
+  const original = q("chat-input").value;
+  chat.pendingTurn = {
+    agent: chat.agent,
+    runId: selected || null,
+    content: text,
+    createdAt: new Date().toISOString()
+  };
   q("chat-input").value = "";
   q("chat-input").style.height = "auto";
   setChatEnabled(false);
   setChatStatus("Sending...");
+  if (currentConversation()) {
+    q("chat-turns").insertAdjacentHTML("beforeend", renderPendingTurn());
+    q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
+  } else {
+    q("chat-turns").innerHTML = renderPendingTurn();
+  }
   try {
     await sendChat(text);
   } catch (error) {
+    chat.pendingTurn = null;
+    q("chat-input").value = original;
+    q("chat-input").style.height = "auto";
+    q("chat-input").style.height = Math.min(q("chat-input").scrollHeight, 160) + "px";
     setChatStatus(error.message, true);
     setChatEnabled(!chatIsBusyForCurrentView());
   }

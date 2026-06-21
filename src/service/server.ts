@@ -267,7 +267,12 @@ export class DuetService {
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.js") {
-        this.send(response, 200, dashboardJs, "text/javascript; charset=utf-8");
+        const managerProvider = this.options.managerProvider ?? "codex";
+        const js = dashboardJs.replaceAll(
+          "__DUET_DEFAULT_MANAGER_PROVIDER__",
+          managerProvider,
+        );
+        this.send(response, 200, js, "text/javascript; charset=utf-8");
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.css") {

@@ -168,6 +168,9 @@ export class ChatEngine {
     // result is always set here — the try block throws on provider failure,
     // and the finally guard already checks `result` before asserting fingerprint.
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
+    const latestUserMessage = this.store
+      .listRecentConversationTurns(conversationId, 1)
+      .find((turn) => turn.role === "user")?.content;
     // Parse any proposal block from the reply. Strip it from visible content.
     const parseResult = parseProposalBlock(result.finalText);
     const contentToStore =
@@ -176,7 +179,12 @@ export class ChatEngine {
         : result.finalText;
     const synthesized =
       parseResult.kind === "parsed"
-        ? tryValidateAndSynthesize(parseResult.raw, conversation, this.store)
+        ? tryValidateAndSynthesize(
+            parseResult.raw,
+            conversation,
+            this.store,
+            latestUserMessage,
+          )
         : null;
     if (parseResult.kind === "invalid") {
       void serviceLog("warning", "manager proposal block was malformed", {
