@@ -663,6 +663,16 @@ export class Store {
         "RUN_NOT_DELETABLE",
       );
     }
+    // Manually delete children for DBs created before ON DELETE CASCADE was in schema
+    for (const table of [
+      "attempts", "agent_sessions", "messages", "artifacts", "usage_events",
+      "approvals", "verification_results", "integration_events", "action_tickets",
+      "manager_action_proposals",
+    ]) {
+      this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(id);
+    }
+    this.db.prepare("DELETE FROM tasks WHERE run_id = ?").run(id);
+    this.db.prepare("UPDATE conversations SET run_id = NULL WHERE run_id = ?").run(id);
     this.db.prepare("DELETE FROM runs WHERE id = ?").run(id);
   }
 
