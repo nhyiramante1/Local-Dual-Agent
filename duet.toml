@@ -1,0 +1,53 @@
+[orchestration]
+default_lead = "claude"
+max_revisions = 1
+agent_timeout_seconds = 600
+max_parallel_tasks = 2
+max_tasks = 6
+# Agent profile: cheap | balanced | reasoning | max
+# Controls Claude model (haiku/opus) and Codex model selection.
+profile = "balanced"
+
+[budgets]
+run_wall_clock_seconds = 3600
+max_agent_turns = 25
+claude_max_usd_per_turn = 0.75
+claude_max_usd_per_run = 2.0
+codex_max_input_tokens = 400000
+codex_max_output_tokens = 40000
+
+[verification]
+timeout_seconds = 300
+setup_commands = [
+  ["npm", "ci", "--ignore-scripts"],
+]
+commands = [
+  ["npm", "test"],
+  ["npm", "run", "build"],
+]
+
+[verification.env]
+CI = "true"
+
+[manager]
+# Which provider voices the manager: openai | claude | codex.
+provider = "openai"
+# Groq-hosted model via OpenAI-compatible API.
+openai_model = "llama-3.3-70b-versatile"
+# Point to Groq's OpenAI-compatible endpoint. Remove this line to use real OpenAI.
+openai_base_url = "https://api.groq.com/openai/v1"
+# Per-turn and daily spend caps (USD). Groq free tier is generous so these are loose.
+openai_max_usd_per_turn = 0.10
+openai_max_usd_per_day = 2.0
+# Maximum USD a single manager turn may spend via Claude.
+claude_max_usd_per_turn = 0.5
+# Daily Claude spend cap across all manager turns.
+claude_max_usd_per_day = 5.0
+# Daily Codex input token cap for manager turns.
+codex_max_input_tokens_per_day = 500000
+# Daily Codex output token cap for manager turns.
+codex_max_output_tokens_per_day = 100000
+# Wall-clock seconds a single Codex manager turn may run.
+codex_runtime_seconds = 120
+# Maximum manager turns per day (all interface agents combined).
+max_turns_per_day = 200

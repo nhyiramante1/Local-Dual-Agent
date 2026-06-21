@@ -3,3 +3,4 @@ dist/
 .duet/
 *.log
 *.tmp
+.env

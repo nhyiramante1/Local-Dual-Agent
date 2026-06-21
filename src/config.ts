@@ -33,6 +33,7 @@ export interface DuetConfig {
   manager: {
     provider: ManagerProviderName;
     openaiModel: string;
+    openaiBaseUrl: string | undefined;
     openaiMaxUsdPerTurn: number;
     openaiMaxUsdPerDay: number;
     claudeMaxUsdPerTurn: number;
@@ -80,6 +81,7 @@ export const defaultConfig: DuetConfig = {
   manager: {
     provider: "codex" as ManagerProviderName,
     openaiModel: "gpt-4o-mini",
+    openaiBaseUrl: undefined,
     openaiMaxUsdPerTurn: 0.1,
     openaiMaxUsdPerDay: 2,
     claudeMaxUsdPerTurn: 0.5,
@@ -347,6 +349,10 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
         typeof manager.openai_model === "string"
           ? manager.openai_model
           : defaultConfig.manager.openaiModel,
+      openaiBaseUrl:
+        typeof manager.openai_base_url === "string"
+          ? manager.openai_base_url
+          : undefined,
       openaiMaxUsdPerTurn: numberInRange(
         manager.openai_max_usd_per_turn,
         defaultConfig.manager.openaiMaxUsdPerTurn,
