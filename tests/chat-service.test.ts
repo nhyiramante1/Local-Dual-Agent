@@ -1830,7 +1830,7 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardHtml, /Manager/);
   assert.match(dashboardHtml, /Manager/i);
   assert.match(dashboardJs, /\/chat\/conversations/);
-  assert.match(dashboardJs, /DEFAULT_MANAGER_AGENT/);
+  assert.match(dashboardJs, /DEFAULT_MANAGER_PROVIDER/);
   assert.match(dashboardJs, /__DUET_DEFAULT_MANAGER_PROVIDER__/);
   assert.match(dashboardJs, /function rememberConversation/);
   assert.match(dashboardJs, /updatedAt/);
@@ -1883,7 +1883,7 @@ test("dashboard javascript boots with the configured manager provider", async ()
     const response = await fetch(`${base}/dashboard.js`);
     assert.equal(response.status, 200);
     const js = await response.text();
-    assert.match(js, /const DEFAULT_MANAGER_AGENT = "openai";/);
+    assert.match(js, /const DEFAULT_MANAGER_PROVIDER = "openai";/);
     assert.doesNotMatch(js, /__DUET_DEFAULT_MANAGER_PROVIDER__/);
   } finally {
     await service.close();

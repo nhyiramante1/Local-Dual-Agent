@@ -116,6 +116,7 @@ export class DuetService {
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
   });
+  private readonly _dashboardJs: string;
   private readonly tickets = new Map<string, number>();
   private readonly sessions = new Map<string, number>();
   private readonly approvalFailures = new Map<string, { count: number; blockedUntil: number }>();
@@ -127,6 +128,10 @@ export class DuetService {
   private sweepTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: ServerOptions) {
+    this._dashboardJs = dashboardJs.replaceAll(
+      "__DUET_DEFAULT_MANAGER_PROVIDER__",
+      options.managerProvider ?? "codex",
+    );
     this.app = new ApplicationCommands(options.store);
     this.activities = new ActivityManager(this.app, options.instanceId);
     const chatProviders: ChatProviders = options.chatProviders ?? {
@@ -267,12 +272,7 @@ export class DuetService {
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.js") {
-        const managerProvider = this.options.managerProvider ?? "codex";
-        const js = dashboardJs.replaceAll(
-          "__DUET_DEFAULT_MANAGER_PROVIDER__",
-          managerProvider,
-        );
-        this.send(response, 200, js, "text/javascript; charset=utf-8");
+        this.send(response, 200, this._dashboardJs, "text/javascript; charset=utf-8");
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.css") {

@@ -328,10 +328,10 @@ code.inline-code{display:inline;padding:2px 5px}
 export const dashboardJs = `
 (function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();
 const q = (id) => document.getElementById(id);
-const DEFAULT_MANAGER_AGENT = "__DUET_DEFAULT_MANAGER_PROVIDER__";
+const DEFAULT_MANAGER_PROVIDER = "__DUET_DEFAULT_MANAGER_PROVIDER__";
 let selected = new URL(location.href).searchParams.get("run");
 const chat = {
-  agent: DEFAULT_MANAGER_AGENT,
+  agent: DEFAULT_MANAGER_PROVIDER,
   conversations: new Map(),
   activeOperation: null,
   polling: null,
@@ -1026,7 +1026,12 @@ q("chat-form").addEventListener("submit", async (event) => {
   setChatEnabled(false);
   setChatStatus("Sending...");
   if (currentConversation()) {
-    q("chat-turns").insertAdjacentHTML("beforeend", renderPendingTurn());
+    const historyEl = q("chat-turns").querySelector(".proposal-history");
+    if (historyEl) {
+      historyEl.insertAdjacentHTML("beforebegin", renderPendingTurn());
+    } else {
+      q("chat-turns").insertAdjacentHTML("beforeend", renderPendingTurn());
+    }
     q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   } else {
     q("chat-turns").innerHTML = renderPendingTurn();

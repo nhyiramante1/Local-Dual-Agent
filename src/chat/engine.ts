@@ -21,7 +21,7 @@ import {
   type ChatContextBuilder,
   type ChatContextOptions,
 } from "./context.js";
-import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
+import { parseProposalBlock, tryValidateAndSynthesize, userIntentAllowsCreatePlan } from "./proposals.js";
 import { serviceLog } from "../service/logger.js";
 
 export const defaultManagerBudget: ManagerBudget = {
@@ -192,11 +192,16 @@ export class ChatEngine {
         reason: parseResult.reason,
       });
     } else if (parseResult.kind === "parsed" && synthesized === null) {
-      void serviceLog("warning", "manager proposal failed validation", {
-        conversationId,
-        action: parseResult.raw.action,
-        runId: parseResult.raw.runId,
-      });
+      const isIntentBlocked =
+        parseResult.raw.action === "create_plan" &&
+        !userIntentAllowsCreatePlan(latestUserMessage);
+      void serviceLog(
+        "warning",
+        isIntentBlocked
+          ? "manager create_plan blocked: no planning intent in latest user message"
+          : "manager proposal failed validation",
+        { conversationId, action: parseResult.raw.action, runId: parseResult.raw.runId },
+      );
     }
 
     // Persist turn + optional proposal atomically.
