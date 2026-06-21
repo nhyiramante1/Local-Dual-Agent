@@ -41,13 +41,16 @@ global chat. You can say something like "create a plan to add dark mode, repo
 is at C:\path\to\project" and the manager will synthesize a ready-to-start
 proposal card with the correct CLI command pre-filled.
 
-The manager voice is configurable. By default it uses Codex. You can switch to
-Claude, or point it at any OpenAI-compatible API such as Groq to avoid
+The manager voice is configurable. By default it uses OpenAI. You can switch to
+Claude or Codex, or point it at any OpenAI-compatible API such as Groq to avoid
 consuming Claude or Codex worker quota for ordinary conversation.
+
+When you create a plan through chat, the manager carries the full conversation
+thread forward — your last few messages are included as context so the planner
+agent understands the discussion, not just the final instruction.
 
 ## What It Does Not Do Yet
 
-- No dashboard buttons for plan approval, merge approval, or merge yet.
 - No automatic conflict resolver.
 - No remote/cloud service.
 - No support for untrusted repositories as a security sandbox.
@@ -373,6 +376,11 @@ run and may show suggested Duet action cards. You can check whether a
 suggestion still looks current, copy the command, dismiss the card, or start an
 ordinary operation after typing `start`.
 
+Runs in the sidebar that have finished (failed, cancelled, merged, cleaned up)
+show a static timeline — no live event stream for completed work. Active runs
+stream events live. Terminal runs can be deleted with the × button on their
+card; only finished runs are eligible.
+
 The manager voice is selected per conversation and defaults to the provider set
 in `duet.toml`. Options are `codex`, `claude`, or `openai`. Setting provider
 to `openai` and pointing `openai_base_url` at a compatible endpoint such as
@@ -403,7 +411,7 @@ local run and confirm:
 
 ## Manager Provider Setup
 
-The manager voice defaults to Codex. To switch it, edit `duet.toml` in the
+The manager voice defaults to OpenAI. To switch it, edit `duet.toml` in the
 Duet project root:
 
 ```toml

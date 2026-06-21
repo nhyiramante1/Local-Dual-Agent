@@ -35,6 +35,14 @@ Manager Chat can currently:
 - Start ordinary proposal actions after typed `start` confirmation.
 - Render markdown in responses (headers, lists, code blocks, bold, italic).
 - Persist conversation history across page reloads.
+- Pass last 3 user conversation turns as context to the planner when
+  dispatching `create_plan` — planner sees the full discussion thread.
+- Static timeline for terminal runs (failed/cancelled/merged/cleaned_up) —
+  no live SSE reconnect, shows a static "no live events" notice.
+- Delete finished runs from the sidebar via a × button on the run card —
+  only terminal-status runs are eligible; cascades all child rows.
+- Inline error banner (bottom-center, auto-dismisses 6 s) instead of
+  browser `alert()` for dashboard errors.
 
 Ordinary dashboard-startable proposal actions:
 
@@ -156,6 +164,9 @@ These are architectural recommendations, not yet-completed implementation:
 - **Phase 6A**: Proposal history and operation outcome tracking.
 - **Phase 6B**: Browser-native fingerprint approval modal for `approve_plan` and
   `approve_merge` — rate-limited, binding-hash verified, session-only path.
+- **Phase 6C (partial / dashboard polish)**: Run delete (× button, terminal
+  runs only, cascades children), static timeline for finished runs, inline
+  error banner, conversation context forwarded to planner on `create_plan`.
 
 ## Recommended Next Planning Targets
 
