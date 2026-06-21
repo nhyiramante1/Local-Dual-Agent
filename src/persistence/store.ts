@@ -654,6 +654,18 @@ export class Store {
     ).map((row) => this.mapRun(row));
   }
 
+  deleteRun(id: string): void {
+    const run = this.getRun(id);
+    const terminal = new Set(["failed", "cancelled", "merged", "cleaned_up"]);
+    if (!terminal.has(run.status)) {
+      throw new DuetError(
+        `Run ${id} has status "${run.status}" and cannot be deleted. Only failed, cancelled, merged, or cleaned_up runs may be deleted.`,
+        "RUN_NOT_DELETABLE",
+      );
+    }
+    this.db.prepare("DELETE FROM runs WHERE id = ?").run(id);
+  }
+
   updateRun(
     id: string,
     fields: Partial<{

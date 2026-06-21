@@ -190,7 +190,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 button.sel{border-color:var(--accent);background:var(--acc-bg)}
 button b{font-weight:600}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 8px;background:var(--surface)}
-.run-btn{display:flex;flex-direction:column;gap:5px;padding:10px 11px;margin:0 0 6px;text-align:left}
+.run-row{position:relative;margin:0 0 6px}.run-btn{display:flex;flex-direction:column;gap:5px;padding:10px 32px 10px 11px;margin:0;text-align:left;width:100%}.run-delete-btn{position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;color:var(--muted);font-size:11px;line-height:1;padding:2px 5px;border-radius:3px;opacity:.6}.run-delete-btn:hover{opacity:1;color:#e53e3e;background:var(--hover)}
 .run-goal{font-size:13px;font-weight:500;color:var(--text);line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .run-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .run-id{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint)}
@@ -380,8 +380,21 @@ async function authenticate() {
 }
 async function loadRuns(options = {}) {
   const runs=await api("/runs");
-  q("runs").innerHTML=runs.map(r=>'<button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>').join("")||'<span class="empty">No runs yet.</span>';
-  q("runs").querySelectorAll("button").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
+  const deletable = new Set(["failed","cancelled","merged","cleaned_up"]);
+  q("runs").innerHTML=runs.map(r=>{
+    const del=deletable.has(r.status)?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>':"";
+    return '<div class="run-row"><button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>'+del+'</div>';
+  }).join("")||'<span class="empty">No runs yet.</span>';
+  q("runs").querySelectorAll(".run-btn").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
+  q("runs").querySelectorAll("[data-delete-run]").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    if(!confirm("Delete this run? This cannot be undone."))return;
+    try{
+      await api("/runs/"+encodeURIComponent(b.dataset.deleteRun),{method:"DELETE"});
+      if(selected===b.dataset.deleteRun){selected=null;}
+      await loadRuns();
+    }catch(err){alert(err.message);}
+  });
   if(selected && options.selectCurrent) await selectRun(selected);
 }
 async function selectRun(id) {

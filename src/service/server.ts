@@ -303,11 +303,13 @@ export class DuetService {
       // proposal path instead of calling orchestration endpoints directly.
       const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
+      const deleteRunRoute = request.method === "DELETE" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname);
       if (
         credential === "session" &&
         request.method !== "GET" &&
         !chatRoute &&
-        !approveRoute
+        !approveRoute &&
+        !deleteRunRoute
       ) {
         this.send(
           response,
@@ -820,6 +822,11 @@ export class DuetService {
         }
         return;
       }
+    }
+    if (request.method === "DELETE" && suffix === "") {
+      this.options.store.deleteRun(runId);
+      this.send(response, 200, apiSuccess(requestId, { deleted: runId }));
+      return;
     }
     if (request.method !== "POST") throw new DuetError("Not found.", "NOT_FOUND");
     const bodyText = await readBody(request);
