@@ -615,6 +615,21 @@ async function enrichHistoryOutcomes() {
   }
 }
 function renderProposalCard(proposal) {
+  if (proposal.action === "create_plan") {
+    let meta = {};
+    try { meta = JSON.parse(proposal.commandJson); } catch {}
+    return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("create plan")+badge("ordinary")+'</div>'
+      +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
+      +'<div class="proposal-kv"><b>Goal:</b> '+visibleText(meta.goal||"", 300)+'</div>'
+      +'<div class="proposal-kv"><b>Repo:</b> '+esc(meta.repoPath||"")+'</div>'
+      +'<div class="proposal-kv"><b>Lead:</b> '+esc(meta.lead||"claude")+'&nbsp;&nbsp;<b>Profile:</b> '+esc(meta.profile||"balanced")+'</div>'
+      +'<div class="proposal-copy">Run this in your terminal or click Start to begin planning.</div>'
+      +'<code>'+visibleText(proposal.commandCli, 1000)+'</code>'
+      +'<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'</div>';
+  }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
   const isMerge = proposal.action === "merge_run";
   const isFingerprint = proposal.tier === "fingerprint";

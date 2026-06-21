@@ -12,12 +12,12 @@ import {
   defaultManagerBudget,
   type ChatProviders,
 } from "../chat/engine.js";
-import type { ManagerBudget, ManagerProviderName } from "../core/domain.js";
+import type { AgentProfile, ManagerBudget, ManagerProviderName } from "../core/domain.js";
 import {
   prepareProposalAction,
   startProposalAction,
 } from "../chat/proposals.js";
-import { defaultConfig, validateConfig } from "../config.js";
+import { defaultConfig, validateConfig, type DuetConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import { ClaudeAdapter } from "../providers/claude.js";
@@ -35,6 +35,7 @@ interface ServerOptions {
   store: Store;
   secret: string;
   instanceId: string;
+  config?: DuetConfig;
   idleTimeoutMs?: number;
   onStop?: () => void;
   chatProviders?: ChatProviders;
@@ -459,12 +460,29 @@ export class DuetService {
       const bodyText = await readBody(request);
       const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
       await this.mutate(request, response, requestId, route, bodyText, () => {
-        const { command } = startProposalAction(
+        const { proposal, command: defaultCommand } = startProposalAction(
           this.options.store,
           conversationId,
           proposalId,
           body,
         );
+        let command = defaultCommand;
+        if (proposal.action === "create_plan") {
+          const parsed = JSON.parse(proposal.commandJson) as {
+            goal: string;
+            repoPath: string;
+            lead: "claude" | "codex";
+            profile: string;
+          };
+          const baseConfig = this.options.config ?? defaultConfig;
+          const cfg: DuetConfig = parsed.profile
+            ? {
+                ...baseConfig,
+                orchestration: { ...baseConfig.orchestration, profile: parsed.profile as AgentProfile },
+              }
+            : baseConfig;
+          command = { kind: "plan", repoPath: parsed.repoPath, goal: parsed.goal, lead: parsed.lead, config: cfg };
+        }
         const operation = this.activities.submit(command);
         try {
           this.options.store.markProposalStarted(

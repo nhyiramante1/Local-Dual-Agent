@@ -126,6 +126,7 @@ function opposite(provider: ProviderName): ProviderName {
 }
 
 const VALID_PROPOSAL_ACTIONS = new Set<string>([
+  "create_plan",
   "execute_run",
   "resume_run",
   "retry_task",

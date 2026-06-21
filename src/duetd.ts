@@ -86,6 +86,7 @@ async function main(): Promise<void> {
       store,
       secret,
       instanceId,
+      config,
       idleTimeoutMs: Number(process.env.DUET_IDLE_TIMEOUT_MS ?? 15 * 60_000),
       managerBudget,
       managerProvider: config.manager.provider,
