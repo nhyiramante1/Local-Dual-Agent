@@ -106,10 +106,10 @@ profile = "turbo-mode"
   );
 });
 
-test("loadConfig returns codex as default manager provider when [manager] is absent", async () => {
+test("loadConfig returns openai as default manager provider when [manager] is absent", async () => {
   await withToml("", async (tomlPath) => {
     const config = await loadConfig(tomlPath);
-    assert.equal(config.manager.provider, "codex");
+    assert.equal(config.manager.provider, "openai");
   });
 });
 
@@ -126,7 +126,7 @@ provider = "openai"
   );
 });
 
-test("loadConfig falls back to codex for unrecognised manager provider", async () => {
+test("loadConfig falls back to openai for unrecognised manager provider", async () => {
   await withToml(
     `
 [manager]
@@ -134,7 +134,7 @@ provider = "gpt-wizard"
 `,
     async (tomlPath) => {
       const config = await loadConfig(tomlPath);
-      assert.equal(config.manager.provider, "codex");
+      assert.equal(config.manager.provider, "openai");
     },
   );
 });

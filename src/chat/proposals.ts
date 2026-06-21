@@ -286,10 +286,15 @@ export function tryValidateAndSynthesize(
 
   if (action === "set_strategy") {
     if (conversation.runId) return null; // global-chat only
+    const validLeads = new Set(["codex", "claude"]);
+    if (raw.lead && !validLeads.has(raw.lead)) {
+      console.warn(`[set_strategy] unrecognised lead value "${raw.lead}"; rejecting proposal`);
+      return null;
+    }
     const lead = raw.lead === "codex" ? "codex" : "claude";
     const validProfiles = new Set(["cheap", "balanced", "reasoning", "max"]);
     const profile = raw.profile && validProfiles.has(raw.profile) ? raw.profile : "balanced";
-    const commandCli = `duet strategy --lead ${lead} --profile ${profile}`;
+    const commandCli = ``;
     const commandJson = JSON.stringify({ action: "set_strategy", lead, profile });
     const summary = raw.rationale
       ? raw.rationale.slice(0, 500)
@@ -467,7 +472,7 @@ export function startProposalAction(
     return { proposal, command: { kind: "plan", repoPath: "", goal: "", lead: "claude", config: {} as never } };
   }
   if (proposal.action === "set_strategy") {
-    return { proposal, command: { kind: "plan", repoPath: "", goal: "", lead: "claude", config: {} as never } };
+    return { proposal, command: null as never };
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");

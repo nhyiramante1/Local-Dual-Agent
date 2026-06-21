@@ -488,7 +488,7 @@ export class DuetService {
           };
           this.options.store.createOperation(operation);
           this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
-          return { status: 202, data: operation };
+          return { status: 200, data: operation };
         }
         if (proposal.action === "create_plan") {
           const parsed = JSON.parse(proposal.commandJson) as {

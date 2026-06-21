@@ -2525,8 +2525,7 @@ test("set_strategy proposal is synthesized from manager response", async () => {
     const p = proposals[0];
     assert.equal(p.action, "set_strategy");
     assert.equal(p.tier, "ordinary");
-    assert.ok(p.commandCli.includes("--lead"), "commandCli should include --lead");
-    assert.ok(p.commandCli.includes("claude"), "commandCli should include lead value");
+    assert.equal(p.commandCli, "", "commandCli should be empty for dashboard-only action");
     const parsed = JSON.parse(p.commandJson) as { lead: string; profile: string };
     assert.equal(parsed.lead, "claude");
     assert.equal(parsed.profile, "cheap");
@@ -2578,7 +2577,7 @@ test("set_strategy proposal start stores the strategy preference", async () => {
       turnId: turn.id,
       action: "set_strategy",
       summary: "Proposed strategy: lead=codex profile=cheap",
-      commandCli: "duet strategy --lead codex --profile cheap",
+      commandCli: "",
       commandJson,
       tier: "ordinary",
       expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
@@ -2592,7 +2591,7 @@ test("set_strategy proposal start stores the strategy preference", async () => {
         body: JSON.stringify({ confirm: "start" }),
       },
     );
-    assert.equal(response.status, 202);
+    assert.equal(response.status, 200);
     const operation = ((await response.json()) as { data: OperationRecord }).data;
     assert.equal(operation.kind, "set_strategy");
     assert.equal(operation.status, "succeeded");
