@@ -35,6 +35,16 @@ and message context. It can also show suggested Duet action cards. Ordinary
 suggestions can be checked and started from the dashboard after you type a
 confirmation. Fingerprint-gated approvals and merge still stay in the CLI.
 
+The manager can also recommend provider and profile strategy based on current
+usage and availability, and create plan proposals from natural language in
+global chat. You can say something like "create a plan to add dark mode, repo
+is at C:\path\to\project" and the manager will synthesize a ready-to-start
+proposal card with the correct CLI command pre-filled.
+
+The manager voice is configurable. By default it uses Codex. You can switch to
+Claude, or point it at any OpenAI-compatible API such as Groq to avoid
+consuming Claude or Codex worker quota for ordinary conversation.
+
 ## What It Does Not Do Yet
 
 - No dashboard buttons for plan approval, merge approval, or merge yet.
@@ -363,8 +373,14 @@ run and may show suggested Duet action cards. You can check whether a
 suggestion still looks current, copy the command, dismiss the card, or start an
 ordinary operation after typing `start`.
 
-Manager chat may use provider quota when you send a message. Today the manager
-voice is Claude or Codex, so treat it like a real provider turn. It can suggest
+The manager voice is selected per conversation and defaults to the provider set
+in `duet.toml`. Options are `codex`, `claude`, or `openai`. Setting provider
+to `openai` and pointing `openai_base_url` at a compatible endpoint such as
+Groq lets you run manager chat without touching Claude or Codex worker quota.
+
+Manager chat may use provider quota when you send a message. If you are using
+Claude or Codex as the manager voice, treat it like a real provider turn. Using
+an OpenAI-compatible endpoint such as Groq avoids this. The manager can suggest
 ordinary actions that you may start from the dashboard, but fingerprint-gated
 actions stay in the terminal.
 
@@ -384,6 +400,33 @@ local run and confirm:
   and does not perform those actions.
 - Refreshing or briefly disconnecting the browser does not duplicate timeline
   events.
+
+## Manager Provider Setup
+
+The manager voice defaults to Codex. To switch it, edit `duet.toml` in the
+Duet project root:
+
+```toml
+[manager]
+provider = "openai"
+openai_model = "llama-3.3-70b-versatile"
+openai_base_url = "https://api.groq.com/openai/v1"
+```
+
+Then create a `.env` file in the same directory with your key:
+
+```
+GROQ_API_KEY=your_key_here
+```
+
+The service loads `.env` automatically on startup. The file is gitignored and
+never committed. If `OPENAI_API_KEY` is also set in the environment it takes
+priority over `GROQ_API_KEY`.
+
+To use real OpenAI instead, remove `openai_base_url` and set `OPENAI_API_KEY`.
+
+To keep using Codex or Claude as the manager, set `provider = "codex"` or
+`provider = "claude"` and no API key is needed beyond your existing installs.
 
 ## Practical Tips
 

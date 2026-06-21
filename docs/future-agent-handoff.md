@@ -12,20 +12,29 @@ The app is now a local dual-agent orchestrator with:
   and merge.
 - `duetd` local service.
 - SQLite durable state.
-- Browser dashboard.
+- Browser dashboard with collapsible sidebar section nav (Runs, Tasks,
+  Timeline, Verification, Messages, Artifacts, Conflicts, Diff).
 - MCP bridge for restricted inspection and planning.
-- Manager Chat in the dashboard.
+- Manager Chat in the dashboard — anchored at the bottom, vertically resizable.
 - Run-level worker profiles for agent model and effort policy.
+- `npm run up` one-shot script: stop → build → service start → auto-open browser.
 
 Manager Chat can currently:
 
-- Run globally or against a selected run.
-- Use Codex or Claude as the manager voice.
+- Run globally (no run selected) or scoped to a selected run.
+- Use Codex, Claude, or any OpenAI-compatible endpoint (e.g. Groq) as the
+  manager voice — configured via `duet.toml` and `.env`.
 - Summarize run, task, event, verification, and usage state.
+- Recommend provider and profile strategy based on current usage and
+  availability (prefer_claude, prefer_codex, balanced, both_limited).
 - Produce durable proposal cards.
+- Synthesize `create_plan` proposals from natural language in global chat —
+  e.g. "create a plan to add dark mode, repo is at C:\path\to\project".
 - Check proposal readiness.
 - Copy or dismiss proposal cards.
 - Start ordinary proposal actions after typed `start` confirmation.
+- Render markdown in responses (headers, lists, code blocks, bold, italic).
+- Persist conversation history across page reloads.
 
 Ordinary dashboard-startable proposal actions:
 
@@ -37,10 +46,13 @@ Ordinary dashboard-startable proposal actions:
 - `cancel_task`
 - `cleanup_run`
 
-Still CLI-only:
+Browser-confirmable (fingerprint modal in dashboard, no CLI needed):
 
 - `approve_plan`
 - `approve_merge`
+
+Still CLI-only:
+
 - `merge_run`
 - action-ticket creation or consumption
 
@@ -130,72 +142,35 @@ These are architectural recommendations, not yet-completed implementation:
    `reasoning`, and `max`. Raw model and effort knobs can exist behind an
    advanced layer later.
 
+## Completed Phases
+
+- **Phases 1–4**: CLI orchestration, SQLite state, worktrees, budgets, verification.
+- **Phase 5A–5D**: Manager Chat prototype, proposal cards, global chat, manager config.
+- **Phase 5E**: Worker profiles (cheap/balanced/reasoning/max).
+- **Phase 5F**: OpenAI-compatible manager lane — `openai_base_url` config,
+  `GROQ_API_KEY` env fallback, `.env` auto-load on service startup, `duet.toml`
+  shipped with project.
+- **Phase 5G**: Manager strategy and recommendation engine — provider availability
+  context, `prefer_claude`/`prefer_codex`/`balanced`/`both_limited` recommendations,
+  `create_plan` proposal synthesis from natural language in global chat.
+- **Phase 6A**: Proposal history and operation outcome tracking.
+- **Phase 6B**: Browser-native fingerprint approval modal for `approve_plan` and
+  `approve_merge` — rate-limited, binding-hash verified, session-only path.
+
 ## Recommended Next Planning Targets
 
-### Phase 5F: OpenAI Or ChatGPT Manager Lane
+### Phase 5H: Manager Strategy Proposals (structured)
 
 Goal:
-Make OpenAI or ChatGPT-backed manager behavior the default dashboard manager
-lane while preserving Codex and Claude as selectable manager options.
+Turn manager strategy recommendations into actionable proposal cards, not just
+text advice.
 
 Key outcomes:
 
-- Add manager-provider configuration independent from worker providers.
-- Allow manager selection among OpenAI/ChatGPT, Codex, and Claude.
-- Prefer OpenAI or ChatGPT-backed manager behavior by default.
-- Preserve current global and run-scoped conversation behavior.
-- Keep ordinary action start in the dashboard and fingerprint actions CLI-only
-  for now.
-
-This phase should not introduce unsupported browser automation.
-
-### Phase 5G: Manager Strategy And Recommendation Engine
-
-Goal:
-Teach the manager to recommend how Duet should run, not just describe current
-state.
-
-Key outcomes:
-
-- Recommend planning lead, worker provider, reviewer provider, and run profile.
-- Consider current usage, estimated task weight, provider availability, and
-  policy limits.
-- Let the manager create plan proposals from global chat after confirmation.
-- Surface bounded proactive guidance such as:
-  - likely next action
-  - useful dashboard or CLI feature
-  - provider fallback when one lane is saturated
-
-The human should still approve strategy-changing proposals before they start.
-
-### Phase 6A: Manager-First Dashboard Control Plane
-
-Goal:
-Make manager chat the normal way to drive the product.
-
-Key outcomes:
-
-- Natural-language manager prompts automatically create the correct proposal
-  cards and readiness checks.
-- Explicit controls remain available as backup, but the chat path becomes the
-  default experience.
-- Global chat can inspect repositories, recommend setup, create plan proposals,
-  and start planning after confirmation.
-- Run-scoped chat can explain state, suggest next steps, and launch ordinary
-  operations through proposal flows.
-
-### Phase 6B: Browser-Native Fingerprint Approvals
-
-Goal:
-Move plan approval and merge approval into the dashboard without allowing agent
-auto-approval.
-
-Key outcomes:
-
-- Fingerprint review modal in the dashboard.
-- Typed confirmation in-browser for fingerprint-gated actions.
-- Human-only approval boundary remains explicit and policy-bound.
-- No automatic approve or merge path for manager agents.
+- Manager can propose lead/provider/profile choices as a structured card.
+- Human approves the strategy card before it shapes the next run.
+- Cards show estimated cost/impact based on current usage and task weight.
+- Keeps the human-in-the-loop boundary intact.
 
 ### Phase 6C: Extension Points
 
@@ -231,6 +206,7 @@ npm run test:dashboard
 ## Planning Advice
 
 Start future branches from updated `main`, not old stacked feature branches.
-At the time of this note, remote `main` already contains work through Phase 5D,
-and the active future planning context assumes the current remote work is on
-Phase 5E and beyond.
+At the time of this note, `main` contains work through Phase 6B. Phase 5G and
+the Groq/OpenAI-compatible manager lane (5F extension) are on PR #16
+(`claude/legion-computer-access-bzsntl`) and not yet merged. Start the next
+phase from `main` after PR #16 merges.
