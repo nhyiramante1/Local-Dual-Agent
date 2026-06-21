@@ -21,7 +21,7 @@ import {
   type ChatContextBuilder,
   type ChatContextOptions,
 } from "./context.js";
-import { parseProposalBlock, tryValidateAndSynthesize } from "./proposals.js";
+import { parseProposalBlock, tryValidateAndSynthesize, userIntentAllowsCreatePlan } from "./proposals.js";
 import { serviceLog } from "../service/logger.js";
 
 export const defaultManagerBudget: ManagerBudget = {
@@ -168,6 +168,9 @@ export class ChatEngine {
     // result is always set here — the try block throws on provider failure,
     // and the finally guard already checks `result` before asserting fingerprint.
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
+    const latestUserMessage = this.store
+      .listRecentConversationTurns(conversationId, 1)
+      .find((turn) => turn.role === "user")?.content;
     // Parse any proposal block from the reply. Strip it from visible content.
     const parseResult = parseProposalBlock(result.finalText);
     const contentToStore =
@@ -176,7 +179,12 @@ export class ChatEngine {
         : result.finalText;
     const synthesized =
       parseResult.kind === "parsed"
-        ? tryValidateAndSynthesize(parseResult.raw, conversation, this.store)
+        ? tryValidateAndSynthesize(
+            parseResult.raw,
+            conversation,
+            this.store,
+            latestUserMessage,
+          )
         : null;
     if (parseResult.kind === "invalid") {
       void serviceLog("warning", "manager proposal block was malformed", {
@@ -184,11 +192,16 @@ export class ChatEngine {
         reason: parseResult.reason,
       });
     } else if (parseResult.kind === "parsed" && synthesized === null) {
-      void serviceLog("warning", "manager proposal failed validation", {
-        conversationId,
-        action: parseResult.raw.action,
-        runId: parseResult.raw.runId,
-      });
+      const isIntentBlocked =
+        parseResult.raw.action === "create_plan" &&
+        !userIntentAllowsCreatePlan(latestUserMessage);
+      void serviceLog(
+        "warning",
+        isIntentBlocked
+          ? "manager create_plan blocked: no planning intent in latest user message"
+          : "manager proposal failed validation",
+        { conversationId, action: parseResult.raw.action, runId: parseResult.raw.runId },
+      );
     }
 
     // Persist turn + optional proposal atomically.
