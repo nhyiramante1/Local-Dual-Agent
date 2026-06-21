@@ -742,6 +742,33 @@ async function startProposal(proposalId, button) {
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
   if (panel) panel.innerHTML = '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
   await pollOperation(operation.id, conversation.id, "Duet operation");
+  try {
+    const completedOp = await api("/operations/"+encodeURIComponent(operation.id));
+    if (completedOp.status === "succeeded" && completedOp.resultJson) {
+      const result = JSON.parse(completedOp.resultJson);
+      if (result && result.id) {
+        const msgs = await api("/runs/"+encodeURIComponent(result.id)+"/messages");
+        const planMsg = (msgs.value || msgs).find(m => m.kind === "plan");
+        if (planMsg) {
+          const card = q("chat-turns").querySelector('[data-proposal-id="'+CSS.escape(proposalId)+'"]');
+          if (card) {
+            let plan = { summary: "", tasks: [], risks: [] };
+            try { plan = JSON.parse(planMsg.body); } catch {}
+            const taskList = plan.tasks.map(t =>
+              '<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted" style="font-size:12px">'+esc(t.objective||"")+'</div></div>'
+            ).join("");
+            const riskList = plan.risks && plan.risks.length
+              ? '<div class="plan-section-head" style="margin-top:10px">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join("")
+              : "";
+            const bubble = document.createElement("div");
+            bubble.className = "chat-turn manager";
+            bubble.innerHTML = '<div class="turn-content"><div class="meta"><b>Plan</b>'+badge("ready")+'</div><div class="body"><div class="plan-card" style="padding:0"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div></div></div>';
+            card.after(bubble);
+          }
+        }
+      }
+    }
+  } catch {}
   if (selected) await selectRun(selected);
 }
 let approvalModal = { proposalId: null, runId: null, stage: null, bindingHash: null, runVersion: null };
