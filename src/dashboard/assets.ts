@@ -683,9 +683,8 @@ function renderProposalCard(proposal) {
       +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
       +'<div class="proposal-kv"><b>Lead:</b> '+esc(meta.lead||"claude")+'&nbsp;&nbsp;<b>Profile:</b> '+esc(meta.profile||"balanced")+'</div>'
       +'<div class="proposal-copy">Approve to store this as the preferred strategy for the next run. No terminal command needed.</div>'
-      +'<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'
-      +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button>'
-      +'<button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(proposal.id)+'"><button type="button" disabled data-proposal-start="'+esc(proposal.id)+'" data-run-version="" data-task-version="">Start operation</button></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
       +'</div>';
   }
   if (proposal.action === "create_plan") {

@@ -486,8 +486,10 @@ export class DuetService {
             finishedAt: now,
             createdAt: now,
           };
-          this.options.store.createOperation(operation);
+          // markProposalStarted first: if it throws (e.g. concurrent start), createOperation
+          // hasn't run yet so there is no orphan record to clean up.
           this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
+          this.options.store.createOperation(operation);
           return { status: 200, data: operation };
         }
         if (proposal.action === "create_plan") {
@@ -515,6 +517,9 @@ export class DuetService {
             ? `${parsed.goal}\n\nConversation context:\n${recentTurns.map((m, i) => `[${i + 1}] ${m}`).join("\n")}`
             : parsed.goal;
           command = { kind: "plan", repoPath: parsed.repoPath, goal: enrichedGoal, lead: parsed.lead, config: cfg };
+        }
+        if (command === null) {
+          throw new DuetError("Unexpected null command for proposal action.", "INTERNAL_ERROR");
         }
         const operation = this.activities.submit(command);
         try {

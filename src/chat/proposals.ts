@@ -71,7 +71,7 @@ export interface StartProposalInput {
 
 export interface StartProposalResult {
   proposal: ManagerActionProposal;
-  command: LongRunningCommand;
+  command: LongRunningCommand | null;
 }
 
 type ActionSpec = {
@@ -472,7 +472,7 @@ export function startProposalAction(
     return { proposal, command: { kind: "plan", repoPath: "", goal: "", lead: "claude", config: {} as never } };
   }
   if (proposal.action === "set_strategy") {
-    return { proposal, command: null as never };
+    return { proposal, command: null };
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
