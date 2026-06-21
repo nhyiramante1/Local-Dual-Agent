@@ -10,8 +10,8 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
   private readonly client: OpenAI;
   private readonly model: string;
 
-  constructor(apiKey: string, model = DEFAULT_MODEL) {
-    this.client = new OpenAI({ apiKey });
+  constructor(apiKey: string, model = DEFAULT_MODEL, baseURL?: string) {
+    this.client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     this.model = model;
   }
 

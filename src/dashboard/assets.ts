@@ -22,7 +22,7 @@ export const dashboardHtml = `<!doctype html>
         <button class="aside-rail-btn" data-section="tasks" title="Tasks">&#10003;</button>
         <button class="aside-rail-btn" data-section="timeline" title="Timeline">&#9711;</button>
         <button class="aside-rail-btn" data-section="verification" title="Verification">&#9881;</button>
-        <button class="aside-rail-btn" data-section="messages" title="Messages">&#9993;</button>
+        <button class="aside-rail-btn" data-section="messages" title="Plan">&#9999;</button>
         <button class="aside-rail-btn" data-section="artifacts" title="Artifacts">&#9671;</button>
         <button class="aside-rail-btn" data-section="conflicts" title="Conflicts">&#9651;</button>
         <button class="aside-rail-btn" data-section="diff" title="Diff">&#177;</button>
@@ -46,7 +46,7 @@ export const dashboardHtml = `<!doctype html>
           <div id="verification"></div>
         </div>
         <div class="aside-section" id="aside-sec-messages">
-          <div class="aside-sec-head"><h2>Messages</h2></div>
+          <div class="aside-sec-head"><h2>Plan</h2></div>
           <div id="messages"></div>
         </div>
         <div class="aside-section" id="aside-sec-artifacts">
@@ -190,7 +190,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 button.sel{border-color:var(--accent);background:var(--acc-bg)}
 button b{font-weight:600}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 8px;background:var(--surface)}
-.run-btn{display:flex;flex-direction:column;gap:5px;padding:10px 11px;margin:0 0 6px;text-align:left}
+.run-row{position:relative;margin:0 0 6px}.run-btn{display:flex;flex-direction:column;gap:5px;padding:10px 32px 10px 11px;margin:0;text-align:left;width:100%}.run-delete-btn{position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;color:var(--muted);font-size:11px;line-height:1;padding:2px 5px;border-radius:3px;opacity:.6}.run-delete-btn:hover{opacity:1;color:#e53e3e;background:var(--hover)}
 .run-goal{font-size:13px;font-weight:500;color:var(--text);line-height:1.35;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .run-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .run-id{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint)}
@@ -226,6 +226,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .conn{font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--faint)}
 .conn-ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
 .conn-bad{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
+.conn-muted{color:var(--muted);border-color:var(--line);background:var(--hover)}
+.error-banner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c53030;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;max-width:480px;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
 .chat-head p{margin:3px 0 0}
 /* ── provider segmented toggle ── */
@@ -255,6 +257,19 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-turn .body hr{border:none;border-top:1px solid var(--line);margin:10px 0}
 .chat-turn .body strong{font-weight:600;color:var(--text)}
 .chat-turn .body em{font-style:italic;color:var(--muted)}
+.turn-copy-row{display:flex;justify-content:flex-end;margin-top:4px}.chat-turn.user .turn-copy-row{justify-content:flex-end}.chat-turn.manager .turn-copy-row{justify-content:flex-start}
+.turn-copy-btn{background:none;border:none;padding:3px 5px;border-radius:5px;cursor:pointer;color:var(--faint);display:flex;align-items:center;gap:4px;font-size:11px;transition:color .12s,background .12s;width:auto;margin:0}
+.turn-copy-btn:hover{color:var(--accent);background:var(--acc-bg)}
+.turn-copy-btn svg{flex-shrink:0}
+/* ── plan card ── */
+.plan-card{padding:10px 14px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
+.plan-summary{font-size:13px;line-height:1.6;color:var(--text);padding-bottom:8px;border-bottom:1px solid var(--line)}
+.plan-section-head{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-top:6px}
+.plan-task{padding:8px 0;border-bottom:1px solid var(--line)}
+.plan-task:last-of-type{border-bottom:none}
+.plan-task-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px}
+.plan-risk{font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)}
+.plan-risk:last-child{border-bottom:none}
 /* ── proposal card (elevated, accent left border) ── */
 .proposal-card{margin-top:10px;border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:10px 12px;background:var(--surface)}
 .proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
@@ -270,7 +285,7 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
 /* ── proposal history ── */
 .proposal-history{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
-.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none}
+.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px}.proposal-history summary::before{content:"\\25B8";font-size:10px;transition:transform .15s}.proposal-history[open] summary::before{transform:rotate(90deg)}
 .proposal-history summary::-webkit-details-marker{display:none}
 .proposal-history-item{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
 .proposal-history-item:last-child{border-bottom:none}
@@ -367,8 +382,21 @@ async function authenticate() {
 }
 async function loadRuns(options = {}) {
   const runs=await api("/runs");
-  q("runs").innerHTML=runs.map(r=>'<button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>').join("")||'<span class="empty">No runs yet.</span>';
-  q("runs").querySelectorAll("button").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
+  const deletable = new Set(["failed","cancelled","merged","cleaned_up"]);
+  q("runs").innerHTML=runs.map(r=>{
+    const del=deletable.has(r.status)?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>':"";
+    return '<div class="run-row"><button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>'+del+'</div>';
+  }).join("")||'<span class="empty">No runs yet.</span>';
+  q("runs").querySelectorAll(".run-btn").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
+  q("runs").querySelectorAll("[data-delete-run]").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    if(!confirm("Delete this run? This cannot be undone."))return;
+    try{
+      await api("/runs/"+encodeURIComponent(b.dataset.deleteRun),{method:"DELETE"});
+      if(selected===b.dataset.deleteRun){selected=null;}
+      await loadRuns();
+    }catch(err){showError(err.message);}
+  });
   if(selected && options.selectCurrent) await selectRun(selected);
 }
 async function selectRun(id) {
@@ -393,12 +421,28 @@ async function selectRun(id) {
     api("/runs/"+encodeURIComponent(id)+"/conflicts")
   ]);
   q("verification").innerHTML=verification.map(v=>'<div class="vr '+(v.passed?"pass":"fail")+'"><span class="tag">'+(v.passed?"PASS":"FAIL")+'</span><span>'+esc(v.command.join(" "))+'</span><span class="muted">'+v.durationMs+'ms</span></div>').join("")||'<span class="empty">No verification results.</span>';
-  q("messages").innerHTML=messages.map(m=>'<div class="card"><b>'+esc(m.kind)+'</b><div class="muted">'+visibleText(m.body,1000)+'</div></div>').join("")||'<span class="empty">No messages.</span>';
+  q("messages").innerHTML=messages.map(m=>{
+    if(m.kind==="plan"){
+      let plan={summary:"",tasks:[],risks:[]};
+      try{plan=JSON.parse(m.body);}catch{}
+      const taskList=plan.tasks.map(t=>'<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted">'+esc(t.objective||"")+'</div></div>').join("");
+      const riskList=plan.risks&&plan.risks.length?'<div class="plan-section-head">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join(""):"";
+      return '<div class="plan-card"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div>';
+    }
+    return '<div class="card"><b>'+esc(m.kind)+'</b><div class="muted">'+visibleText(m.body,1000)+'</div></div>';
+  }).join("")||'<span class="empty">No plan yet.</span>';
   q("artifacts").innerHTML=artifacts.map(a=>'<div class="card"><span class="muted">#'+a.id+'</span> '+esc(a.kind)+' <span class="muted">- '+esc(a.taskId||"run")+'</span></div>').join("")||'<span class="empty">No artifacts.</span>';
   q("conflicts").innerHTML=conflicts.map(t=>'<div class="card"><div class="row"><b>'+esc(t.id)+'</b><span class="badge s-conflict">conflict</span></div><div class="bad">'+esc(t.error||"integration conflict")+'</div></div>').join("")||'<span class="empty">No conflicts.</span>';
   q("diff").textContent=(await api("/runs/"+encodeURIComponent(id)+"/diff")).diff||"";
   await loadChat();
-  connectEvents();
+  const terminalStatuses = new Set(["failed","cancelled","merged","cleaned_up"]);
+  if (terminalStatuses.has(detail.run.status)) {
+    if (eventStream) { eventStream.close(); eventStream=null; }
+    setConn("idle");
+    q("events").innerHTML='<div class="ev ev-info"><span class="ty muted">Run is '+esc(detail.run.status)+' — no live events</span></div>';
+  } else {
+    connectEvents();
+  }
 }
 function conversationKey(runId, agent) {
   return (runId || "global") + ":" + agent;
@@ -490,11 +534,25 @@ function setChatEnabled(enabled) {
   q("chat-input").disabled = !enabled;
   q("chat-send").disabled = !enabled;
 }
+function showError(message) {
+  let banner = document.getElementById("error-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "error-banner";
+    banner.className = "error-banner";
+    document.body.appendChild(banner);
+  }
+  banner.textContent = message;
+  banner.hidden = false;
+  clearTimeout(banner._t);
+  banner._t = setTimeout(() => { banner.hidden = true; }, 6000);
+}
 function setConn(state) {
   const el = q("chat-conn");
   if (!el) return;
   if (state === "live") { el.textContent = "live"; el.className = "conn conn-ok"; }
   else if (state === "reconnecting") { el.textContent = "reconnecting"; el.className = "conn conn-bad"; }
+  else if (state === "idle") { el.textContent = "idle"; el.className = "conn conn-muted"; }
   else { el.textContent = "connecting"; el.className = "conn"; }
 }
 function renderMarkdown(text) {
@@ -566,7 +624,9 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
     const meta = '<div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
-    const inner = meta+note+'<div class="body">'+body+'</div>'+cards;
+    const copyIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const copyBtn = '<div class="turn-copy-row"><button class="turn-copy-btn" data-turn-copy="'+esc(turn.content||'')+'">'+copyIcon+'</button></div>';
+    const inner = meta+note+'<div class="body">'+body+'</div>'+(!failed ? copyBtn : '')+cards;
     if (turn.role === "manager") {
       return '<div class="chat-turn manager'+(failed?" failed":"")+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
     }
@@ -615,6 +675,21 @@ async function enrichHistoryOutcomes() {
   }
 }
 function renderProposalCard(proposal) {
+  if (proposal.action === "create_plan") {
+    let meta = {};
+    try { meta = JSON.parse(proposal.commandJson); } catch {}
+    return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("create plan")+badge("ordinary")+'</div>'
+      +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
+      +'<div class="proposal-kv"><b>Goal:</b> '+visibleText(meta.goal||"", 300)+'</div>'
+      +'<div class="proposal-kv"><b>Repo:</b> '+esc(meta.repoPath||"")+'</div>'
+      +'<div class="proposal-kv"><b>Lead:</b> '+esc(meta.lead||"claude")+'&nbsp;&nbsp;<b>Profile:</b> '+esc(meta.profile||"balanced")+'</div>'
+      +'<div class="proposal-copy">Run this in your terminal or click Start to begin planning.</div>'
+      +'<code>'+visibleText(proposal.commandCli, 1000)+'</code>'
+      +'<div class="proposal-readiness" data-proposal-readiness="'+esc(proposal.id)+'"></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'</div>';
+  }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
   const isMerge = proposal.action === "merge_run";
   const isFingerprint = proposal.tier === "fingerprint";
@@ -703,6 +778,33 @@ async function startProposal(proposalId, button) {
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
   if (panel) panel.innerHTML = '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
   await pollOperation(operation.id, conversation.id, "Duet operation");
+  try {
+    const completedOp = await api("/operations/"+encodeURIComponent(operation.id));
+    if (completedOp.status === "succeeded" && completedOp.resultJson) {
+      const result = JSON.parse(completedOp.resultJson);
+      if (result && result.id) {
+        const msgs = await api("/runs/"+encodeURIComponent(result.id)+"/messages");
+        const planMsg = (msgs.value || msgs).find(m => m.kind === "plan");
+        if (planMsg) {
+          const card = q("chat-turns").querySelector('[data-proposal-id="'+CSS.escape(proposalId)+'"]');
+          if (card) {
+            let plan = { summary: "", tasks: [], risks: [] };
+            try { plan = JSON.parse(planMsg.body); } catch {}
+            const taskList = plan.tasks.map(t =>
+              '<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted" style="font-size:12px">'+esc(t.objective||"")+'</div></div>'
+            ).join("");
+            const riskList = plan.risks && plan.risks.length
+              ? '<div class="plan-section-head" style="margin-top:10px">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join("")
+              : "";
+            const bubble = document.createElement("div");
+            bubble.className = "chat-turn manager";
+            bubble.innerHTML = '<div class="turn-content"><div class="meta"><b>Plan</b>'+badge("ready")+'</div><div class="body"><div class="plan-card" style="padding:0"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div></div></div>';
+            card.after(bubble);
+          }
+        }
+      }
+    }
+  } catch {}
   if (selected) await selectRun(selected);
 }
 let approvalModal = { proposalId: null, runId: null, stage: null, bindingHash: null, runVersion: null };
@@ -785,8 +887,15 @@ q("chat-turns").addEventListener("click", async (event) => {
   const copy = event.target.closest("[data-proposal-copy]");
   const dismiss = event.target.closest("[data-proposal-dismiss]");
   const approve = event.target.closest("[data-proposal-approve]");
-  if (!prepare && !start && !copy && !dismiss && !approve) return;
+  const turnCopy = event.target.closest("[data-turn-copy]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy) return;
   try {
+    if (turnCopy) {
+      await copyText(turnCopy.dataset.turnCopy || "");
+      const svg = turnCopy.querySelector("svg");
+      if (svg) { turnCopy.textContent="copied"; setTimeout(()=>{ turnCopy.innerHTML=""; turnCopy.appendChild(svg); },1200); }
+      return;
+    }
     if (prepare) {
       await prepareProposal(prepare.dataset.proposalPrepare);
     } else if (start) {
@@ -903,7 +1012,7 @@ q("chat-openai").onclick = async () => {
 };
 /* ── theme toggle ── */
 (function() {
-  const saved = localStorage.getItem("duet-theme") || "dark";
+  const saved = localStorage.getItem("duet-theme") || "light";
   document.documentElement.setAttribute("data-theme", saved);
   const btn = q("theme-toggle");
   if (btn) btn.innerHTML = saved === "light" ? "&#9790;" : "&#9728;";

@@ -126,6 +126,7 @@ function opposite(provider: ProviderName): ProviderName {
 }
 
 const VALID_PROPOSAL_ACTIONS = new Set<string>([
+  "create_plan",
   "execute_run",
   "resume_run",
   "retry_task",
@@ -651,6 +652,28 @@ export class Store {
         .prepare("SELECT * FROM runs ORDER BY created_at DESC")
         .all() as unknown as RunRow[]
     ).map((row) => this.mapRun(row));
+  }
+
+  deleteRun(id: string): void {
+    const run = this.getRun(id);
+    const terminal = new Set(["failed", "cancelled", "merged", "cleaned_up"]);
+    if (!terminal.has(run.status)) {
+      throw new DuetError(
+        `Run ${id} has status "${run.status}" and cannot be deleted. Only failed, cancelled, merged, or cleaned_up runs may be deleted.`,
+        "RUN_NOT_DELETABLE",
+      );
+    }
+    // Manually delete children for DBs created before ON DELETE CASCADE was in schema
+    for (const table of [
+      "attempts", "agent_sessions", "messages", "artifacts", "usage_events",
+      "approvals", "verification_results", "integration_events", "action_tickets",
+      "manager_action_proposals",
+    ]) {
+      this.db.prepare(`DELETE FROM ${table} WHERE run_id = ?`).run(id);
+    }
+    this.db.prepare("DELETE FROM tasks WHERE run_id = ?").run(id);
+    this.db.prepare("UPDATE conversations SET run_id = NULL WHERE run_id = ?").run(id);
+    this.db.prepare("DELETE FROM runs WHERE id = ?").run(id);
   }
 
   updateRun(

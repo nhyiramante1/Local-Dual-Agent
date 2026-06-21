@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { nodeVersionError } from "./bootstrap.js";
+
+// Load .env from project root before anything reads process.env
+try {
+  const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".env");
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
+  }
+} catch { /* no .env file — fine */ }
 import { loadConfig, resolveManagerBudget } from "./config.js";
 import { Store } from "./persistence/store.js";
 import { ClaudeAdapter } from "./providers/claude.js";
@@ -74,12 +86,12 @@ async function main(): Promise<void> {
       claude: new ClaudeAdapter(),
       codex: new CodexAdapter(),
     };
-    const openaiKey = process.env.OPENAI_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY ?? process.env.GROQ_API_KEY;
     if (config.manager.provider === "openai") {
       if (openaiKey) {
-        chatProviders.openai = new OpenAIManagerAdapter(openaiKey, config.manager.openaiModel);
+        chatProviders.openai = new OpenAIManagerAdapter(openaiKey, config.manager.openaiModel, config.manager.openaiBaseUrl);
       } else {
-        await serviceLog("warning", "manager provider is openai but OPENAI_API_KEY is not set; falling back to codex", {});
+        await serviceLog("warning", "manager provider is openai but OPENAI_API_KEY (or GROQ_API_KEY) is not set; falling back to codex", {});
       }
     }
     service = new DuetService({

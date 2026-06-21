@@ -16,6 +16,10 @@ export interface RawProposal {
   action: string;
   runId?: string;
   taskId?: string;
+  goal?: string;
+  repoPath?: string;
+  lead?: string;
+  profile?: string;
   rationale?: string;
   // model may supply command/commandCli/cli/tier/commandJson - all ignored
 }
@@ -27,7 +31,7 @@ export type ParseResult =
 
 export interface SynthesizedProposal {
   action: ProposalAction;
-  runId: string;
+  runId?: string;
   taskId?: string;
   commandCli: string;
   commandJson: string;
@@ -80,6 +84,12 @@ type ActionSpec = {
 const PROPOSAL_EXPIRY_MS = 15 * 60 * 1_000;
 
 const ACTION_SPECS: Readonly<Record<ProposalAction, ActionSpec>> = {
+  create_plan: {
+    tier: "ordinary",
+    requiresTask: false,
+    cli: () => "",
+    jsonFields: () => ({}),
+  },
   execute_run: {
     tier: "ordinary",
     requiresTask: false,
@@ -220,6 +230,10 @@ export function parseProposalBlock(text: string): ParseResult {
       action,
       runId: typeof obj.runId === "string" ? obj.runId : undefined,
       taskId: typeof obj.taskId === "string" ? obj.taskId : undefined,
+      goal: typeof obj.goal === "string" ? obj.goal : undefined,
+      repoPath: typeof obj.repoPath === "string" ? obj.repoPath : undefined,
+      lead: typeof obj.lead === "string" ? obj.lead : undefined,
+      profile: typeof obj.profile === "string" ? obj.profile : undefined,
       rationale: typeof obj.rationale === "string" ? obj.rationale : undefined,
       // command, commandCli, cli, tier, commandJson are intentionally not extracted
     },
@@ -240,6 +254,29 @@ export function tryValidateAndSynthesize(
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
   const spec = ACTION_SPECS[action];
+
+  if (action === "create_plan") {
+    const goal = raw.goal?.trim() ?? "";
+    const repoPath = raw.repoPath?.trim() ?? "";
+    if (!goal || !repoPath) return null;
+    if (conversation.runId) return null; // create_plan is global-chat only
+    const lead = raw.lead === "codex" ? "codex" : "claude";
+    const validProfiles = new Set(["cheap", "balanced", "reasoning", "max"]);
+    const profile = raw.profile && validProfiles.has(raw.profile) ? raw.profile : "balanced";
+    const commandCli = `duet plan --repo "${repoPath}" --lead ${lead} "${goal}"`;
+    const commandJson = JSON.stringify({ action: "create_plan", goal, repoPath, lead, profile });
+    const summary = raw.rationale
+      ? raw.rationale.slice(0, 500)
+      : `Proposed: create plan — ${goal.slice(0, 100)}`;
+    return {
+      action: "create_plan",
+      commandCli,
+      commandJson,
+      tier: "ordinary",
+      summary,
+      expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
+    };
+  }
 
   if (!raw.runId) return null;
 
@@ -297,6 +334,10 @@ export function prepareProposalAction(
   const now = Date.now();
   if (proposal.status !== "proposed" || Date.parse(proposal.expiresAt) <= now) {
     return unavailable(prepared, "This suggestion is no longer active.");
+  }
+
+  if (proposal.action === "create_plan") {
+    return prepared; // no run to check, availability is determined by expiry only
   }
 
   if (conversation.runId && proposal.runId !== conversation.runId) {
@@ -391,6 +432,9 @@ export function startProposalAction(
       "Fingerprint-gated proposals must be completed in the CLI.",
       "FINGERPRINT_PROPOSAL_CLI_ONLY",
     );
+  }
+  if (proposal.action === "create_plan") {
+    return { proposal, command: { kind: "plan", repoPath: "", goal: "", lead: "claude", config: {} as never } };
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
@@ -492,12 +536,19 @@ function runChangingAction(action: ProposalAction): boolean {
     case "cleanup_run":
     case "merge_run":
       return true;
+    case "create_plan":
     default:
       return false;
   }
 }
 
 function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand {
+  if (proposal.action === "create_plan") {
+    throw new DuetError(
+      "create_plan proposals are dispatched by the server, not commandForProposal.",
+      "INVALID_PROPOSAL",
+    );
+  }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
   }

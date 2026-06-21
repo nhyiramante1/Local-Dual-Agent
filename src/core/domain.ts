@@ -192,6 +192,7 @@ export interface ConversationTurnRecord {
 }
 
 export type ProposalAction =
+  | "create_plan"
   | "execute_run"
   | "resume_run"
   | "retry_task"

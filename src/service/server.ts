@@ -12,12 +12,12 @@ import {
   defaultManagerBudget,
   type ChatProviders,
 } from "../chat/engine.js";
-import type { ManagerBudget, ManagerProviderName } from "../core/domain.js";
+import type { AgentProfile, ManagerBudget, ManagerProviderName } from "../core/domain.js";
 import {
   prepareProposalAction,
   startProposalAction,
 } from "../chat/proposals.js";
-import { defaultConfig, validateConfig } from "../config.js";
+import { defaultConfig, validateConfig, type DuetConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import { ClaudeAdapter } from "../providers/claude.js";
@@ -35,6 +35,7 @@ interface ServerOptions {
   store: Store;
   secret: string;
   instanceId: string;
+  config?: DuetConfig;
   idleTimeoutMs?: number;
   onStop?: () => void;
   chatProviders?: ChatProviders;
@@ -302,11 +303,13 @@ export class DuetService {
       // proposal path instead of calling orchestration endpoints directly.
       const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
+      const deleteRunRoute = request.method === "DELETE" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname);
       if (
         credential === "session" &&
         request.method !== "GET" &&
         !chatRoute &&
-        !approveRoute
+        !approveRoute &&
+        !deleteRunRoute
       ) {
         this.send(
           response,
@@ -459,12 +462,39 @@ export class DuetService {
       const bodyText = await readBody(request);
       const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
       await this.mutate(request, response, requestId, route, bodyText, () => {
-        const { command } = startProposalAction(
+        const { proposal, command: defaultCommand } = startProposalAction(
           this.options.store,
           conversationId,
           proposalId,
           body,
         );
+        let command = defaultCommand;
+        if (proposal.action === "create_plan") {
+          const parsed = JSON.parse(proposal.commandJson) as {
+            goal: string;
+            repoPath: string;
+            lead: "claude" | "codex";
+            profile: string;
+          };
+          const baseConfig = this.options.config ?? defaultConfig;
+          const cfg: DuetConfig = parsed.profile
+            ? {
+                ...baseConfig,
+                orchestration: { ...baseConfig.orchestration, profile: parsed.profile as AgentProfile },
+              }
+            : baseConfig;
+          // Enrich goal with recent user turns so the planner has conversation context
+          const recentTurns = this.options.store
+            .listRecentConversationTurns(conversationId, 6)
+            .filter((t) => t.role === "user")
+            .slice(-3)
+            .map((t) => t.content.slice(0, 300).trim())
+            .filter(Boolean);
+          const enrichedGoal = recentTurns.length > 1
+            ? `${parsed.goal}\n\nConversation context:\n${recentTurns.map((m, i) => `[${i + 1}] ${m}`).join("\n")}`
+            : parsed.goal;
+          command = { kind: "plan", repoPath: parsed.repoPath, goal: enrichedGoal, lead: parsed.lead, config: cfg };
+        }
         const operation = this.activities.submit(command);
         try {
           this.options.store.markProposalStarted(
@@ -802,6 +832,11 @@ export class DuetService {
         }
         return;
       }
+    }
+    if (request.method === "DELETE" && suffix === "") {
+      this.options.store.deleteRun(runId);
+      this.send(response, 200, apiSuccess(requestId, { deleted: runId }));
+      return;
     }
     if (request.method !== "POST") throw new DuetError("Not found.", "NOT_FOUND");
     const bodyText = await readBody(request);

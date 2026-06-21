@@ -19,6 +19,8 @@ import { defaultManagerBudget, type ManagerBudget } from "../src/chat/engine.js"
 import { dashboardHtml, dashboardJs } from "../src/dashboard/assets.js";
 import { DuetService } from "../src/service/server.js";
 import { runCommand } from "../src/process/run-command.js";
+import { tryValidateAndSynthesize } from "../src/chat/proposals.js";
+import { buildManagerChatContext } from "../src/chat/context.js";
 
 const secret = "chat-test-secret";
 
@@ -1825,7 +1827,7 @@ test("dashboard session can manage read-only run chat for both interface agents"
 });
 
 test("dashboard manager chat asset stays read-only and chat-only", () => {
-  assert.match(dashboardHtml, /Manager Chat/);
+  assert.match(dashboardHtml, /Manager/);
   assert.match(dashboardHtml, /Manager/i);
   assert.match(dashboardJs, /\/chat\/conversations/);
   assert.match(dashboardJs, /function rememberConversation/);
@@ -2397,5 +2399,100 @@ test("missing openai adapter returns CONFIGURATION_ERROR when interfaceAgent is 
     await service.close();
     store.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("create_plan proposal is synthesized from manager response", async () => {
+  const repoPath = "/home/user/project";
+  const goal = "Refactor auth module";
+  const planProposalText = [
+    "Sure, here is a plan proposal.",
+    "",
+    "```duet-proposal",
+    JSON.stringify({ action: "create_plan", goal, repoPath, lead: "claude", profile: "balanced" }),
+    "```",
+  ].join("\n");
+  const h = await startService({ text: planProposalText });
+  try {
+    // Global conversation (no runId)
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+
+    const turnResponse = await postTurn(h.base, conversationId, "Help me start a plan", `create-plan-turn-${randomUUID()}`);
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    // Wait for the operation to complete.
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!h.store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    const p = proposals[0];
+    assert.equal(p.action, "create_plan");
+    assert.equal(p.tier, "ordinary");
+    assert.ok(p.commandCli.includes("duet plan"));
+    assert.ok(p.commandCli.includes(repoPath));
+    assert.ok(p.commandCli.includes("claude"));
+    const parsed = JSON.parse(p.commandJson) as { goal: string; repoPath: string; lead: string; profile: string };
+    assert.equal(parsed.goal, goal);
+    assert.equal(parsed.repoPath, repoPath);
+    assert.equal(parsed.lead, "claude");
+    assert.equal(parsed.profile, "balanced");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("create_plan proposal is rejected in run-scoped chat", () => {
+  const store = new Store(":memory:");
+  try {
+    // Construct a run-scoped ConversationRecord directly — no FK constraint needed
+    const conv = {
+      id: randomUUID(),
+      runId: "run123",
+      interfaceAgent: "claude" as const,
+      status: "active" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const result = tryValidateAndSynthesize(
+      { action: "create_plan", goal: "test", repoPath: "/tmp/repo", lead: "claude", profile: "balanced" },
+      conv,
+      store,
+    );
+    assert.equal(result, null);
+  } finally {
+    store.close();
+  }
+});
+
+test("global chat context includes Provider Availability section", () => {
+  const store = new Store(":memory:");
+  try {
+    const budget = defaultManagerBudget;
+    const conv = store.createConversation({ id: randomUUID(), interfaceAgent: "claude" });
+    const result = buildManagerChatContext(store, conv, budget);
+    assert.ok(result.sections.includes("Provider Availability"), `sections: ${result.sections.join(", ")}`);
+    assert.ok(result.prompt.includes("claude:"));
+    assert.ok(result.prompt.includes("recommendation:"));
+  } finally {
+    store.close();
+  }
+});
+
+test("global chat context includes create_plan in Action Proposal Format", () => {
+  const store = new Store(":memory:");
+  try {
+    const budget = defaultManagerBudget;
+    const conv = store.createConversation({ id: randomUUID(), interfaceAgent: "claude" });
+    const result = buildManagerChatContext(store, conv, budget);
+    assert.ok(result.prompt.includes("create_plan"), "create_plan should appear in global chat context");
+    assert.ok(!result.prompt.includes("Do NOT propose create_plan"), "should not contain old restriction");
+  } finally {
+    store.close();
   }
 });
