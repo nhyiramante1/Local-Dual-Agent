@@ -255,6 +255,10 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-turn .body hr{border:none;border-top:1px solid var(--line);margin:10px 0}
 .chat-turn .body strong{font-weight:600;color:var(--text)}
 .chat-turn .body em{font-style:italic;color:var(--muted)}
+.turn-copy-row{display:flex;justify-content:flex-end;margin-top:4px}.chat-turn.user .turn-copy-row{justify-content:flex-end}.chat-turn.manager .turn-copy-row{justify-content:flex-start}
+.turn-copy-btn{background:none;border:none;padding:3px 5px;border-radius:5px;cursor:pointer;color:var(--faint);display:flex;align-items:center;gap:4px;font-size:11px;transition:color .12s,background .12s;width:auto;margin:0}
+.turn-copy-btn:hover{color:var(--accent);background:var(--acc-bg)}
+.turn-copy-btn svg{flex-shrink:0}
 /* ── proposal card (elevated, accent left border) ── */
 .proposal-card{margin-top:10px;border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:0 10px 10px 0;padding:10px 12px;background:var(--surface)}
 .proposal-card .proposal-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
@@ -270,7 +274,7 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
 /* ── proposal history ── */
 .proposal-history{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
-.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none}
+.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px}.proposal-history summary::before{content:"\\25B8";font-size:10px;transition:transform .15s}.proposal-history[open] summary::before{transform:rotate(90deg)}
 .proposal-history summary::-webkit-details-marker{display:none}
 .proposal-history-item{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
 .proposal-history-item:last-child{border-bottom:none}
@@ -566,7 +570,9 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
     const meta = '<div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
-    const inner = meta+note+'<div class="body">'+body+'</div>'+cards;
+    const copyIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const copyBtn = '<div class="turn-copy-row"><button class="turn-copy-btn" data-turn-copy="'+esc(turn.content||'')+'">'+copyIcon+'</button></div>';
+    const inner = meta+note+'<div class="body">'+body+'</div>'+(!failed ? copyBtn : '')+cards;
     if (turn.role === "manager") {
       return '<div class="chat-turn manager'+(failed?" failed":"")+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
     }
@@ -800,8 +806,15 @@ q("chat-turns").addEventListener("click", async (event) => {
   const copy = event.target.closest("[data-proposal-copy]");
   const dismiss = event.target.closest("[data-proposal-dismiss]");
   const approve = event.target.closest("[data-proposal-approve]");
-  if (!prepare && !start && !copy && !dismiss && !approve) return;
+  const turnCopy = event.target.closest("[data-turn-copy]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy) return;
   try {
+    if (turnCopy) {
+      await copyText(turnCopy.dataset.turnCopy || "");
+      const svg = turnCopy.querySelector("svg");
+      if (svg) { turnCopy.textContent="copied"; setTimeout(()=>{ turnCopy.innerHTML=""; turnCopy.appendChild(svg); },1200); }
+      return;
+    }
     if (prepare) {
       await prepareProposal(prepare.dataset.proposalPrepare);
     } else if (start) {
