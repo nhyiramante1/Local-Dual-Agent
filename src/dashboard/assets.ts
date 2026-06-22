@@ -1345,19 +1345,30 @@ async function connectEvents() {
     if(eventStream===stream) setConn("reconnecting");
     setTimeout(async ()=>{
       if (eventStream !== stream) return;
-      // A dropped stream often means the service restarted (e.g. npm run up).
-      // If the instance changed, the old session and stale assets are gone --
-      // reload to re-auth cleanly and pick up fresh JS instead of hanging.
+      // A dropped stream usually means the service restarted (e.g. npm run up).
+      // After a restart the browser may hold stale pooled connections that hang
+      // (notably behind a VPN). A full reload drops the pool, re-auths, and picks
+      // up fresh assets. Reload when the instance changed OR when health is
+      // unreachable after we had a good boot — both indicate a stale connection.
       try {
         const h = await api("/health", { timeoutMs: 5000 });
         if (bootInstanceId && h.instanceId && h.instanceId !== bootInstanceId) {
-          location.reload();
-          return;
+          return reloadOnce();
         }
-      } catch (e) { /* still down — fall through and retry the stream */ }
+      } catch (e) {
+        if (bootInstanceId) return reloadOnce();
+      }
       if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); }
     },2000);
   };
+}
+// Reload at most once per cooldown so a genuinely-down service cannot loop.
+function reloadOnce() {
+  const now = Date.now();
+  const last = Number(sessionStorage.getItem("duet-last-reload") || "0");
+  if (now - last < 15000) return;
+  sessionStorage.setItem("duet-last-reload", String(now));
+  location.reload();
 }
 (function(){
   const chatHandle=document.getElementById("chat-resize-handle");
