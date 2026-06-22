@@ -167,21 +167,68 @@ These are architectural recommendations, not yet-completed implementation:
 - **Phase 6C (partial / dashboard polish)**: Run delete (× button, terminal
   runs only, cascades children), static timeline for finished runs, inline
   error banner, conversation context forwarded to planner on `create_plan`.
+- **Phase 5H**: `set_strategy` manager proposal that persists run lead/provider/
+  profile preferences (PR #17), plus manager-chat polish — conversational
+  defaults, `create_plan` intent gate (`userIntentAllowsCreatePlan`), and
+  optimistic pending-turn UI (PR #18).
+- **Phone dashboard access**: Fixed `[service].port`, `[dashboard]
+  .persistent_access` reusable access tokens, `duet dashboard --phone`, LAN-IP
+  detection, and a "Clear context" manager-chat button (PR #19).
 
-## Recommended Next Planning Targets
+## In Progress
 
-### Phase 5H: Manager Strategy Proposals (structured)
+### Phase Next: Mobile-First Dashboard and Conversational Manager
+
+Branch: `feature/improving-general-feel`. Starts from `main` after PR #19.
 
 Goal:
-Turn manager strategy recommendations into actionable proposal cards, not just
-text advice.
+Make the dashboard comfortable on a phone and make Manager Chat feel like a
+reasoning partner rather than a proposal gateway. The current safety boundary
+is unchanged — the dashboard stays read-only for approvals and merge, and the
+ordinary proposal/start flow is untouched.
 
-Key outcomes:
+Scope:
 
-- Manager can propose lead/provider/profile choices as a structured card.
-- Human approves the strategy card before it shapes the next run.
-- Cards show estimated cost/impact based on current usage and task weight.
-- Keeps the human-in-the-loop boundary intact.
+- **Mobile dashboard polish.** Rework the narrow-screen layout so the run list,
+  run details, and manager chat are usable on a phone without horizontal strain.
+  The icon rail becomes a **fixed bottom tab bar**; tapping a section opens it as
+  a full-height drawer above the bar, with chat as the default home view. Mobile
+  starts collapsed (chat first); tapping the active tab closes the drawer. The
+  desktop layout is unchanged. Improve touch targets, spacing, chat width, and
+  empty states. Replaces the two stale `@media(max-width:760px)` blocks (which
+  still reference dead `.aside-bottom` / `.section` classes).
+- **Manager prompt rewrite.** Lead with conversation and reasoning, not proposal
+  output. Keep proposal generation only when the user clearly asks to start or
+  change Duet work (reinforces the existing `userIntentAllowsCreatePlan` gate at
+  the instruction level). Make status/error responses more natural and less
+  repetitive for run-scoped questions and general help.
+- **Usability cleanup.** Tighten small dashboard copy and error-message paths so
+  the UI explains what it can and cannot do without sounding robotic. Preserve
+  manager voice switching and clear-context behavior. Drop the stray
+  `mkdir(codexHomePath())` startup side-effect in `duetd.ts` (unrelated leftover
+  from PR #19).
+
+Explicitly deferred:
+
+- Repo nickname/alias shortcuts (typing the full repo path on mobile).
+- Manager-initiated read-only agent queries (manager asking Codex/Claude for
+  clarification, or having an agent locate/verify a repo). These need a sandbox
+  design — what a manager-dispatched agent may read and how it is guaranteed
+  read-only — before any implementation.
+
+Test plan:
+
+- Desktop regression: run selection, chat, proposal cards, clear context, and
+  approval boundaries still work.
+- Mobile smoke at phone width: layout, chat input/send, run switching, bottom-bar
+  navigation, and the **approval modal at 390px** (the hash-confirm input is the
+  cramped spot) all work.
+- Conversation behavior: ordinary questions stay conversational; clear Duet-work
+  requests still produce proposals when appropriate.
+- Safety: no new mutation routes from the dashboard, no approval/merge leakage,
+  no change to the ordinary proposal/start flow.
+
+## Recommended Next Planning Targets
 
 ### Phase 6C: Extension Points
 
@@ -217,7 +264,7 @@ npm run test:dashboard
 ## Planning Advice
 
 Start future branches from updated `main`, not old stacked feature branches.
-At the time of this note, `main` contains work through Phase 6B. Phase 5G and
-the Groq/OpenAI-compatible manager lane (5F extension) are on PR #16
-(`claude/legion-computer-access-bzsntl`) and not yet merged. Start the next
-phase from `main` after PR #16 merges.
+At the time of this note, `main` contains work through Phase 5H and phone
+dashboard access (PRs #16–#19 all merged). The current in-progress branch is
+`feature/improving-general-feel` (see In Progress above). Start the next phase
+from `main` after it merges.
