@@ -175,58 +175,25 @@ These are architectural recommendations, not yet-completed implementation:
   .persistent_access` reusable access tokens, `duet dashboard --phone`, LAN-IP
   detection, and a "Clear context" manager-chat button (PR #19).
 
-## In Progress
+## Completed Phases (continued)
 
-### Phase Next: Mobile-First Dashboard and Conversational Manager
-
-Branch: `feature/improving-general-feel`. Starts from `main` after PR #19.
-
-Goal:
-Make the dashboard comfortable on a phone and make Manager Chat feel like a
-reasoning partner rather than a proposal gateway. The current safety boundary
-is unchanged — the dashboard stays read-only for approvals and merge, and the
-ordinary proposal/start flow is untouched.
-
-Scope:
-
-- **Mobile dashboard polish.** Rework the narrow-screen layout so the run list,
-  run details, and manager chat are usable on a phone without horizontal strain.
-  The icon rail becomes a **fixed bottom tab bar**; tapping a section opens it as
-  a full-height drawer above the bar, with chat as the default home view. Mobile
-  starts collapsed (chat first); tapping the active tab closes the drawer. The
-  desktop layout is unchanged. Improve touch targets, spacing, chat width, and
-  empty states. Replaces the two stale `@media(max-width:760px)` blocks (which
-  still reference dead `.aside-bottom` / `.section` classes).
-- **Manager prompt rewrite.** Lead with conversation and reasoning, not proposal
-  output. Keep proposal generation only when the user clearly asks to start or
-  change Duet work (reinforces the existing `userIntentAllowsCreatePlan` gate at
-  the instruction level). Make status/error responses more natural and less
-  repetitive for run-scoped questions and general help.
-- **Usability cleanup.** Tighten small dashboard copy and error-message paths so
-  the UI explains what it can and cannot do without sounding robotic. Preserve
-  manager voice switching and clear-context behavior. Drop the stray
-  `mkdir(codexHomePath())` startup side-effect in `duetd.ts` (unrelated leftover
-  from PR #19).
-
-Explicitly deferred:
-
-- Repo nickname/alias shortcuts (typing the full repo path on mobile).
-- Manager-initiated read-only agent queries (manager asking Codex/Claude for
-  clarification, or having an agent locate/verify a repo). These need a sandbox
-  design — what a manager-dispatched agent may read and how it is guaranteed
-  read-only — before any implementation.
-
-Test plan:
-
-- Desktop regression: run selection, chat, proposal cards, clear context, and
-  approval boundaries still work.
-- Mobile smoke at phone width: layout, chat input/send, run switching, bottom-bar
-  navigation, and the **approval modal at 390px** (the hash-confirm input is the
-  cramped spot) all work.
-- Conversation behavior: ordinary questions stay conversational; clear Duet-work
-  requests still produce proposals when appropriate.
-- Safety: no new mutation routes from the dashboard, no approval/merge leakage,
-  no change to the ordinary proposal/start flow.
+- **Phase Next / Mobile + Conversational Manager** (`feature/improving-general-feel`,
+  pending PR):
+  - Bottom tab bar on mobile: icon rail becomes fixed bottom nav, sections open
+    as full-height drawer, chat is default home view. Mobile starts collapsed
+    without clobbering desktop localStorage preference. Tapping active tab closes
+    drawer.
+  - Phone access fixes: `SameSite=Lax` session cookie (was `Strict`, blocked
+    mobile browsers over LAN), `public_host` in `duet.toml`, `viewport-fit=cover`
+    + `env(safe-area-inset-bottom)` for iPhone home indicator.
+  - Manager chat head simplified: subtitle and status line hidden globally; on
+    mobile the title/conn row is also hidden, leaving only agent switcher and
+    Clear context.
+  - Manager prompt rewritten as reasoning partner. Conversation and reasoning
+    lead; proposal mode is secondary and only triggered when the operator clearly
+    asks to operate Duet. Repeated approval reminders and policy-wrapper framing
+    removed.
+  - Dropped stray `mkdir(codexHomePath())` startup side-effect from `duetd.ts`.
 
 ## Recommended Next Planning Targets
 

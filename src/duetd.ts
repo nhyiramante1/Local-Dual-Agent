@@ -83,7 +83,6 @@ async function main(): Promise<void> {
     store = new Store();
     const secret = await loadOrCreateServiceSecret();
     const dashboardAccessToken = await loadOrCreateDashboardAccessToken();
-    await mkdir(codexHomePath(), { recursive: true });
     const config = await loadConfig();
     const managerBudget = resolveManagerBudget(config);
     const chatProviders: ChatProviders = {
