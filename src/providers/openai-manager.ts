@@ -17,10 +17,18 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
 
   async run(turn: AgentTurn): Promise<AgentResult> {
     const start = Date.now();
-    const completion = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [{ role: "user", content: turn.prompt }],
-    });
+    const timeoutMs = turn.timeoutMs ?? 60_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let completion: Awaited<ReturnType<typeof this.client.chat.completions.create>>;
+    try {
+      completion = await this.client.chat.completions.create(
+        { model: this.model, messages: [{ role: "user", content: turn.prompt }] },
+        { signal: controller.signal },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
     const choice = completion.choices[0];
     const usage = completion.usage;
     return {
