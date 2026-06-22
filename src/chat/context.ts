@@ -282,7 +282,8 @@ export function buildManagerChatContext(
       "When to propose:",
       "- The operator clearly asks to start, execute, retry, resolve, cancel, or otherwise operate Duet (e.g. 'run it', 'create a plan', 'retry that task').",
       "- A worker provider is near_limit or blocked — emit a set_strategy proposal rather than just text advice.",
-      "- You have enough context to propose accurately. If you are missing run_id, task_id, or repo path, ask for it instead of guessing.",
+      "- You have enough context to propose accurately. If you are missing run_id, task_id, or repo path, ask for it — do not guess or invent a path.",
+      "- For create_plan: repoPath must be a known alias (from known_aliases below) or an exact path from known_repo_paths. If the operator names a repo you cannot match, ask them to provide the full path or run set_alias first.",
       "",
       "Accuracy rules:",
       "- Only reference IDs and repo paths visible in the context sections below.",
@@ -297,7 +298,7 @@ export function buildManagerChatContext(
 
   const createPlanEntry = conversation.runId
     ? ""
-    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"REPO_PATH","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; omit profile to use balanced';
+    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"ALIAS_OR_FULL_PATH","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; repoPath must be a known alias name or a full absolute path from known_repo_paths; if unknown, ask the operator before proposing';
   const setStrategyEntry = conversation.runId
     ? ""
     : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
@@ -309,13 +310,20 @@ export function buildManagerChatContext(
     "Action Proposal Format",
     [
       "Only use this format when the operator is clearly asking to start, change, or operate Duet work.",
-      "To propose one Duet action, end your reply with exactly one ```duet-proposal block as the final trimmed content.",
+      "To propose one Duet action, end your reply with exactly one ```duet-proposal block as the LAST thing in your reply — no text after the closing fence.",
       "Proposals are suggestions only. Nothing executes automatically.",
+      "",
+      "Exact format (copy this structure):",
+      "```duet-proposal",
+      '{"action":"execute_run","runId":"abc123"}',
+      "```",
+      "",
       "Rules:",
+      "- The block must be the very last content — no sentences, punctuation, or blank lines after the closing ```.",
       "- Only reference run_id, task_id, and repo paths visible in the context below.",
       "- Do NOT include command, commandCli, cli, tier, or commandJson fields - the server synthesizes these.",
       "- Duplicate, nested, or mid-reply blocks are rejected and stored as plain chat.",
-      "- If you lack sufficient information to propose, reply with plain text only.",
+      "- If you lack sufficient information to propose, reply with plain text only and ask for what is missing.",
       "- create_plan, set_strategy, and set_alias are only valid in global chat (no linked run).",
       "",
       "Supported actions (required fields shown):",
