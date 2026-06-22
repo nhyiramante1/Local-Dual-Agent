@@ -39,6 +39,7 @@ export const dashboardHtml = `<!doctype html>
         </div>
         <div class="aside-section" id="aside-sec-timeline">
           <div class="aside-sec-head"><h2>Timeline</h2></div>
+          <div id="timeline-active"></div>
           <div id="events"></div>
         </div>
         <div class="aside-section" id="aside-sec-verification">
@@ -182,6 +183,15 @@ section{display:flex;flex-direction:column;height:100%;overflow:hidden;padding:1
 .timeline-details>summary h2{margin:0;pointer-events:none}
 .timeline-details>summary::after{content:"▸";font-size:10px;color:var(--faint);transition:transform .15s}
 .timeline-details[open]>summary::after{transform:rotate(90deg)}
+#timeline-active{font-size:13px;padding:0 0 8px;border-bottom:1px solid var(--line-2);margin-bottom:6px}
+#timeline-active:empty{display:none}
+.tl-row{display:flex;align-items:center;gap:6px;line-height:1.4}
+.tl-dot{font-size:15px;flex-shrink:0}
+.tl-dot.active{color:var(--accent);animation:tl-pulse 1.4s ease-in-out infinite}
+.tl-dot.done{color:var(--ok)}
+.tl-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-elapsed{color:var(--faint);font-variant-numeric:tabular-nums;flex-shrink:0}
+@keyframes tl-pulse{0%,100%{opacity:1}50%{opacity:.3}}
 /* ── shared components ── */
 .pill{font-size:12px;font-weight:500;padding:4px 11px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
 .pill.ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
@@ -384,6 +394,9 @@ let eventStream = null;
 let eventRunId = null;
 let eventCursor = 0;
 const renderedEventSeqs = new Set();
+let activeAttempt = null; // { provider, role, taskId, taskOrdinal, startedAt }
+let activeTimer = null;
+let runTasks = []; // task list from last selectRun
 function requestKey(prefix) {
   const id = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
   return prefix + "-" + id;
@@ -473,11 +486,13 @@ async function selectRun(id) {
     if (eventStream) eventStream.close();
     eventStream=null;
     eventRunId=null;
+    clearActiveRow();
   }
   q("runs").querySelectorAll("button").forEach(b=>b.classList.toggle("sel",b.dataset.id===id));
   const detail=await api("/runs/"+encodeURIComponent(id));
+  runTasks = detail.tasks || [];
   q("summary").innerHTML='<h2>'+esc(detail.run.goal)+'</h2><div class="card"><div class="row">'+badge(detail.run.status)+'<span class="kv">lead <b>'+esc(detail.run.leadProvider)+'</b></span><span class="kv">'+detail.usage.totalTurns+' turns</span></div></div>';
-  q("tasks").innerHTML=detail.tasks.map(t=>'<div class="card"><div class="row"><b>'+esc(t.plan.title)+'</b>'+badge(t.status)+'</div><div class="kv">'+esc(t.provider)+' -> '+esc(t.reviewerProvider)+'</div><div class="muted">'+esc(t.plan.allowedPaths.join(", "))+'</div></div>').join("")||'<span class="empty">No tasks.</span>';
+  q("tasks").innerHTML=runTasks.map(t=>'<div class="card"><div class="row"><b>'+esc(t.plan.title)+'</b>'+badge(t.status)+'</div><div class="kv">'+esc(t.provider)+' -> '+esc(t.reviewerProvider)+'</div><div class="muted">'+esc(t.plan.allowedPaths.join(", "))+'</div></div>').join("")||'<span class="empty">No tasks.</span>';
   const [verification,messages,artifacts,conflicts]=await Promise.all([
     api("/runs/"+encodeURIComponent(id)+"/verification"),
     api("/runs/"+encodeURIComponent(id)+"/messages"),
@@ -1180,6 +1195,25 @@ q("theme-toggle").onclick = () => {
   localStorage.setItem("duet-theme", next);
   q("theme-toggle").innerHTML = next === "light" ? "&#9790;" : "&#9728;";
 };
+function fmtElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return m > 0 ? m + "m " + ss + "s" : ss + "s";
+}
+function renderActiveRow() {
+  const el = q("timeline-active");
+  if (!el || !activeAttempt) return;
+  const elapsed = fmtElapsed(Date.now() - activeAttempt.startedAt);
+  const ordinal = activeAttempt.taskOrdinal != null ? " task " + activeAttempt.taskOrdinal + " of " + runTasks.length : "";
+  el.innerHTML = '<div class="tl-row"><span class="tl-dot active">&#9679;</span><span class="tl-label">' + esc(activeAttempt.provider) + " &mdash; " + esc(activeAttempt.role) + ordinal + '</span><span class="tl-elapsed">' + elapsed + "</span></div>";
+}
+function clearActiveRow() {
+  if (activeTimer) { clearInterval(activeTimer); activeTimer = null; }
+  activeAttempt = null;
+  const el = q("timeline-active");
+  if (el) el.innerHTML = "";
+}
 async function connectEvents() {
   const targetRunId = selected || "";
   if (eventStream && eventRunId === targetRunId) return;
@@ -1206,6 +1240,28 @@ async function connectEvents() {
     line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(item.type)+'</span>';
     q("events").prepend(line);
     if(item.type==="run.updated"||item.type==="task.updated") loadRuns().catch(()=>{});
+    const TERMINAL = new Set(["failed","cancelled","merged","cleaned_up"]);
+    if(item.type==="provider.attempt_started" && item.payload) {
+      if(activeTimer) { clearInterval(activeTimer); activeTimer=null; }
+      const taskId = item.taskId || null;
+      const taskOrdinal = taskId ? runTasks.findIndex(t=>t.id===taskId)+1 || null : null;
+      activeAttempt = { provider: item.payload.provider||"agent", role: item.payload.role||"worker", taskId, taskOrdinal: taskOrdinal||null, startedAt: Date.now() };
+      renderActiveRow();
+      activeTimer = setInterval(renderActiveRow, 1000);
+    }
+    if(item.type==="provider.attempt_finished") {
+      if(activeTimer) { clearInterval(activeTimer); activeTimer=null; }
+      const finished = activeAttempt;
+      activeAttempt = null;
+      if(finished) {
+        const el = q("timeline-active");
+        const elapsed = fmtElapsed(Date.now() - finished.startedAt);
+        const ordinal = finished.taskOrdinal != null ? " task " + finished.taskOrdinal : "";
+        if(el) el.innerHTML = '<div class="tl-row"><span class="tl-dot done">&#10003;</span><span class="tl-label">' + esc(finished.provider) + " &mdash; " + esc(finished.role) + ordinal + '</span><span class="tl-elapsed">' + elapsed + "</span></div>";
+        setTimeout(()=>{ const e=q("timeline-active"); if(e&&!activeAttempt) e.innerHTML=""; }, 3000);
+      }
+    }
+    if(item.type==="run.updated" && item.payload && TERMINAL.has(item.payload.status)) clearActiveRow();
     if(item.type && item.type.startsWith("chat.turn.")) {
       const conversation = currentConversation();
       if (conversation && item.payload && item.payload.conversationId === conversation.id) {
