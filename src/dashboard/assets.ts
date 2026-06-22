@@ -422,9 +422,38 @@ async function api(path, options = {}) {
   } finally {
     clearTimeout(timer);
   }
+  // Session expired (commonly after a service restart wipes in-memory sessions).
+  // Re-auth once with the saved access token and replay the original request so
+  // open windows self-heal instead of failing. The same idempotency key is safe
+  // to reuse: a 401 is rejected before any work, so no idempotency record exists.
+  if (response.status === 401 && !options._retried && await reauth()) {
+    return api(path, Object.assign({}, options, { _retried: true }));
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   return payload.data;
+}
+let reauthInFlight = null;
+function reauth() {
+  const savedAccessToken = localStorage.getItem(DASHBOARD_ACCESS_KEY);
+  if (!savedAccessToken) return Promise.resolve(false);
+  // Dedupe concurrent 401s into a single re-auth round-trip.
+  if (!reauthInFlight) {
+    reauthInFlight = (async () => {
+      try {
+        const r = await fetch("/dashboard/session", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessToken: savedAccessToken }),
+        });
+        if (!r.ok) localStorage.removeItem(DASHBOARD_ACCESS_KEY);
+        return r.ok;
+      } catch {
+        return false;
+      }
+    })().finally(() => { reauthInFlight = null; });
+  }
+  return reauthInFlight;
 }
 function esc(value){const d=document.createElement("div");d.textContent=String(value??"");return d.innerHTML.replaceAll('"',"&quot;").replaceAll("'","&#39;")}
 function statusClass(value){const s=String(value??"").toLowerCase();
