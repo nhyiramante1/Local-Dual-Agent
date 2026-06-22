@@ -1233,12 +1233,29 @@ async function connectEvents() {
     renderedEventSeqs.add(item.seq);
     eventCursor=Math.max(eventCursor, Number(item.seq)||0);
     const sev=item.severity==="error"?"ev-error":item.severity==="warning"?"ev-warning":"ev-info";
+    const p=item.payload||{};
+    let label="";
+    switch(item.type){
+      case "provider.attempt_started": label="▶ "+(p.provider||"agent")+" — "+(p.role||"worker"); break;
+      case "provider.attempt_finished": label="■ "+(p.provider||"agent")+" — "+(p.status||"done"); break;
+      case "provider.turn_completed": label="✓ turn done"; break;
+      case "task.updated": label="task → "+(p.status||"?"); break;
+      case "run.updated": label="run → "+(p.status||"?"); break;
+      case "chat.turn.created": label="message received"; break;
+      case "chat.turn.completed": label="manager replied"; break;
+      case "chat.proposal.created": label="proposal created — "+(p.action||""); break;
+      case "chat.proposal.started": label="proposal started"; break;
+      case "operation.created": case "operation.updated": label=""; break;
+      default: label=item.type;
+    }
+    if(!label) { renderedEventSeqs.delete(item.seq); } else {
     const line=document.createElement("div");
     line.className="ev "+sev;
     const parsed=new Date(item.occurredAt);
     const ts=isNaN(parsed.getTime())?item.occurredAt:parsed.toLocaleTimeString();
-    line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(item.type)+'</span>';
+    line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(label)+'</span>';
     q("events").prepend(line);
+    }
     if(item.type==="run.updated"||item.type==="task.updated") loadRuns().catch(()=>{});
     const TERMINAL = new Set(["failed","cancelled","merged","cleaned_up"]);
     if(item.type==="provider.attempt_started" && item.payload) {
