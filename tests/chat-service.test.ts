@@ -2431,7 +2431,10 @@ test("missing openai adapter returns CONFIGURATION_ERROR when interfaceAgent is 
 });
 
 test("create_plan proposal is synthesized from manager response", async () => {
-  const repoPath = "/home/user/project";
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-create-plan-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
   const goal = "Refactor auth module";
   const planProposalText = [
     "Sure, here is a plan proposal.",
@@ -2472,6 +2475,7 @@ test("create_plan proposal is synthesized from manager response", async () => {
     assert.equal(parsed.profile, "balanced");
   } finally {
     await h.cleanup();
+    await rm(repoPath, { recursive: true, force: true });
   }
 });
 

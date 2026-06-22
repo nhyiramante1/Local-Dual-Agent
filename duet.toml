@@ -53,6 +53,13 @@ codex_runtime_seconds = 120
 max_turns_per_day = 200
 
 
+# Static repo aliases — use the alias name instead of the full path in manager chat.
+# Dynamic aliases created via manager proposals are stored in the database and take
+# precedence over these static entries when the same name exists in both.
+# [aliases]
+# clicker = "C:\\Users\\nhyir\\Projects\\clicker"
+# nhyira-os = "C:\\Users\\nhyir\\nhyira-os"
+
 [service]
 host = "0.0.0.0"
 port = 58208

@@ -188,6 +188,9 @@ export class DuetService {
         options.store,
         chatProviders,
         options.managerBudget ?? defaultManagerBudget,
+        undefined,
+        undefined,
+        options.config?.aliases ?? {},
       ),
       options.instanceId,
     );
@@ -564,6 +567,36 @@ export class DuetService {
           };
           // markProposalStarted first: if it throws (e.g. concurrent start), createOperation
           // hasn't run yet so there is no orphan record to clean up.
+          this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
+          this.options.store.createOperation(operation);
+          return { status: 200, data: operation };
+        }
+        if (proposal.action === "set_alias") {
+          const parsed = JSON.parse(proposal.commandJson) as {
+            name: string;
+            repoPath: string;
+            lead?: string;
+            profile?: string;
+            description?: string;
+          };
+          const now = new Date().toISOString();
+          this.options.store.setAlias(parsed.name, {
+            repoPath: parsed.repoPath,
+            lead: parsed.lead as "claude" | "codex" | undefined,
+            profile: parsed.profile as AgentProfile | undefined,
+            description: parsed.description,
+            createdAt: now,
+          });
+          const operation: OperationRecord = {
+            id: randomUUID(),
+            kind: "set_alias",
+            status: "succeeded",
+            serviceInstanceId: this.options.instanceId,
+            inputHash: hash(proposal.commandJson),
+            startedAt: now,
+            finishedAt: now,
+            createdAt: now,
+          };
           this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
           this.options.store.createOperation(operation);
           return { status: 200, data: operation };

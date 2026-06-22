@@ -57,6 +57,7 @@ export class ChatEngine {
     private readonly budget: ManagerBudget = defaultManagerBudget,
     cwdFor?: (conversation: ConversationRecord) => string,
     context?: ChatContextBuilder | Partial<ChatContextOptions>,
+    private readonly configAliases: Record<string, string> = {},
   ) {
     this.cwdFor =
       cwdFor ??
@@ -68,7 +69,7 @@ export class ChatEngine {
       typeof context === "function"
         ? context
         : (conversation) =>
-            buildManagerChatContext(this.store, conversation, this.budget, context);
+            buildManagerChatContext(this.store, conversation, this.budget, context, this.configAliases);
   }
 
   private readonly contextBuilder: ChatContextBuilder;
@@ -184,6 +185,7 @@ export class ChatEngine {
             conversation,
             this.store,
             latestUserMessage,
+            this.configAliases,
           )
         : null;
     if (parseResult.kind === "invalid") {

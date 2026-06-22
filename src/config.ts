@@ -51,6 +51,7 @@ export interface DuetConfig {
     persistentAccess: boolean;
     publicHost: string | undefined;
   };
+  aliases: Record<string, string>;
 }
 
 export function recommendedTurnBudget(
@@ -107,6 +108,7 @@ export const defaultConfig: DuetConfig = {
     persistentAccess: false,
     publicHost: undefined,
   },
+  aliases: {},
 };
 
 export type PartialDuetConfig = {
@@ -116,6 +118,7 @@ export type PartialDuetConfig = {
   verification?: Partial<DuetConfig["verification"]>;
   manager?: Partial<DuetConfig["manager"]>;
   dashboard?: Partial<DuetConfig["dashboard"]>;
+  aliases?: Record<string, string>;
 };
 
 export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
@@ -150,6 +153,7 @@ export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
       ...defaultConfig.dashboard,
       ...(value.dashboard ?? {}),
     },
+    aliases: value.aliases ?? {},
   };
 }
 
@@ -235,6 +239,7 @@ interface RawConfig {
   verification?: Record<string, unknown>;
   manager?: Record<string, unknown>;
   dashboard?: Record<string, unknown>;
+  aliases?: Record<string, unknown>;
 }
 
 function numberInRange(
@@ -328,6 +333,13 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
   const manager = raw.manager ?? {};
   const service = raw.service ?? {};
   const dashboard = raw.dashboard ?? {};
+  const rawAliases = raw.aliases ?? {};
+  const aliases: Record<string, string> = {};
+  for (const [name, value] of Object.entries(rawAliases)) {
+    if (typeof value === "string" && value.trim().length > 0 && /^[a-z0-9_-]+$/i.test(name)) {
+      aliases[name.toLowerCase()] = value.trim();
+    }
+  }
   const lead =
     orchestration.default_lead === "codex"
       ? "codex"
@@ -500,6 +512,7 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
           ? dashboard.public_host
           : defaultConfig.dashboard.publicHost,
     },
+    aliases,
   };
 }
 
