@@ -51,3 +51,10 @@ codex_max_output_tokens_per_day = 100000
 codex_runtime_seconds = 120
 # Maximum manager turns per day (all interface agents combined).
 max_turns_per_day = 200
+
+
+[service]
+port = 58208
+
+[dashboard]
+persistent_access = true

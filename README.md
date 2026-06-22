@@ -81,6 +81,9 @@ During development you can run commands with:
 npm run dev -- COMMAND
 ```
 
+For the common local-phone workflow, `npm run up` rebuilds, restarts the
+service, and opens the phone-friendly persistent dashboard URL automatically.
+
 After building, you can run:
 
 ```powershell
@@ -197,6 +200,12 @@ Open the dashboard:
 
 ```powershell
 npm run dev -- dashboard RUN_ID
+```
+
+For a phone-friendly reusable dashboard link that survives local restarts, use:
+
+```powershell
+npm run dev -- dashboard --phone
 ```
 
 The dashboard URL is local and temporary. Paste it into your browser. The
@@ -385,6 +394,20 @@ The manager voice is selected per conversation and defaults to the provider set
 in `duet.toml`. Options are `codex`, `claude`, or `openai`. Setting provider
 to `openai` and pointing `openai_base_url` at a compatible endpoint such as
 Groq lets you run manager chat without touching Claude or Codex worker quota.
+
+For a stable phone + Termius workflow during development, you can pin the local
+service to one port and reuse the same dashboard access link:
+
+```toml
+[service]
+port = 58208
+
+[dashboard]
+persistent_access = true
+```
+
+Then keep one Termius forward such as `8080 -> 127.0.0.1:58208` and open the
+same `#access=...` dashboard URL each time.
 
 Manager chat may use provider quota when you send a message. If you are using
 Claude or Codex as the manager voice, treat it like a real provider turn. Using

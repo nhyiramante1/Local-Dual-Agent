@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -141,7 +142,7 @@ test("local API enforces auth, idempotency, origin, and durable events", async (
   }
 });
 
-test("SSE replays committed events and dashboard tickets are single use", async () => {
+test("SSE replays committed events and dashboard bootstrap supports ticket and reusable access modes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-sse-"));
   const store = new Store(path.join(directory, "state.sqlite"));
   const { run, task } = fixture(directory);
@@ -152,6 +153,7 @@ test("SSE replays committed events and dashboard tickets are single use", async 
     secret,
     instanceId: "sse-instance",
     idleTimeoutMs: 60_000,
+    dashboardAccessToken: "persistent-dashboard-access",
   });
   const port = await service.listen();
   const base = `http://127.0.0.1:${port}`;
@@ -207,6 +209,19 @@ test("SSE replays committed events and dashboard tickets are single use", async 
       body: JSON.stringify(ticket.data),
     });
     assert.equal(reused.status, 401);
+
+    const persistentOne = await fetch(`${base}/dashboard/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accessToken: "persistent-dashboard-access" }),
+    });
+    assert.equal(persistentOne.status, 204);
+    const persistentTwo = await fetch(`${base}/dashboard/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accessToken: "persistent-dashboard-access" }),
+    });
+    assert.equal(persistentTwo.status, 204);
   } finally {
     controller.abort();
     await service.close();
@@ -215,6 +230,30 @@ test("SSE replays committed events and dashboard tickets are single use", async 
   }
 });
 
+test("service can bind a configured fixed localhost port", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-fixed-port-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+  const address = probe.address();
+  const reservedPort = typeof address === "object" && address ? address.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  const service = new DuetService({
+    store,
+    secret: "fixed-port-secret",
+    instanceId: "fixed-port-instance",
+    idleTimeoutMs: 60_000,
+    listenPort: reservedPort,
+  });
+  try {
+    const actualPort = await service.listen();
+    assert.equal(actualPort, reservedPort);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 test("approval and merge APIs require one-use fingerprint-bound tickets", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-ticket-"));
   const store = new Store(path.join(directory, "state.sqlite"));

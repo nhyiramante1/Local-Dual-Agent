@@ -14,6 +14,7 @@ import path from "node:path";
 
 import { DuetError } from "../core/errors.js";
 import {
+  dashboardAccessPath,
   duetDataRoot,
   serviceInfoPath,
   serviceLockPath,
@@ -172,6 +173,32 @@ export async function loadOrCreateServiceSecret(): Promise<string> {
     await secureWindowsFile(serviceSecretPath());
   }
   return secret;
+}
+
+export async function loadOrCreateDashboardAccessToken(): Promise<string> {
+  await mkdir(duetDataRoot(), { recursive: true });
+  try {
+    const token = (await readFile(dashboardAccessPath(), "utf8")).trim();
+    await chmod(dashboardAccessPath(), 0o600);
+    if (process.platform === "win32") {
+      await secureWindowsFile(dashboardAccessPath());
+    }
+    return token;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const token = randomBytes(32).toString("base64url");
+  const handle = await open(dashboardAccessPath(), "wx", 0o600);
+  try {
+    await handle.writeFile(`${token}\n`, "utf8");
+  } finally {
+    await handle.close();
+  }
+  await chmod(dashboardAccessPath(), 0o600);
+  if (process.platform === "win32") {
+    await secureWindowsFile(dashboardAccessPath());
+  }
+  return token;
 }
 
 export async function readServiceInfo(): Promise<ServiceInfo | undefined> {

@@ -26,6 +26,7 @@ import { serviceInfoPath } from "./paths.js";
 import {
   acquireServiceLock,
   clearServiceInfo,
+  loadOrCreateDashboardAccessToken,
   loadOrCreateServiceSecret,
   publishServiceInfo,
   readServiceInfo,
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
   try {
     store = new Store();
     const secret = await loadOrCreateServiceSecret();
+    const dashboardAccessToken = await loadOrCreateDashboardAccessToken();
     const config = await loadConfig();
     const managerBudget = resolveManagerBudget(config);
     const chatProviders: ChatProviders = {
@@ -99,8 +101,10 @@ async function main(): Promise<void> {
       secret,
       instanceId,
       idleTimeoutMs: Number(process.env.DUET_IDLE_TIMEOUT_MS ?? 15 * 60_000),
+      listenPort: Number(process.env.DUET_PORT ?? config.service.port ?? 0),
       managerBudget,
       managerProvider: config.manager.provider,
+      dashboardAccessToken,
       chatProviders,
       onStop: () => {
         void stop().finally(() => process.exit(0));

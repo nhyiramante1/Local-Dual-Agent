@@ -158,6 +158,23 @@ openai_max_usd_per_day = 5.0
   );
 });
 
+test("loadConfig reads fixed service port and persistent dashboard access mode", async () => {
+  await withToml(
+    `
+[service]
+port = 58208
+
+[dashboard]
+persistent_access = true
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.service.port, 58208);
+      assert.equal(config.dashboard.persistentAccess, true);
+    },
+  );
+});
+
 test("loadConfig rejects [manager] values below minimum", async () => {
   await withToml(
     `

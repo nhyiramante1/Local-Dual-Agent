@@ -25,6 +25,10 @@ export function serviceSecretPath(): string {
   return path.join(duetDataRoot(), "service.secret");
 }
 
+export function dashboardAccessPath(): string {
+  return path.join(duetDataRoot(), "dashboard.access");
+}
+
 export function serviceLogPath(): string {
   return path.join(duetDataRoot(), "duetd.jsonl");
 }

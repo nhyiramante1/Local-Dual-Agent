@@ -8,6 +8,9 @@ import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 
 export interface DuetConfig {
+  service: {
+    port: number | undefined;
+  };
   orchestration: {
     defaultLead: ProviderName;
     maxRevisions: number;
@@ -43,6 +46,9 @@ export interface DuetConfig {
     codexMaxRuntimeSeconds: number;
     maxTurnsPerDay: number;
   };
+  dashboard: {
+    persistentAccess: boolean;
+  };
 }
 
 export function recommendedTurnBudget(
@@ -56,6 +62,9 @@ const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", 
 const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex", "openai"]);
 
 export const defaultConfig: DuetConfig = {
+  service: {
+    port: undefined,
+  },
   orchestration: {
     defaultLead: "claude",
     maxRevisions: 1,
@@ -91,17 +100,26 @@ export const defaultConfig: DuetConfig = {
     codexMaxRuntimeSeconds: 120,
     maxTurnsPerDay: 200,
   },
+  dashboard: {
+    persistentAccess: false,
+  },
 };
 
 export type PartialDuetConfig = {
+  service?: Partial<DuetConfig["service"]>;
   orchestration?: Partial<DuetConfig["orchestration"]>;
   budgets?: Partial<DuetConfig["budgets"]>;
   verification?: Partial<DuetConfig["verification"]>;
   manager?: Partial<DuetConfig["manager"]>;
+  dashboard?: Partial<DuetConfig["dashboard"]>;
 };
 
 export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
   return {
+    service: {
+      ...defaultConfig.service,
+      ...(value.service ?? {}),
+    },
     orchestration: {
       ...defaultConfig.orchestration,
       ...(value.orchestration ?? {}),
@@ -124,6 +142,10 @@ export function normalizeConfig(value: PartialDuetConfig): DuetConfig {
       ...defaultConfig.manager,
       ...(value.manager ?? {}),
     },
+    dashboard: {
+      ...defaultConfig.dashboard,
+      ...(value.dashboard ?? {}),
+    },
   };
 }
 
@@ -145,6 +167,20 @@ export function validateConfig(value: unknown): DuetConfig {
     ["codex_max_output_tokens", config.budgets.codexMaxOutputTokens, 1],
     ["verification_timeout_seconds", config.verification.timeoutSeconds, 1],
   ];
+  if (
+    config.service.port !== undefined &&
+    (
+      typeof config.service.port !== "number" ||
+      !Number.isInteger(config.service.port) ||
+      config.service.port < 1 ||
+      config.service.port > 65_535
+    )
+  ) {
+    throw new DuetError(
+      "Invalid configuration value for service.port.",
+      "INVALID_CONFIG",
+    );
+  }
   for (const [name, number, minimum, maximum] of numbers) {
     if (
       typeof number !== "number" ||
@@ -168,10 +204,12 @@ export function validateConfig(value: unknown): DuetConfig {
 }
 
 interface RawConfig {
+  service?: Record<string, unknown>;
   orchestration?: Record<string, unknown>;
   budgets?: Record<string, unknown>;
   verification?: Record<string, unknown>;
   manager?: Record<string, unknown>;
+  dashboard?: Record<string, unknown>;
 }
 
 function numberInRange(
@@ -246,12 +284,20 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
   const budgets = raw.budgets ?? {};
   const verification = raw.verification ?? {};
   const manager = raw.manager ?? {};
+  const service = raw.service ?? {};
+  const dashboard = raw.dashboard ?? {};
   const lead =
     orchestration.default_lead === "codex"
       ? "codex"
       : defaultConfig.orchestration.defaultLead;
 
   return {
+    service: {
+      port:
+        service.port === undefined
+          ? defaultConfig.service.port
+          : Math.floor(numberInRange(service.port, 0, 1, 65_535)),
+    },
     orchestration: {
       defaultLead: lead,
       maxRevisions: Math.floor(
@@ -399,6 +445,9 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
           1,
         ),
       ),
+    },
+    dashboard: {
+      persistentAccess: dashboard.persistent_access === true,
     },
   };
 }

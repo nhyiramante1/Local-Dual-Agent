@@ -328,6 +328,7 @@ code.inline-code{display:inline;padding:2px 5px}
 export const dashboardJs = `
 (function(){var t=localStorage.getItem("duet-theme")||"dark";document.documentElement.setAttribute("data-theme",t)})();
 const q = (id) => document.getElementById(id);
+const DASHBOARD_ACCESS_KEY = "duet-dashboard-access";
 const DEFAULT_MANAGER_PROVIDER = "__DUET_DEFAULT_MANAGER_PROVIDER__";
 let selected = new URL(location.href).searchParams.get("run");
 const chat = {
@@ -377,10 +378,29 @@ function visibleText(value, max) {
   return esc(text.slice(0, max)) + '\\n[truncated in view from ' + text.length + ' chars]';
 }
 async function authenticate() {
-  const ticket = location.hash.slice(1);
-  if (!ticket) return;
-  await fetch("/dashboard/session", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({ticket})});
-  history.replaceState(null,"",location.pathname+location.search);
+  const hash = location.hash.slice(1);
+  let body = null;
+  let persistentAccess = false;
+  if (hash.startsWith("access=")) {
+    body = { accessToken: decodeURIComponent(hash.slice("access=".length)) };
+    persistentAccess = true;
+    localStorage.setItem(DASHBOARD_ACCESS_KEY, body.accessToken);
+  } else if (hash) {
+    body = { ticket: hash };
+  } else {
+    const savedAccessToken = localStorage.getItem(DASHBOARD_ACCESS_KEY);
+    if (savedAccessToken) {
+      body = { accessToken: savedAccessToken };
+      persistentAccess = true;
+    }
+  }
+  if (!body) return;
+  const response = await fetch("/dashboard/session", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  if (!response.ok) {
+    if (persistentAccess) localStorage.removeItem(DASHBOARD_ACCESS_KEY);
+    throw new Error("Dashboard access is invalid or expired.");
+  }
+  if (!persistentAccess) history.replaceState(null,"",location.pathname+location.search);
 }
 async function loadRuns(options = {}) {
   const runs=await api("/runs");

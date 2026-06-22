@@ -37,10 +37,12 @@ interface ServerOptions {
   instanceId: string;
   config?: DuetConfig;
   idleTimeoutMs?: number;
+  listenPort?: number;
   onStop?: () => void;
   chatProviders?: ChatProviders;
   managerBudget?: ManagerBudget;
   managerProvider?: ManagerProviderName;
+  dashboardAccessToken?: string;
 }
 
 interface JsonBody {
@@ -116,7 +118,6 @@ export class DuetService {
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
   });
-  private readonly _dashboardJs: string;
   private readonly tickets = new Map<string, number>();
   private readonly sessions = new Map<string, number>();
   private readonly approvalFailures = new Map<string, { count: number; blockedUntil: number }>();
@@ -128,10 +129,6 @@ export class DuetService {
   private sweepTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: ServerOptions) {
-    this._dashboardJs = dashboardJs.replaceAll(
-      "__DUET_DEFAULT_MANAGER_PROVIDER__",
-      options.managerProvider ?? "codex",
-    );
     this.app = new ApplicationCommands(options.store);
     this.activities = new ActivityManager(this.app, options.instanceId);
     const chatProviders: ChatProviders = options.chatProviders ?? {
@@ -155,7 +152,7 @@ export class DuetService {
   async listen(): Promise<number> {
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
-      this.server.listen(0, "127.0.0.1", () => resolve());
+      this.server.listen(this.options.listenPort ?? 0, "127.0.0.1", () => resolve());
     });
     this.idleTimer = setInterval(() => this.checkIdle(), 10_000);
     this.sweepTimer = setInterval(() => {
@@ -272,7 +269,11 @@ export class DuetService {
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.js") {
-        this.send(response, 200, this._dashboardJs, "text/javascript; charset=utf-8");
+        const js = dashboardJs.replaceAll(
+          "__DUET_DEFAULT_MANAGER_PROVIDER__",
+          this.options.managerProvider ?? "codex",
+        );
+        this.send(response, 200, js, "text/javascript; charset=utf-8");
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.css") {
@@ -280,12 +281,22 @@ export class DuetService {
         return;
       }
       if (request.method === "POST" && url.pathname === "/dashboard/session") {
-        const body = JSON.parse(await readBody(request)) as { ticket?: string };
+        const body = JSON.parse(await readBody(request)) as {
+          ticket?: string;
+          accessToken?: string;
+        };
+        const reusableAccess =
+          body.accessToken &&
+          this.options.dashboardAccessToken &&
+          equalSecret(body.accessToken, this.options.dashboardAccessToken);
         const expires = body.ticket ? this.tickets.get(body.ticket) : undefined;
-        if (!body.ticket || !expires || expires <= Date.now()) {
+        const validTicket = Boolean(body.ticket && expires && expires > Date.now());
+        if (!reusableAccess && !validTicket) {
           throw new DuetError("Dashboard ticket is invalid or expired.", "INVALID_TICKET");
         }
-        this.tickets.delete(body.ticket);
+        if (validTicket && body.ticket) {
+          this.tickets.delete(body.ticket);
+        }
         const session = randomBytes(24).toString("base64url");
         this.sessions.set(session, Date.now() + 8 * 60 * 60_000);
         this.send(response, 204, "", "text/plain", {
