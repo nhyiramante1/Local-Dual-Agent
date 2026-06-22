@@ -23,7 +23,16 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
     let completion: Awaited<ReturnType<typeof this.client.chat.completions.create>>;
     try {
       completion = await this.client.chat.completions.create(
-        { model: this.model, messages: [{ role: "user", content: turn.prompt }] },
+        {
+          model: this.model,
+          // The whole bounded context is the system prompt so the rules and the
+          // proposal format carry more weight than they would as a user turn.
+          messages: [{ role: "system", content: turn.prompt }],
+          // Low temperature: the manager's job is reliable instruction-following
+          // (especially emitting the exact duet-proposal block). High temperature
+          // makes weaker models narrate "I will propose..." instead of emitting.
+          temperature: 0.2,
+        },
         { signal: controller.signal },
       );
     } finally {
