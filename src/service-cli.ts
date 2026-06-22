@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 
 import { loadConfig } from "./config.js";
 import type {
@@ -11,6 +12,7 @@ import type {
 import { DuetError } from "./core/errors.js";
 import {
   clearServiceInfo,
+  loadOrCreateDashboardAccessToken,
   readServiceInfo,
   releaseServiceLock,
   verifyServiceProcess,
@@ -23,7 +25,7 @@ function usage(): void {
   console.log(`Usage:
   duet service start|status|stop|restart [--force]
   duet mcp install|status|uninstall claude|codex|all [--force]
-  duet dashboard [RUN_ID]
+  duet dashboard [RUN_ID] [--phone]
   duet plan --repo PATH [--lead claude|codex] [--config PATH] [--detach] "goal"
   duet approve RUN_ID --stage plan|merge
   duet run RUN_ID [--detach]
@@ -57,6 +59,40 @@ function takeFlag(args: string[], name: string): boolean {
   if (index < 0) return false;
   args.splice(index, 1);
   return true;
+}
+
+function detectLanIpv4(): string | undefined {
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (
+        entry.family === "IPv4" &&
+        !entry.internal &&
+        !entry.address.startsWith("169.254.")
+      ) {
+        return entry.address;
+      }
+    }
+  }
+  return undefined;
+}
+
+async function dashboardHost(
+  phone: boolean,
+): Promise<string> {
+  const config = await loadConfig();
+  if (!phone && !config.dashboard.persistentAccess) return "127.0.0.1";
+  if (config.dashboard.publicHost) return config.dashboard.publicHost;
+  if (config.service.host === "0.0.0.0" || config.service.host === "::") {
+    return detectLanIpv4() ?? "127.0.0.1";
+  }
+  if (
+    config.service.host === "127.0.0.1" ||
+    config.service.host === "localhost" ||
+    config.service.host === "::1"
+  ) {
+    return "127.0.0.1";
+  }
+  return config.service.host;
 }
 
 function printTask(task: TaskRecord): void {
@@ -238,15 +274,26 @@ export async function serviceMain(): Promise<void> {
   }
   const client = await DuetClient.connect();
   if (command === "dashboard") {
+    const phone = takeFlag(args, "--phone");
     const runId = args.shift();
-    if (args.length) throw new DuetError("Usage: duet dashboard [RUN_ID]", "INVALID_ARGUMENT");
-    const { ticket } = await client.post<{ ticket: string }>(
-      "/api/v1/dashboard/ticket",
-      {},
-      { unique: true },
-    );
+    if (args.length) throw new DuetError("Usage: duet dashboard [RUN_ID] [--phone]", "INVALID_ARGUMENT");
+    const config = await loadConfig();
+    const host = await dashboardHost(phone);
     const query = runId ? `?run=${encodeURIComponent(runId)}` : "";
-    const url = `http://127.0.0.1:${client.info.port}/${query}#${ticket}`;
+    const url =
+      phone || config.dashboard.persistentAccess
+        ? `http://${host}:${client.info.port}/${query}#access=${encodeURIComponent(
+            await loadOrCreateDashboardAccessToken(),
+          )}`
+        : `http://${host}:${client.info.port}/${query}#${
+            (
+              await client.post<{ ticket: string }>(
+                "/api/v1/dashboard/ticket",
+                {},
+                { unique: true },
+              )
+            ).ticket
+          }`;
     console.log(url);
     const { spawn } = await import("node:child_process");
     const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]]

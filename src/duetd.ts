@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,9 +23,11 @@ import { CodexAdapter } from "./providers/codex.js";
 import { OpenAIManagerAdapter } from "./providers/openai-manager.js";
 import type { ChatProviders } from "./chat/engine.js";
 import { serviceInfoPath } from "./paths.js";
+import { codexHomePath } from "./paths.js";
 import {
   acquireServiceLock,
   clearServiceInfo,
+  loadOrCreateDashboardAccessToken,
   loadOrCreateServiceSecret,
   publishServiceInfo,
   readServiceInfo,
@@ -80,6 +82,8 @@ async function main(): Promise<void> {
   try {
     store = new Store();
     const secret = await loadOrCreateServiceSecret();
+    const dashboardAccessToken = await loadOrCreateDashboardAccessToken();
+    await mkdir(codexHomePath(), { recursive: true });
     const config = await loadConfig();
     const managerBudget = resolveManagerBudget(config);
     const chatProviders: ChatProviders = {
@@ -99,8 +103,13 @@ async function main(): Promise<void> {
       secret,
       instanceId,
       idleTimeoutMs: Number(process.env.DUET_IDLE_TIMEOUT_MS ?? 15 * 60_000),
+      listenHost: process.env.DUET_HOST ?? config.service.host,
+      listenPort: Number(process.env.DUET_PORT ?? config.service.port ?? 0),
       managerBudget,
       managerProvider: config.manager.provider,
+      dashboardPublicHost:
+        process.env.DUET_PUBLIC_HOST ?? config.dashboard.publicHost,
+      dashboardAccessToken,
       chatProviders,
       onStop: () => {
         void stop().finally(() => process.exit(0));

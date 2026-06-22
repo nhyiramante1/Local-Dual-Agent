@@ -33,7 +33,9 @@ Manager chat is available now. The dashboard can run global or run-scoped
 manager conversations with summarized run, task, usage, event, verification,
 and message context. It can also show suggested Duet action cards. Ordinary
 suggestions can be checked and started from the dashboard after you type a
-confirmation. Fingerprint-gated approvals and merge still stay in the CLI.
+confirmation. You can also clear the current context to start a fresh thread
+for the same run and manager voice without deleting history. Fingerprint-gated
+approvals and merge still stay in the CLI.
 
 The manager can also recommend provider and profile strategy based on current
 usage and availability, and create plan proposals from natural language in
@@ -80,6 +82,9 @@ During development you can run commands with:
 ```powershell
 npm run dev -- COMMAND
 ```
+
+For the common local-phone workflow, `npm run up` rebuilds, restarts the
+service, and opens the phone-friendly persistent dashboard URL automatically.
 
 After building, you can run:
 
@@ -197,6 +202,12 @@ Open the dashboard:
 
 ```powershell
 npm run dev -- dashboard RUN_ID
+```
+
+For a phone-friendly reusable dashboard link that survives local restarts, use:
+
+```powershell
+npm run dev -- dashboard --phone
 ```
 
 The dashboard URL is local and temporary. Paste it into your browser. The
@@ -385,6 +396,26 @@ The manager voice is selected per conversation and defaults to the provider set
 in `duet.toml`. Options are `codex`, `claude`, or `openai`. Setting provider
 to `openai` and pointing `openai_base_url` at a compatible endpoint such as
 Groq lets you run manager chat without touching Claude or Codex worker quota.
+
+For a stable phone + Termius workflow during development, you can pin the local
+service to one port and reuse the same dashboard access link. For direct phone
+access over the same Wi-Fi, let the service bind on all interfaces:
+
+```toml
+[service]
+host = "0.0.0.0"
+port = 58208
+
+[dashboard]
+persistent_access = true
+```
+
+Then either:
+
+- open the printed `http://<your-lan-ip>:58208/#access=...` URL directly from
+  your phone browser, or
+- keep one Termius forward such as `8080 -> 127.0.0.1:58208` and reuse the
+  same `#access=...` URL through the tunnel.
 
 Manager chat may use provider quota when you send a message. If you are using
 Claude or Codex as the manager voice, treat it like a real provider turn. Using
