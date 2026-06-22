@@ -298,7 +298,7 @@ export function buildManagerChatContext(
 
   const createPlanEntry = conversation.runId
     ? ""
-    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"ALIAS_OR_FULL_PATH","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; repoPath must be a known alias name or a full absolute path from known_repo_paths; if unknown, ask the operator before proposing';
+    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"FULL_PATH_OR_ALIAS","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; repoPath is the absolute path the operator gives you (it need NOT be pre-known) or a known alias. Once you have a goal and a path, emit this block — do not just say you will. Omit profile to use balanced.';
   const setStrategyEntry = conversation.runId
     ? ""
     : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
@@ -313,9 +313,9 @@ export function buildManagerChatContext(
       "To propose one Duet action, end your reply with exactly one ```duet-proposal block as the LAST thing in your reply — no text after the closing fence.",
       "Proposals are suggestions only. Nothing executes automatically.",
       "",
-      "Exact format (copy this structure):",
+      "Exact format (copy this structure — example for creating a plan):",
       "```duet-proposal",
-      '{"action":"execute_run","runId":"abc123"}',
+      '{"action":"create_plan","goal":"Add a moveable camera gun","repoPath":"C:\\\\path\\\\to\\\\repo","lead":"codex","profile":"balanced"}',
       "```",
       "",
       "Rules:",
