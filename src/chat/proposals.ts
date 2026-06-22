@@ -1,11 +1,17 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+
 import type {
   LongRunningCommand,
 } from "../application/activities.js";
 import type {
+  AliasRecord,
   ConversationRecord,
   ManagerActionProposal,
   ProposalAction,
   ProposalTier,
+  ProviderName,
+  AgentProfile,
   RunRecord,
   TaskRecord,
 } from "../core/domain.js";
@@ -18,8 +24,10 @@ export interface RawProposal {
   taskId?: string;
   goal?: string;
   repoPath?: string;
+  name?: string;
   lead?: string;
   profile?: string;
+  description?: string;
   rationale?: string;
   // model may supply command/commandCli/cli/tier/commandJson - all ignored
 }
@@ -105,6 +113,12 @@ const ACTION_SPECS: Readonly<Record<ProposalAction, ActionSpec>> = {
     jsonFields: () => ({}),
   },
   set_strategy: {
+    tier: "ordinary",
+    requiresTask: false,
+    cli: () => "",
+    jsonFields: () => ({}),
+  },
+  set_alias: {
     tier: "ordinary",
     requiresTask: false,
     cli: () => "",
@@ -266,11 +280,39 @@ export function parseProposalBlock(text: string): ParseResult {
  * fields from the fixed per-action template. Returns null for any validation
  * failure - callers store plain chat when this returns null.
  */
+const ALIAS_NAME_RE = /^[a-z0-9_-]+$/i;
+const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", "max"]);
+const VALID_LEADS = new Set<ProviderName>(["claude", "codex"]);
+
+function looksLikeAlias(value: string): boolean {
+  return ALIAS_NAME_RE.test(value) && !path.isAbsolute(value) && !value.includes("/") && !value.includes("\\");
+}
+
+function resolveAlias(
+  name: string,
+  store: Store,
+  configAliases: Record<string, string>,
+): { repoPath: string; record: AliasRecord | null } | null {
+  const key = name.toLowerCase();
+  // SQLite alias takes precedence
+  const sqlite = store.getAlias(key);
+  if (sqlite) return { repoPath: sqlite.repoPath, record: sqlite };
+  // Fall back to toml static alias
+  const tomlPath = configAliases[key];
+  if (tomlPath) return { repoPath: tomlPath, record: null };
+  return null;
+}
+
+function isGitRepo(repoPath: string): boolean {
+  return existsSync(path.join(repoPath, ".git"));
+}
+
 export function tryValidateAndSynthesize(
   raw: RawProposal,
   conversation: ConversationRecord,
   store: Store,
   latestUserMessage?: string,
+  configAliases: Record<string, string> = {},
 ): SynthesizedProposal | null {
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
@@ -279,17 +321,38 @@ export function tryValidateAndSynthesize(
   if (action === "create_plan") {
     if (!userIntentAllowsCreatePlan(latestUserMessage)) return null;
     const goal = raw.goal?.trim() ?? "";
-    const repoPath = raw.repoPath?.trim() ?? "";
+    let repoPath = raw.repoPath?.trim() ?? "";
     if (!goal || !repoPath) return null;
     if (conversation.runId) return null; // create_plan is global-chat only
-    const lead = raw.lead === "codex" ? "codex" : "claude";
-    const validProfiles = new Set(["cheap", "balanced", "reasoning", "max"]);
-    const profile = raw.profile && validProfiles.has(raw.profile) ? raw.profile : "balanced";
+
+    // Resolve alias if repoPath looks like a shorthand name
+    let aliasUsed: string | null = null;
+    let aliasRecord: AliasRecord | null = null;
+    if (looksLikeAlias(repoPath)) {
+      const resolved = resolveAlias(repoPath, store, configAliases);
+      if (!resolved) return null; // unknown alias — don't pass bad path to CLI
+      aliasUsed = repoPath.toLowerCase();
+      aliasRecord = resolved.record;
+      repoPath = resolved.repoPath;
+    }
+
+    // Validate resolved path is a real git repo
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+
+    const lead: ProviderName = raw.lead === "codex" ? "codex" : (aliasRecord?.lead ?? "claude");
+    const profile: AgentProfile = (raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile))
+      ? raw.profile as AgentProfile
+      : (aliasRecord?.profile ?? "balanced");
+
+    // Touch alias lastUsedAt if we resolved one
+    if (aliasUsed) store.touchAlias(aliasUsed);
+
     const commandCli = `duet plan --repo "${repoPath}" --lead ${lead} "${goal}"`;
     const commandJson = JSON.stringify({ action: "create_plan", goal, repoPath, lead, profile });
+    const aliasNote = aliasUsed ? ` (alias: ${aliasUsed})` : "";
     const summary = raw.rationale
       ? raw.rationale.slice(0, 500)
-      : `Proposed: create plan — ${goal.slice(0, 100)}`;
+      : `Proposed: create plan — ${goal.slice(0, 100)}${aliasNote}`;
     return {
       action: "create_plan",
       commandCli,
@@ -300,16 +363,44 @@ export function tryValidateAndSynthesize(
     };
   }
 
+  if (action === "set_alias") {
+    if (conversation.runId) return null; // global-chat only
+    const name = raw.name?.trim().toLowerCase() ?? "";
+    const repoPath = raw.repoPath?.trim() ?? "";
+    if (!name || !repoPath) return null;
+    if (!ALIAS_NAME_RE.test(name)) return null;
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+    const lead: ProviderName | undefined = (raw.lead && VALID_LEADS.has(raw.lead as ProviderName))
+      ? raw.lead as ProviderName
+      : undefined;
+    const profile: AgentProfile | undefined = (raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile))
+      ? raw.profile as AgentProfile
+      : undefined;
+    const description = raw.description?.slice(0, 200);
+    const commandJson = JSON.stringify({ action: "set_alias", name, repoPath, lead, profile, description });
+    const summary = raw.rationale
+      ? raw.rationale.slice(0, 500)
+      : `Save alias "${name}" → ${repoPath}`;
+    return {
+      action: "set_alias",
+      commandCli: "",
+      commandJson,
+      tier: "ordinary",
+      summary,
+      expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
+    };
+  }
+
   if (action === "set_strategy") {
     if (conversation.runId) return null; // global-chat only
-    const validLeads = new Set(["codex", "claude"]);
-    if (raw.lead && !validLeads.has(raw.lead)) {
+    if (raw.lead && !VALID_LEADS.has(raw.lead as ProviderName)) {
       console.warn(`[set_strategy] unrecognised lead value "${raw.lead}"; rejecting proposal`);
       return null;
     }
-    const lead = raw.lead === "codex" ? "codex" : "claude";
-    const validProfiles = new Set(["cheap", "balanced", "reasoning", "max"]);
-    const profile = raw.profile && validProfiles.has(raw.profile) ? raw.profile : "balanced";
+    const lead: ProviderName = raw.lead === "codex" ? "codex" : "claude";
+    const profile: AgentProfile = (raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile))
+      ? raw.profile as AgentProfile
+      : "balanced";
     const commandCli = ``;
     const commandJson = JSON.stringify({ action: "set_strategy", lead, profile });
     const summary = raw.rationale
@@ -601,6 +692,7 @@ function runChangingAction(action: ProposalAction): boolean {
       return true;
     case "create_plan":
     case "set_strategy":
+    case "set_alias":
     default:
       return false;
   }
@@ -616,6 +708,12 @@ function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand
   if (proposal.action === "create_plan") {
     throw new DuetError(
       "create_plan proposals are dispatched by the server, not commandForProposal.",
+      "INVALID_PROPOSAL",
+    );
+  }
+  if (proposal.action === "set_alias") {
+    throw new DuetError(
+      "set_alias proposals are dispatched by the server, not commandForProposal.",
       "INVALID_PROPOSAL",
     );
   }

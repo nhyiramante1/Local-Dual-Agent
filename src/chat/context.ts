@@ -249,6 +249,7 @@ export function buildManagerChatContext(
   conversation: ConversationRecord,
   budget: ManagerBudget,
   inputOptions: Partial<ChatContextOptions> = {},
+  configAliases: Record<string, string> = {},
 ): ChatContextResult {
   const options = withDefaults(inputOptions);
   const metadata: ChatContextMetadata = {
@@ -300,6 +301,9 @@ export function buildManagerChatContext(
   const setStrategyEntry = conversation.runId
     ? ""
     : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
+  const setAliasEntry = conversation.runId
+    ? ""
+    : '  set_alias     {"action":"set_alias","name":"NAME","repoPath":"FULL_PATH"} — global chat only; optional: lead, profile, description; saves alias for future create_plan calls';
 
   addSection(
     "Action Proposal Format",
@@ -312,10 +316,11 @@ export function buildManagerChatContext(
       "- Do NOT include command, commandCli, cli, tier, or commandJson fields - the server synthesizes these.",
       "- Duplicate, nested, or mid-reply blocks are rejected and stored as plain chat.",
       "- If you lack sufficient information to propose, reply with plain text only.",
-      "- create_plan and set_strategy are only valid in global chat (no linked run).",
+      "- create_plan, set_strategy, and set_alias are only valid in global chat (no linked run).",
       "",
       "Supported actions (required fields shown):",
       ...(setStrategyEntry ? [setStrategyEntry] : []),
+      ...(setAliasEntry ? [setAliasEntry] : []),
       ...(createPlanEntry ? [createPlanEntry] : []),
       '  execute_run   {"action":"execute_run","runId":"RUN_ID"}',
       '  resume_run    {"action":"resume_run","runId":"RUN_ID"}',
@@ -497,6 +502,22 @@ export function buildManagerChatContext(
         // ignore malformed stored strategy
       }
     }
+    const sqliteAliases = store.listAliases();
+    const allAliases: string[] = [];
+    // SQLite aliases (dynamic, take precedence)
+    for (const a of sqliteAliases) {
+      const meta = [a.lead && `lead=${a.lead}`, a.profile && `profile=${a.profile}`].filter(Boolean).join(" ");
+      allAliases.push(`  ${a.name} → ${a.repoPath}${meta ? ` [${meta}]` : ""}${a.description ? ` — ${a.description}` : ""}`);
+    }
+    // TOML aliases not already overridden by SQLite
+    const sqliteNames = new Set(sqliteAliases.map((a) => a.name));
+    for (const [name, repoPath] of Object.entries(configAliases)) {
+      if (!sqliteNames.has(name)) allAliases.push(`  ${name} → ${repoPath} [static]`);
+    }
+    const aliasesLine = allAliases.length
+      ? `known_aliases:\n${allAliases.join("\n")}\nUse an alias name as the repoPath in create_plan to resolve it automatically.`
+      : "known_aliases: none (propose set_alias to save one)";
+
     addSection(
       "System Defaults",
       [
@@ -504,9 +525,9 @@ export function buildManagerChatContext(
         "default_profile: balanced",
         strategyLine,
         `known_repo_paths: ${repoPaths.length ? repoPaths.join(", ") : "none"}`,
-        "Note: Use a known_repo_path in create_plan proposals unless the operator provides a different path.",
+        aliasesLine,
       ].join("\n"),
-      500,
+      800,
       sections,
       metadata,
     );

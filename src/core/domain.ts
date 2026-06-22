@@ -4,6 +4,15 @@ export type ManagerProviderName = ProviderName | "openai";
 
 export type AgentProfile = "cheap" | "balanced" | "reasoning" | "max";
 
+export interface AliasRecord {
+  repoPath: string;
+  lead?: ProviderName;
+  profile?: AgentProfile;
+  description?: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 export type RunStatus =
   | "planning"
   | "awaiting_plan_approval"
@@ -194,6 +203,7 @@ export interface ConversationTurnRecord {
 export type ProposalAction =
   | "create_plan"
   | "set_strategy"
+  | "set_alias"
   | "execute_run"
   | "resume_run"
   | "retry_task"

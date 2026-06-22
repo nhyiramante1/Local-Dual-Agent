@@ -134,18 +134,16 @@ test("context includes recent conversation turns chronologically without a run",
     );
 
     assert.match(context.prompt, /## Manager Rules/);
-    assert.match(context.prompt, /helpful, conversational manager first/i);
-    assert.match(context.prompt, /Do not keep restating that you are the Duet manager/i);
-    assert.match(context.prompt, /This mode is read-only unless you emit a validated proposal suggestion/);
+    assert.match(context.prompt, /reasoning partner/i);
+    assert.match(context.prompt, /Conversation and reasoning come first/i);
+    assert.match(context.prompt, /Do not restate your role or limitations/i);
     assert.match(context.prompt, /untrusted/);
     assert.match(context.prompt, /## Action Proposal Format/);
     assert.match(context.prompt, /Proposals are suggestions only/);
     assert.match(context.prompt, /server synthesizes/);
-    assert.match(context.prompt, /create_plan and set_strategy are only valid in global chat/);
-    assert.match(context.prompt, /answer it directly before proposing any action/);
-    assert.match(context.prompt, /general tooling or workflow questions, answer normally/i);
-    assert.match(context.prompt, /do not tack on a proposal/i);
-    assert.match(context.prompt, /State limitations briefly and only when they matter/i);
+    assert.match(context.prompt, /create_plan.*set_strategy.*set_alias are only valid in global chat/);
+    assert.match(context.prompt, /general workflow or tooling questions, answer them directly/i);
+    assert.match(context.prompt, /Do not tack a proposal onto a conversational answer/i);
     assert.match(context.prompt, /## Conversation/);
     assert.doesNotMatch(context.prompt, /message 1/);
     assert.match(context.prompt, /message 4/);

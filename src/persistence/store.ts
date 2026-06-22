@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AgentProfile,
   AgentResult,
+  AliasRecord,
   ArtifactRecord,
   ConversationRecord,
   ConversationStatus,
@@ -2099,6 +2100,58 @@ export class Store {
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
       `)
       .run(key, value, new Date().toISOString());
+  }
+
+  getAlias(name: string): AliasRecord | null {
+    const raw = this.getServiceSetting(`alias:${name.toLowerCase()}`);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as AliasRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  setAlias(name: string, record: Omit<AliasRecord, "createdAt"> & { createdAt?: string }): void {
+    const existing = this.getAlias(name);
+    const now = new Date().toISOString();
+    const full: AliasRecord = {
+      repoPath: record.repoPath,
+      lead: record.lead,
+      profile: record.profile,
+      description: record.description,
+      createdAt: existing?.createdAt ?? record.createdAt ?? now,
+      lastUsedAt: record.lastUsedAt ?? existing?.lastUsedAt,
+    };
+    this.setServiceSetting(`alias:${name.toLowerCase()}`, JSON.stringify(full));
+  }
+
+  touchAlias(name: string): void {
+    const existing = this.getAlias(name);
+    if (!existing) return;
+    this.setAlias(name, { ...existing, lastUsedAt: new Date().toISOString() });
+  }
+
+  listAliases(): Array<{ name: string } & AliasRecord> {
+    const rows = this.db
+      .prepare("SELECT key, value FROM service_settings WHERE key LIKE 'alias:%'")
+      .all() as Array<{ key: string; value: string }>;
+    const result: Array<{ name: string } & AliasRecord> = [];
+    for (const row of rows) {
+      try {
+        const record = JSON.parse(row.value) as AliasRecord;
+        result.push({ name: row.key.slice("alias:".length), ...record });
+      } catch {
+        // skip malformed
+      }
+    }
+    return result;
+  }
+
+  deleteAlias(name: string): void {
+    this.db
+      .prepare("DELETE FROM service_settings WHERE key = ?")
+      .run(`alias:${name.toLowerCase()}`);
   }
 
   createProposal(input: {
