@@ -323,7 +323,10 @@ export function tryValidateAndSynthesize(
     if (!userIntentAllowsCreatePlan(latestUserMessage)) return null;
     const goal = raw.goal?.trim() ?? "";
     let repoPath = raw.repoPath?.trim() ?? "";
-    if (!goal || !repoPath) return null;
+    if (!goal || !repoPath) {
+      if (diagnostics) diagnostics.reason = `create_plan needs both a "goal" and a "repoPath" — ${!goal ? "goal" : "repoPath"} was missing.`;
+      return null;
+    }
     if (conversation.runId) return null; // create_plan is global-chat only
 
     // Resolve alias if repoPath looks like a shorthand name
@@ -374,7 +377,10 @@ export function tryValidateAndSynthesize(
     if (conversation.runId) return null; // global-chat only
     const name = raw.name?.trim().toLowerCase() ?? "";
     const repoPath = raw.repoPath?.trim() ?? "";
-    if (!name || !repoPath) return null;
+    if (!name || !repoPath) {
+      if (diagnostics) diagnostics.reason = `set_alias needs both a "name" and a "repoPath" — ${!name ? "name" : "repoPath"} was missing.`;
+      return null;
+    }
     if (!ALIAS_NAME_RE.test(name)) {
       if (diagnostics) diagnostics.reason = `Alias name "${name}" is invalid (use only letters, numbers, hyphens, and underscores).`;
       return null;

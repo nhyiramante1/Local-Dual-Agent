@@ -283,7 +283,7 @@ export function buildManagerChatContext(
       "- The operator clearly asks to start, execute, retry, resolve, cancel, or otherwise operate Duet (e.g. 'run it', 'create a plan', 'retry that task').",
       "- A worker provider is near_limit or blocked — emit a set_strategy proposal rather than just text advice.",
       "- You have enough context to propose accurately. If you are missing run_id, task_id, or repo path, ask for it — do not guess or invent a path.",
-      "- For create_plan: repoPath must be a known alias (from known_aliases below) or an exact path from known_repo_paths. If the operator names a repo you cannot match, ask them to provide the full path or run set_alias first.",
+      "- For create_plan: use the full absolute path the operator gives you directly as repoPath (it does not need to be pre-known), or a known alias name. Do NOT require an alias to be created first — set_alias is optional and only when the operator explicitly asks to save one. Once you have a goal and a path, emit the create_plan proposal; do not just say you will.",
       "",
       "Accuracy rules:",
       "- Only reference IDs and repo paths visible in the context sections below.",
@@ -304,7 +304,7 @@ export function buildManagerChatContext(
     : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
   const setAliasEntry = conversation.runId
     ? ""
-    : '  set_alias     {"action":"set_alias","name":"NAME","repoPath":"FULL_PATH"} — global chat only; optional: lead, profile, description; saves alias for future create_plan calls';
+    : '  set_alias     {"action":"set_alias","name":"NAME","repoPath":"FULL_PATH"} — global chat only; name is REQUIRED; optional: lead, profile, description. Only propose when the operator explicitly asks to save/name an alias — never as a prerequisite for create_plan.';
 
   addSection(
     "Action Proposal Format",
