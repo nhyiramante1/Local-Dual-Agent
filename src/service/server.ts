@@ -156,6 +156,7 @@ export class DuetService {
   readonly app: ApplicationCommands;
   readonly activities: ActivityManager;
   readonly chat: ChatActivityManager;
+  private readonly dashboardJs: string;
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
   });
@@ -173,6 +174,10 @@ export class DuetService {
   constructor(private readonly options: ServerOptions) {
     this.app = new ApplicationCommands(options.store);
     this.activities = new ActivityManager(this.app, options.instanceId);
+    this.dashboardJs = dashboardJs.replaceAll(
+      "__DUET_DEFAULT_MANAGER_PROVIDER__",
+      options.managerProvider ?? "codex",
+    );
     const chatProviders: ChatProviders = options.chatProviders ?? {
       claude: new ClaudeAdapter(),
       codex: new CodexAdapter(),
@@ -328,11 +333,7 @@ export class DuetService {
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.js") {
-        const js = dashboardJs.replaceAll(
-          "__DUET_DEFAULT_MANAGER_PROVIDER__",
-          this.options.managerProvider ?? "codex",
-        );
-        this.send(response, 200, js, "text/javascript; charset=utf-8");
+        this.send(response, 200, this.dashboardJs, "text/javascript; charset=utf-8");
         return;
       }
       if (request.method === "GET" && url.pathname === "/dashboard.css") {
