@@ -418,7 +418,14 @@ async function api(path, options = {}) {
   try {
     response = await fetch("/api/v1" + path, fetchOptions);
   } catch (err) {
-    if (err && err.name === "AbortError") throw new Error("Request timed out — the service may be slow or unreachable.");
+    if (err && err.name === "AbortError") {
+      // A timeout after a good boot almost always means a stale/black-holed
+      // pooled connection (common behind a VPN after a service restart) while
+      // the SSE stream may still look alive. A full reload drops the pool and
+      // reconnects fresh; reloadOnce has a cooldown so it cannot loop.
+      if (bootInstanceId) reloadOnce();
+      throw new Error("Request timed out — the service may be slow or unreachable.");
+    }
     throw err;
   } finally {
     clearTimeout(timer);
