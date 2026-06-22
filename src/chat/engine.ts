@@ -174,22 +174,20 @@ export class ChatEngine {
     // result is always set here — the try block throws on provider failure,
     // and the finally guard already checks `result` before asserting fingerprint.
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
-    // Gather the recent user messages (not just the single latest) so create_plan
-    // intent survives a natural multi-turn flow: "create a plan" -> answer the
-    // manager's follow-up questions -> "go ahead". Checking only the latest turn
-    // would wrongly block the proposal once the user moves past the word "plan".
+    // create_plan permission is decided from the CURRENT user message plus the
+    // immediately-previous manager turn — not from a loose window of old text
+    // and not from this reply (the model must never authorize its own proposal):
+    //   - current user message expresses planning intent, OR
+    //   - current user message is an affirmation AND the previous manager turn
+    //     offered to propose a plan ("create a plan" -> Q&A -> "go ahead").
     const recentTurns = this.store.listRecentConversationTurns(conversationId, 12);
-    const latestUserMessage = recentTurns
-      .filter((turn) => turn.role === "user")
-      .map((turn) => turn.content)
-      .join("\n");
-    // Whether the manager offered to propose a plan (this reply or a recent one).
-    // Lets a plain "go ahead" count as create_plan intent in that context only.
+    const latestUserMessage =
+      recentTurns.filter((turn) => turn.role === "user").at(-1)?.content ?? "";
+    const lastManagerTurn = recentTurns
+      .filter((turn) => turn.role === "manager")
+      .at(-1);
     const managerOfferedPlan =
-      INTENT_TO_PROPOSE_RE.test(result.finalText) ||
-      recentTurns.some(
-        (turn) => turn.role === "manager" && INTENT_TO_PROPOSE_RE.test(turn.content || ""),
-      );
+      !!lastManagerTurn && INTENT_TO_PROPOSE_RE.test(lastManagerTurn.content || "");
     // Parse any proposal block from the reply. Strip it from visible content.
     let parseResult = parseProposalBlock(result.finalText);
     // Visible content is the original reply (block stripped if it was inline).

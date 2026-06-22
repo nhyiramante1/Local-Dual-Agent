@@ -60,10 +60,11 @@ const CREATE_PLAN_INTENT_PATTERNS: readonly RegExp[] = [
   /\bdraft\s+(?:a\s+)?plan\b/i,
   /\bcome\s+up\s+with\s+(?:a\s+)?plan\b/i,
   /\bplan\s+(?:for|out|it|this)\b/i,
-  // Broader natural phrasings the original list missed.
-  /\bplanning\b/i,
+  // Broader natural phrasings the original list missed — kept phrase-specific so
+  // bare mentions like "what is planning poker?" do not count as intent.
+  /\bfor\s+planning\b/i,
   /\bpropose\b[^.!?\n]*\bplan\b/i,
-  /\bplan\b[^.!?\n]*\bpropose\b/i,
+  /\bplan(?:ning)?\b[^.!?\n]*\bpropose\b/i,
 ];
 
 // Affirmative confirmations ("go ahead", "yes do it") only count as create_plan
@@ -334,7 +335,13 @@ export function tryValidateAndSynthesize(
   const spec = ACTION_SPECS[action];
 
   if (action === "create_plan") {
-    if (!userIntentAllowsCreatePlan(latestUserMessage, managerOfferedPlan)) return null;
+    if (!userIntentAllowsCreatePlan(latestUserMessage, managerOfferedPlan)) {
+      if (diagnostics) {
+        diagnostics.reason =
+          'I can only turn this into a plan proposal when you ask for a plan, or confirm one I just offered. Ask me to create a plan, or say "go ahead" right after I offer one.';
+      }
+      return null;
+    }
     const goal = raw.goal?.trim() ?? "";
     let repoPath = raw.repoPath?.trim() ?? "";
     if (!goal || !repoPath) {

@@ -227,6 +227,11 @@ test("userIntentAllowsCreatePlan recognizes broader natural planning phrasing", 
   assert.equal(userIntentAllowsCreatePlan("propose a detailed plan for this"), true);
 });
 
+test("userIntentAllowsCreatePlan ignores bare planning mentions that are not requests", () => {
+  assert.equal(userIntentAllowsCreatePlan("what is planning poker?"), false);
+  assert.equal(userIntentAllowsCreatePlan("I am thinking about planning my week"), false);
+});
+
 test("userIntentAllowsCreatePlan accepts affirmations only after a manager plan offer", () => {
   // Bare affirmation with no manager offer must NOT trigger a plan.
   assert.equal(userIntentAllowsCreatePlan("go ahead"), false);
