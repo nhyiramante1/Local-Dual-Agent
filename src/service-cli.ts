@@ -76,25 +76,6 @@ function detectLanIpv4(): string | undefined {
   return undefined;
 }
 
-async function dashboardHost(
-  phone: boolean,
-): Promise<string> {
-  const config = await loadConfig();
-  if (!phone && !config.dashboard.persistentAccess) return "127.0.0.1";
-  if (config.dashboard.publicHost) return config.dashboard.publicHost;
-  if (config.service.host === "0.0.0.0" || config.service.host === "::") {
-    return detectLanIpv4() ?? "127.0.0.1";
-  }
-  if (
-    config.service.host === "127.0.0.1" ||
-    config.service.host === "localhost" ||
-    config.service.host === "::1"
-  ) {
-    return "127.0.0.1";
-  }
-  return config.service.host;
-}
-
 function printTask(task: TaskRecord): void {
   console.log(
     `${String(task.ordinal + 1).padStart(2)}  ${task.id.padEnd(18)} ${task.status.padEnd(14)} ${task.provider} -> ${task.reviewerProvider}`,
@@ -278,27 +259,44 @@ export async function serviceMain(): Promise<void> {
     const runId = args.shift();
     if (args.length) throw new DuetError("Usage: duet dashboard [RUN_ID] [--phone]", "INVALID_ARGUMENT");
     const config = await loadConfig();
-    const host = await dashboardHost(phone);
+    const port = client.info.port;
     const query = runId ? `?run=${encodeURIComponent(runId)}` : "";
-    const url =
-      phone || config.dashboard.persistentAccess
-        ? `http://${host}:${client.info.port}/${query}#access=${encodeURIComponent(
-            await loadOrCreateDashboardAccessToken(),
-          )}`
-        : `http://${host}:${client.info.port}/${query}#${
-            (
-              await client.post<{ ticket: string }>(
-                "/api/v1/dashboard/ticket",
-                {},
-                { unique: true },
-              )
-            ).ticket
-          }`;
-    console.log(url);
+    const reusable = phone || config.dashboard.persistentAccess;
+    // Reusable access token works for both links; a ticket is single-use so it
+    // can only back one link (the local one).
+    const fragment = reusable
+      ? `#access=${encodeURIComponent(await loadOrCreateDashboardAccessToken())}`
+      : `#${(await client.post<{ ticket: string }>("/api/v1/dashboard/ticket", {}, { unique: true })).ticket}`;
+
+    // The local link always points at loopback, which never routes through a VPN
+    // — the reliable way to reach the dashboard from this computer.
+    const localUrl = `http://127.0.0.1:${port}/${query}${fragment}`;
+
+    // The LAN link is for phones/other devices. Only meaningful with a reusable
+    // token (a ticket would already be consumed by the local link).
+    let lanHost: string | null = null;
+    if (reusable) {
+      lanHost =
+        config.dashboard.publicHost ??
+        (config.service.host === "0.0.0.0" || config.service.host === "::"
+          ? detectLanIpv4() ?? null
+          : null);
+      if (lanHost === "127.0.0.1" || lanHost === "localhost" || lanHost === "::1") lanHost = null;
+    }
+    const lanUrl = lanHost ? `http://${lanHost}:${port}/${query}${fragment}` : null;
+
+    console.log(`Local (this computer): ${localUrl}`);
+    if (lanUrl) {
+      console.log(`Mobile / LAN:          ${lanUrl}`);
+    } else if (reusable) {
+      console.log("Mobile / LAN:          (set dashboard.public_host in duet.toml to enable phone access)");
+    }
+
+    // Open the local link on this computer so the browser never hits the VPN.
     const { spawn } = await import("node:child_process");
-    const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]]
-      : process.platform === "darwin" ? ["open", [url]]
-      : ["xdg-open", [url]];
+    const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", localUrl]]
+      : process.platform === "darwin" ? ["open", [localUrl]]
+      : ["xdg-open", [localUrl]];
     spawn(opener[0] as string, opener[1] as string[], { detached: true, stdio: "ignore" }).unref();
     return;
   }
