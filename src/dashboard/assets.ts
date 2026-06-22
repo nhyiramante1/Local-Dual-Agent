@@ -356,6 +356,7 @@ code.inline-code{display:inline;padding:2px 5px}
   .chat-clear{width:auto;flex-shrink:0}
   .chat-turn{max-width:92%}
   .chat-turn.manager{max-width:100%;padding:4px 14px}
+  #chat-input{font-size:16px}
   /* larger touch targets in the run list */
   .run-btn{padding:13px 36px 13px 13px}
   .run-delete-btn{padding:6px 9px;font-size:13px;opacity:.8}
@@ -558,22 +559,25 @@ async function loadChat() {
   renderChatShell();
   q("chat-turns").innerHTML = '<span class="empty">Loading '+esc(chat.agent)+' manager conversation&#x2026;</span>';
   setChatEnabled(false);
-  setChatStatus("Loading manager voice: "+chat.agent+"...");
-  const params = selected ? "?runId="+encodeURIComponent(selected) : "";
-  const conversations = await api("/chat/conversations"+params);
-  for (const item of conversations) {
-    if (!selected && item.runId) continue;
-    rememberConversation(item);
-  }
-  const conversation = currentConversation();
-  if (!conversation) {
-    const scope = selected ? esc(chat.agent)+" manager" : "global";
-    q("chat-turns").innerHTML=(renderPendingTurn() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
-    setChatStatus("Ready. Manager voice: "+chat.agent+".");
+  try {
+    const params = selected ? "?runId="+encodeURIComponent(selected) : "";
+    const conversations = await api("/chat/conversations"+params);
+    for (const item of conversations) {
+      if (!selected && item.runId) continue;
+      rememberConversation(item);
+    }
+    const conversation = currentConversation();
+    if (!conversation) {
+      const scope = selected ? esc(chat.agent)+" manager" : "global";
+      q("chat-turns").innerHTML=(renderPendingTurn() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
+      setChatEnabled(!chatIsBusyForCurrentView());
+      return;
+    }
+    await refreshConversation(conversation.id);
+  } catch(error) {
+    showError(error.message);
     setChatEnabled(!chatIsBusyForCurrentView());
-    return;
   }
-  await refreshConversation(conversation.id);
 }
 async function clearChatContext() {
   if (chatIsBusyForCurrentView()) return;
@@ -1161,7 +1165,7 @@ q("chat-openai").onclick = async () => {
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
 q("chat-clear").onclick = async () => {
-  await clearChatContext().catch(error => setChatStatus(error.message, true));
+  await clearChatContext().catch(error => showError(error.message));
 };
 /* ── theme toggle ── */
 (function() {
