@@ -916,7 +916,7 @@ function renderReadiness(prepared) {
   const requirements = (prepared.requirements || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
   const warnings = (prepared.warnings || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
   const start = prepared.available && prepared.tier === "ordinary"
-    ? '<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(prepared.proposalId)+'"><button type="button" disabled data-proposal-start="'+esc(prepared.proposalId)+'" data-run-version="'+esc(prepared.run?.version ?? "")+'" data-task-version="'+esc(prepared.task?.version ?? "")+'">Start operation</button></div>'
+    ? '<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(prepared.proposalId)+'"><button type="button" disabled data-proposal-start="'+esc(prepared.proposalId)+'" data-proposal-action="'+esc(prepared.action || "")+'" data-run-version="'+esc(prepared.run?.version ?? "")+'" data-task-version="'+esc(prepared.task?.version ?? "")+'">Start operation</button></div>'
     : "";
   return '<div><b>'+state+'</b></div>'+run+task+blocked+
     (requirements ? '<div class="proposal-copy">Requirements</div><ul>'+requirements+'</ul>' : "")+
@@ -952,7 +952,20 @@ async function dismissProposal(proposalId) {
 async function prepareProposal(proposalId) {
   const conversation = currentConversation();
   if (!conversation) return;
-  const prepared = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/prepare");
+  let prepared;
+  try {
+    prepared = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/prepare");
+  } catch (error) {
+    // A proposal that has already been started/dismissed/expired is no longer
+    // preparable — that is expected, not an error worth alarming the operator.
+    if (/no longer active|already been started|not in conversation|expired/i.test(error.message || "")) {
+      const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
+      if (panel) panel.innerHTML = '<div class="muted">This suggestion has already been started or is no longer pending.</div>';
+      setChatStatus("This suggestion is no longer pending (it may already be running).");
+      return;
+    }
+    throw error;
+  }
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
   if (panel) panel.innerHTML = renderReadiness(prepared);
   setChatStatus(prepared.available ? "Suggestion checked. Copy the CLI command if you choose to proceed." : "Suggestion checked, but it is not currently ready.");
@@ -968,36 +981,29 @@ async function startProposal(proposalId, button) {
     idempotencyKey: requestKey("dashboard-proposal-start"),
     body
   });
+  // create_plan kicks off a planner run; other actions are quick mutations.
+  const isPlan = (button.dataset.proposalAction || "") === "create_plan";
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
-  if (panel) panel.innerHTML = '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
-  await pollOperation(operation.id, conversation.id, "Duet operation");
+  if (panel) panel.innerHTML = isPlan
+    ? '<div><b>Generating plan…</b></div><div class="kv">A planner agent is working — this can take a minute. The run appears in the sidebar; watch the Timeline for live progress.</div>'
+    : '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
+  await pollOperation(operation.id, conversation.id, isPlan ? "Plan generation" : "Duet operation");
+  // Surface the result reliably by opening the new run (its Plan and Timeline
+  // panels render the plan dependably — far more robust than injecting a bubble
+  // into a chat thread that pollOperation may have just re-rendered).
   try {
     const completedOp = await api("/operations/"+encodeURIComponent(operation.id));
     if (completedOp.status === "succeeded" && completedOp.resultJson) {
       const result = JSON.parse(completedOp.resultJson);
       if (result && result.id) {
-        const msgs = await api("/runs/"+encodeURIComponent(result.id)+"/messages");
-        const planMsg = (msgs.value || msgs).find(m => m.kind === "plan");
-        if (planMsg) {
-          const card = q("chat-turns").querySelector('[data-proposal-id="'+CSS.escape(proposalId)+'"]');
-          if (card) {
-            let plan = { summary: "", tasks: [], risks: [] };
-            try { plan = JSON.parse(planMsg.body); } catch {}
-            const taskList = plan.tasks.map(t =>
-              '<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted" style="font-size:12px">'+esc(t.objective||"")+'</div></div>'
-            ).join("");
-            const riskList = plan.risks && plan.risks.length
-              ? '<div class="plan-section-head" style="margin-top:10px">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join("")
-              : "";
-            const bubble = document.createElement("div");
-            bubble.className = "chat-turn manager";
-            bubble.innerHTML = '<div class="turn-content"><div class="meta"><b>Plan</b>'+badge("ready")+'</div><div class="body"><div class="plan-card" style="padding:0"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div></div></div>';
-            card.after(bubble);
-          }
-        }
+        await loadRuns();
+        await selectRun(result.id);
+        setChatStatus("Plan ready — opened run "+result.id.slice(0,8)+". Review it in the Plan and Timeline panels.");
+        return;
       }
     }
   } catch {}
+  await loadRuns().catch(()=>{});
   if (selected) await selectRun(selected);
 }
 let approvalModal = { proposalId: null, runId: null, stage: null, bindingHash: null, runVersion: null };
@@ -1308,7 +1314,7 @@ async function connectEvents() {
     line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(label)+'</span>';
     q("events").prepend(line);
     }
-    if(item.type==="run.updated"||item.type==="task.updated") loadRuns().catch(()=>{});
+    if((item.type && item.type.indexOf("run.")===0)||item.type==="task.updated") loadRuns().catch(()=>{});
     const TERMINAL = new Set(["failed","cancelled","merged","cleaned_up"]);
     if(item.type==="provider.attempt_started" && item.payload) {
       if(activeTimer) { clearInterval(activeTimer); activeTimer=null; }
