@@ -2,7 +2,7 @@ export const dashboardHtml = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Duet</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
@@ -69,7 +69,6 @@ export const dashboardHtml = `<!doctype html>
         <div class="chat-head">
           <div>
             <div class="chat-title"><b>Manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
-            <p class="muted">Ask about your runs, or select one for run-scoped context.</p>
           </div>
           <div class="chat-tools">
             <div class="chat-agents" role="group" aria-label="Manager voice">
@@ -232,6 +231,7 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .conn-muted{color:var(--muted);border-color:var(--line);background:var(--hover)}
 .error-banner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c53030;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;max-width:480px;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+#chat-status{display:none}
 .chat-head p{margin:3px 0 0}
 .chat-tools{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0}
 .chat-clear{width:auto;margin:0;padding:4px 12px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--muted);font-size:12px;font-weight:500;text-align:center}
@@ -301,7 +301,6 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
 .chat-form button{margin:0;text-align:center}
-@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-tools{align-items:stretch}.chat-agents{flex-wrap:wrap;border-radius:12px}.chat-clear{width:100%}.chat-form{grid-template-columns:1fr}}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
 .modal-overlay[hidden]{display:none}
 .modal{background:var(--surface);border:1px solid var(--line-2);border-radius:12px;padding:20px;width:min(600px,92vw);max-height:80vh;display:grid;gap:14px;overflow:auto}
@@ -327,8 +326,44 @@ code.inline-code{display:inline;padding:2px 5px}
 #chat-send:disabled{opacity:.4;cursor:not-allowed}
 #chat-send:not(:disabled):hover{opacity:.82}
 #chat-send svg{pointer-events:none}
-/* ── responsive ── */
-@media(max-width:760px){main{grid-template-columns:1fr;height:auto;overflow:auto}aside{height:auto}.aside-bottom{height:auto;max-height:none}.section{height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-tools{align-items:stretch}.chat-agents{flex-wrap:wrap;border-radius:12px}.chat-clear{width:100%}}
+/* ── responsive: phone (bottom tab bar + section drawer, chat as home) ── */
+@media(max-width:760px){
+  header{padding:10px 14px}
+  .brand .sub{display:none}
+  main{display:flex;flex-direction:column;height:calc(100dvh - 53px)}
+  aside{flex:none}
+  /* icon rail becomes a fixed bottom tab bar */
+  .aside-rail{position:fixed;left:0;right:0;bottom:0;z-index:60;width:auto;height:calc(56px + env(safe-area-inset-bottom,0px));flex-direction:row;justify-content:space-around;align-items:flex-start;gap:2px;padding:4px 4px env(safe-area-inset-bottom,0px);border-right:0;border-top:1px solid var(--line);background:var(--surface);box-shadow:0 -2px 12px rgba(0,0,0,.18)}
+  .aside-rail-btn{width:44px;height:44px;font-size:18px;border-radius:10px}
+  .aside-rail-btn.rail-top{display:none}
+  /* section list becomes a drawer between header and tab bar */
+  .aside-inner{position:fixed;left:0;right:0;top:53px;bottom:56px;z-index:55;background:var(--bg);display:none;border-bottom:0}
+  main:not(.sidebar-collapsed) .aside-inner{display:flex}
+  main.sidebar-collapsed{grid-template-columns:1fr}
+  #summary{display:none}
+  .aside-sec-head{padding:14px 16px 10px}
+  .aside-section>div:last-child,.aside-section>pre{padding:12px 16px}
+  /* chat fills the screen and clears the bottom tab bar */
+  section{padding:10px 0 calc(66px + env(safe-area-inset-bottom,0px));flex:1;min-height:0}
+  .chat-resize-handle{display:none}
+  #chat{border:0;padding:0}
+  .chat-head{flex-direction:row;align-items:center;gap:6px}
+  .chat-head>div:first-child{display:none}
+  #chat-status{display:none}
+  .chat-tools{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;width:100%}
+  .chat-agents{flex:1;justify-content:space-between}
+  .chat-agents button{flex:1}
+  .chat-clear{width:auto;flex-shrink:0}
+  .chat-turn{max-width:92%}
+  .chat-turn.manager{max-width:100%;padding:4px 14px}
+  /* larger touch targets in the run list */
+  .run-btn{padding:13px 36px 13px 13px}
+  .run-delete-btn{padding:6px 9px;font-size:13px;opacity:.8}
+  /* approval modal stays usable at phone width */
+  .modal{width:min(600px,94vw);padding:16px;max-height:88vh}
+  .proposal-confirm{grid-template-columns:1fr}
+  .proposal-confirm button{width:100%}
+}
 `;
 
 export const dashboardJs = `
@@ -1208,19 +1243,29 @@ async function connectEvents() {
     });
     try{localStorage.setItem("duet-aside-section",name);}catch(e){}
   }
-  function setCollapsed(collapsed){
+  const isMobile=function(){return window.matchMedia("(max-width:760px)").matches;};
+  function setCollapsed(collapsed,persist){
     if(!mainEl)return;
     mainEl.classList.toggle("sidebar-collapsed",collapsed);
     if(toggleBtn){toggleBtn.innerHTML=collapsed?"&#9654;":"&#9664;";toggleBtn.title=collapsed?"Expand sidebar":"Collapse sidebar";}
-    try{localStorage.setItem("duet-sidebar-collapsed",collapsed?"1":"0");}catch(e){}
+    if(persist!==false){try{localStorage.setItem("duet-sidebar-collapsed",collapsed?"1":"0");}catch(e){}}
   }
-  setCollapsed(localStorage.getItem("duet-sidebar-collapsed")==="1");
+  // On a phone the chat is the home view, so the section drawer starts closed.
+  // Skip persistence so this does not clobber the saved desktop preference.
+  if(isMobile())setCollapsed(true,false);
+  else setCollapsed(localStorage.getItem("duet-sidebar-collapsed")==="1");
   setSection(activeSection);
   if(toggleBtn)toggleBtn.addEventListener("click",function(){setCollapsed(!mainEl.classList.contains("sidebar-collapsed"));});
   document.querySelectorAll(".aside-rail-btn[data-section]").forEach(function(btn){
     btn.addEventListener("click",function(){
+      const name=btn.getAttribute("data-section");
+      // On mobile, tapping the already-open section's tab returns to chat.
+      if(isMobile()&&activeSection===name&&!mainEl.classList.contains("sidebar-collapsed")){
+        setCollapsed(true,false);
+        return;
+      }
       setCollapsed(false);
-      setSection(btn.getAttribute("data-section"));
+      setSection(name);
     });
   });
 })();

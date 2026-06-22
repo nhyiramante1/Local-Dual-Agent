@@ -360,7 +360,7 @@ export class DuetService {
         const session = randomBytes(24).toString("base64url");
         this.sessions.set(session, Date.now() + 8 * 60 * 60_000);
         this.send(response, 204, "", "text/plain", {
-          "set-cookie": `duet_session=${encodeURIComponent(session)}; HttpOnly; SameSite=Strict; Path=/`,
+          "set-cookie": `duet_session=${encodeURIComponent(session)}; HttpOnly; SameSite=Lax; Path=/`,
         });
         return;
       }
