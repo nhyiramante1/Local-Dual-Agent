@@ -169,9 +169,15 @@ export class ChatEngine {
     // result is always set here — the try block throws on provider failure,
     // and the finally guard already checks `result` before asserting fingerprint.
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
+    // Gather the recent user messages (not just the single latest) so create_plan
+    // intent survives a natural multi-turn flow: "create a plan" -> answer the
+    // manager's follow-up questions -> "go ahead". Checking only the latest turn
+    // would wrongly block the proposal once the user moves past the word "plan".
     const latestUserMessage = this.store
-      .listRecentConversationTurns(conversationId, 1)
-      .find((turn) => turn.role === "user")?.content;
+      .listRecentConversationTurns(conversationId, 12)
+      .filter((turn) => turn.role === "user")
+      .map((turn) => turn.content)
+      .join("\n");
     // Parse any proposal block from the reply. Strip it from visible content.
     const parseResult = parseProposalBlock(result.finalText);
     let contentToStore =
