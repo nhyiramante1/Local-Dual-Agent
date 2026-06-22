@@ -59,7 +59,20 @@ const CREATE_PLAN_INTENT_PATTERNS: readonly RegExp[] = [
   /\bpropose\s+(?:a\s+)?plan\b/i,
   /\bdraft\s+(?:a\s+)?plan\b/i,
   /\bcome\s+up\s+with\s+(?:a\s+)?plan\b/i,
-  /\bplan\s+(?:for|out)\b/i,
+  /\bplan\s+(?:for|out|it|this)\b/i,
+  // Broader natural phrasings the original list missed.
+  /\bplanning\b/i,
+  /\bpropose\b[^.!?\n]*\bplan\b/i,
+  /\bplan\b[^.!?\n]*\bpropose\b/i,
+];
+
+// Affirmative confirmations ("go ahead", "yes do it") only count as create_plan
+// intent when the manager's previous turn actually offered to propose a plan —
+// otherwise a bare "yes" elsewhere in the chat must not trigger a plan.
+const AFFIRMATIVE_PATTERNS: readonly RegExp[] = [
+  /\bgo\s+ahead\b/i,
+  /\b(?:yes|yeah|yep|yup|sure|ok|okay)\b[^.!?\n]*\b(?:go|proceed|do it|create|plan|propose)\b/i,
+  /\b(?:proceed|do it|let'?s go|sounds good|go for it|please do)\b/i,
 ];
 
 export interface PreparedProposalAction {
@@ -314,13 +327,14 @@ export function tryValidateAndSynthesize(
   latestUserMessage?: string,
   configAliases: Record<string, string> = {},
   diagnostics?: { reason?: string },
+  managerOfferedPlan = false,
 ): SynthesizedProposal | null {
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
   const spec = ACTION_SPECS[action];
 
   if (action === "create_plan") {
-    if (!userIntentAllowsCreatePlan(latestUserMessage)) return null;
+    if (!userIntentAllowsCreatePlan(latestUserMessage, managerOfferedPlan)) return null;
     const goal = raw.goal?.trim() ?? "";
     let repoPath = raw.repoPath?.trim() ?? "";
     if (!goal || !repoPath) {
@@ -476,11 +490,20 @@ export function tryValidateAndSynthesize(
 
 export function userIntentAllowsCreatePlan(
   latestUserMessage?: string,
+  managerOfferedPlan = false,
 ): boolean {
   if (!latestUserMessage) return false;
   const message = latestUserMessage.trim();
   if (!message) return false;
-  return CREATE_PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message));
+  if (CREATE_PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message))) {
+    return true;
+  }
+  // A plain affirmation only counts when the manager just offered to propose a
+  // plan — this is the natural "create a plan" -> Q&A -> "go ahead" flow.
+  return (
+    managerOfferedPlan &&
+    AFFIRMATIVE_PATTERNS.some((pattern) => pattern.test(message))
+  );
 }
 
 export function prepareProposalAction(

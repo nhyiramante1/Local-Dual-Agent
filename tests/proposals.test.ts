@@ -221,6 +221,24 @@ test("userIntentAllowsCreatePlan distinguishes planning requests from ordinary q
   assert.equal(userIntentAllowsCreatePlan("/plan build the feature"), true);
 });
 
+test("userIntentAllowsCreatePlan recognizes broader natural planning phrasing", () => {
+  assert.equal(userIntentAllowsCreatePlan("For planning, please propose the approach and dependencies"), true);
+  assert.equal(userIntentAllowsCreatePlan("can you plan it out for the repo"), true);
+  assert.equal(userIntentAllowsCreatePlan("propose a detailed plan for this"), true);
+});
+
+test("userIntentAllowsCreatePlan accepts affirmations only after a manager plan offer", () => {
+  // Bare affirmation with no manager offer must NOT trigger a plan.
+  assert.equal(userIntentAllowsCreatePlan("go ahead"), false);
+  assert.equal(userIntentAllowsCreatePlan("yes that is the goal"), false);
+  // Same affirmation IS intent once the manager has offered to propose a plan.
+  assert.equal(userIntentAllowsCreatePlan("go ahead", true), true);
+  assert.equal(userIntentAllowsCreatePlan("yes, go for it", true), true);
+  assert.equal(userIntentAllowsCreatePlan("proceed", true), true);
+  // An unrelated reply after an offer still does not count.
+  assert.equal(userIntentAllowsCreatePlan("what time is it?", true), false);
+});
+
 test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {
   await withStore(async (store) => {
     const conversation = seed(store);

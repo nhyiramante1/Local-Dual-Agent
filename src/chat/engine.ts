@@ -178,11 +178,18 @@ export class ChatEngine {
     // intent survives a natural multi-turn flow: "create a plan" -> answer the
     // manager's follow-up questions -> "go ahead". Checking only the latest turn
     // would wrongly block the proposal once the user moves past the word "plan".
-    const latestUserMessage = this.store
-      .listRecentConversationTurns(conversationId, 12)
+    const recentTurns = this.store.listRecentConversationTurns(conversationId, 12);
+    const latestUserMessage = recentTurns
       .filter((turn) => turn.role === "user")
       .map((turn) => turn.content)
       .join("\n");
+    // Whether the manager offered to propose a plan (this reply or a recent one).
+    // Lets a plain "go ahead" count as create_plan intent in that context only.
+    const managerOfferedPlan =
+      INTENT_TO_PROPOSE_RE.test(result.finalText) ||
+      recentTurns.some(
+        (turn) => turn.role === "manager" && INTENT_TO_PROPOSE_RE.test(turn.content || ""),
+      );
     // Parse any proposal block from the reply. Strip it from visible content.
     let parseResult = parseProposalBlock(result.finalText);
     // Visible content is the original reply (block stripped if it was inline).
@@ -237,6 +244,7 @@ export class ChatEngine {
             latestUserMessage,
             this.configAliases,
             diagnostics,
+            managerOfferedPlan,
           )
         : null;
     if (parseResult.kind === "invalid") {
@@ -247,7 +255,7 @@ export class ChatEngine {
     } else if (parseResult.kind === "parsed" && synthesized === null) {
       const isIntentBlocked =
         parseResult.raw.action === "create_plan" &&
-        !userIntentAllowsCreatePlan(latestUserMessage);
+        !userIntentAllowsCreatePlan(latestUserMessage, managerOfferedPlan);
       void serviceLog(
         "warning",
         isIntentBlocked
