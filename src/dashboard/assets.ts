@@ -397,6 +397,7 @@ const renderedEventSeqs = new Set();
 let activeAttempt = null; // { provider, role, taskId, taskOrdinal, startedAt }
 let activeTimer = null;
 let runTasks = []; // task list from last selectRun
+let bootInstanceId = null; // service instance seen at page load; a change means a restart
 function requestKey(prefix) {
   const id = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
   return prefix + "-" + id;
@@ -1340,7 +1341,23 @@ async function connectEvents() {
     }
   });
   stream.addEventListener("duet.reset",()=>location.reload());
-  stream.onerror=()=>{ if(eventStream===stream) setConn("reconnecting"); setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000); };
+  stream.onerror=()=>{
+    if(eventStream===stream) setConn("reconnecting");
+    setTimeout(async ()=>{
+      if (eventStream !== stream) return;
+      // A dropped stream often means the service restarted (e.g. npm run up).
+      // If the instance changed, the old session and stale assets are gone --
+      // reload to re-auth cleanly and pick up fresh JS instead of hanging.
+      try {
+        const h = await api("/health", { timeoutMs: 5000 });
+        if (bootInstanceId && h.instanceId && h.instanceId !== bootInstanceId) {
+          location.reload();
+          return;
+        }
+      } catch (e) { /* still down — fall through and retry the stream */ }
+      if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); }
+    },2000);
+  };
 }
 (function(){
   const chatHandle=document.getElementById("chat-resize-handle");
@@ -1396,6 +1413,6 @@ async function connectEvents() {
 })();
 await authenticate();
 renderChatShell();
-try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
+try{const h=await api("/health");bootInstanceId=h.instanceId;q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
 catch(error){q("health").textContent=error.message;q("health").className="pill bad"}
 `;
