@@ -71,10 +71,13 @@ export const dashboardHtml = `<!doctype html>
             <div class="chat-title"><b>Manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
             <p class="muted">Ask about your runs, or select one for run-scoped context.</p>
           </div>
-          <div class="chat-agents" role="group" aria-label="Manager voice">
-            <button id="chat-codex" type="button" data-agent="codex">Codex</button>
-            <button id="chat-claude" type="button" data-agent="claude">Claude</button>
-            <button id="chat-openai" type="button" data-agent="openai">OpenAI</button>
+          <div class="chat-tools">
+            <div class="chat-agents" role="group" aria-label="Manager voice">
+              <button id="chat-codex" type="button" data-agent="codex">Codex</button>
+              <button id="chat-claude" type="button" data-agent="claude">Claude</button>
+              <button id="chat-openai" type="button" data-agent="openai">OpenAI</button>
+            </div>
+            <button id="chat-clear" type="button" class="chat-clear" title="Start a fresh manager thread for the current run and voice">Clear context</button>
           </div>
         </div>
         <div id="chat-status" class="muted" role="status" aria-live="polite">Ask a question. Select a run for run-scoped context.</div>
@@ -230,6 +233,9 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .error-banner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c53030;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;max-width:480px;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
 .chat-head p{margin:3px 0 0}
+.chat-tools{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0}
+.chat-clear{width:auto;margin:0;padding:4px 12px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--muted);font-size:12px;font-weight:500;text-align:center}
+.chat-clear:hover:not(:disabled){background:var(--line);color:var(--text);border-color:var(--line-2)}
 /* ── provider segmented toggle ── */
 .chat-agents{display:inline-flex;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px;flex-shrink:0}
 .chat-agents button{width:auto;margin:0;padding:4px 13px;border-radius:999px;border:1px solid transparent;background:transparent;font-size:12px;font-weight:500;color:var(--muted);text-align:center;transition:background .12s,color .12s,border-color .12s}
@@ -295,7 +301,7 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
 .chat-form button{margin:0;text-align:center}
-@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-form{grid-template-columns:1fr}}
+@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-tools{align-items:stretch}.chat-agents{flex-wrap:wrap;border-radius:12px}.chat-clear{width:100%}.chat-form{grid-template-columns:1fr}}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
 .modal-overlay[hidden]{display:none}
 .modal{background:var(--surface);border:1px solid var(--line-2);border-radius:12px;padding:20px;width:min(600px,92vw);max-height:80vh;display:grid;gap:14px;overflow:auto}
@@ -322,7 +328,7 @@ code.inline-code{display:inline;padding:2px 5px}
 #chat-send:not(:disabled):hover{opacity:.82}
 #chat-send svg{pointer-events:none}
 /* ── responsive ── */
-@media(max-width:760px){main{grid-template-columns:1fr;height:auto;overflow:auto}aside{height:auto}.aside-bottom{height:auto;max-height:none}.section{height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-agents{flex-wrap:wrap;border-radius:12px}}
+@media(max-width:760px){main{grid-template-columns:1fr;height:auto;overflow:auto}aside{height:auto}.aside-bottom{height:auto;max-height:none}.section{height:auto}aside{border-right:0;border-bottom:1px solid var(--line)}.chat-head{display:grid}.chat-tools{align-items:stretch}.chat-agents{flex-wrap:wrap;border-radius:12px}.chat-clear{width:100%}}
 `;
 
 export const dashboardJs = `
@@ -534,6 +540,34 @@ async function loadChat() {
   }
   await refreshConversation(conversation.id);
 }
+async function clearChatContext() {
+  if (chatIsBusyForCurrentView()) return;
+  const body = {
+    interfaceAgent: chat.agent,
+    title: selected ? "Dashboard manager chat" : "Global manager chat",
+  };
+  if (selected) body.runId = selected;
+  setChatEnabled(false);
+  setChatStatus("Clearing context...");
+  try {
+    const conversation = await api("/chat/conversations", {
+      method: "POST",
+      idempotencyKey: requestKey("dashboard-chat-clear"),
+      body,
+    });
+    rememberConversation(conversation);
+    chat.pendingTurn = null;
+    await refreshConversation(conversation.id);
+    setChatStatus("Context cleared. Ready. Manager voice: "+chat.agent+".");
+    if (currentConversation()?.id === conversation.id && selected === conversation.runId) {
+      q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
+    }
+  } catch (error) {
+    setChatStatus(error.message, true);
+  } finally {
+    setChatEnabled(!chatIsBusyForCurrentView());
+  }
+}
 async function ensureConversation() {
   const existing = currentConversation();
   if (existing) return existing;
@@ -576,6 +610,7 @@ function setChatStatus(message, bad=false) {
 function setChatEnabled(enabled) {
   q("chat-input").disabled = !enabled;
   q("chat-send").disabled = !enabled;
+  q("chat-clear").disabled = !enabled;
 }
 function showError(message) {
   let banner = document.getElementById("error-banner");
@@ -1089,6 +1124,9 @@ q("chat-claude").onclick = async () => {
 q("chat-openai").onclick = async () => {
   chat.agent = "openai";
   await loadChat().catch(error => setChatStatus(error.message, true));
+};
+q("chat-clear").onclick = async () => {
+  await clearChatContext().catch(error => setChatStatus(error.message, true));
 };
 /* ── theme toggle ── */
 (function() {

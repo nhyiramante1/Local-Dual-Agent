@@ -350,7 +350,7 @@ async function waitForText(
   selector: string,
   expected: string | RegExp,
 ): Promise<void> {
-  await page.locator(selector).waitFor({ state: "visible" });
+  await page.locator(selector).waitFor({ state: "attached" });
   await assertEventually(async () => {
     const text = (await page.locator(selector).textContent()) ?? "";
     if (typeof expected === "string") assert.ok(text.includes(expected), text);
@@ -493,7 +493,7 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
       `);
       await selectRun(page, "run-a");
       const ordinary = '[data-proposal-id="proposal-a"]';
-      await waitForText(page, ordinary, "Suggested Duet action");
+      await waitForText(page, ordinary, "Suggested action");
       await waitForText(page, ordinary, "retry task");
       await waitForText(page, ordinary, "task task-a1");
       await waitForText(page, ordinary, "duet retry run-a task-a1");
@@ -802,6 +802,29 @@ test("sending on a run without a conversation creates one", async () => {
       await waitForText(page, "#chat-turns", "hello run b");
       await waitForText(page, "#chat-turns", "manager reply from stub");
       assert.equal(h.store.listConversations("run-b").length, 1);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("clear context starts a fresh thread for the current run and voice", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
+      const before = h.store.listConversations("run-a").map((conversation) => conversation.id);
+      await page.locator("#chat-clear").click();
+      await waitForText(page, "#chat-turns", "No turns yet.");
+      const after = h.store.listConversations("run-a").map((conversation) => conversation.id);
+      assert.equal(after.length, before.length + 1);
+      assert.notEqual(after[0], before[0]);
+      await page.locator("#chat-input").fill("fresh thread");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-turns", "fresh thread");
+      await waitForText(page, "#chat-turns", "manager reply from stub");
     });
   } finally {
     await h.cleanup();

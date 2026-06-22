@@ -9,6 +9,7 @@ import { appRoot } from "./paths.js";
 
 export interface DuetConfig {
   service: {
+    host: string;
     port: number | undefined;
   };
   orchestration: {
@@ -48,6 +49,7 @@ export interface DuetConfig {
   };
   dashboard: {
     persistentAccess: boolean;
+    publicHost: string | undefined;
   };
 }
 
@@ -63,6 +65,7 @@ const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex",
 
 export const defaultConfig: DuetConfig = {
   service: {
+    host: "127.0.0.1",
     port: undefined,
   },
   orchestration: {
@@ -102,6 +105,7 @@ export const defaultConfig: DuetConfig = {
   },
   dashboard: {
     persistentAccess: false,
+    publicHost: undefined,
   },
 };
 
@@ -167,6 +171,27 @@ export function validateConfig(value: unknown): DuetConfig {
     ["codex_max_output_tokens", config.budgets.codexMaxOutputTokens, 1],
     ["verification_timeout_seconds", config.verification.timeoutSeconds, 1],
   ];
+  if (
+    typeof config.service.host !== "string" ||
+    !isValidListenHost(config.service.host)
+  ) {
+    throw new DuetError(
+      "Invalid configuration value for service.host.",
+      "INVALID_CONFIG",
+    );
+  }
+  if (
+    config.dashboard.publicHost !== undefined &&
+    (
+      typeof config.dashboard.publicHost !== "string" ||
+      !isValidPublicHost(config.dashboard.publicHost)
+    )
+  ) {
+    throw new DuetError(
+      "Invalid configuration value for dashboard.public_host.",
+      "INVALID_CONFIG",
+    );
+  }
   if (
     config.service.port !== undefined &&
     (
@@ -268,6 +293,23 @@ function parseEnvironment(value: unknown): Record<string, string> {
   return value as Record<string, string>;
 }
 
+function isValidListenHost(value: string): boolean {
+  return (
+    value === "127.0.0.1" ||
+    value === "localhost" ||
+    value === "::1" ||
+    value === "0.0.0.0" ||
+    value === "::"
+  );
+}
+
+function isValidPublicHost(value: string): boolean {
+  return (
+    /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value) ||
+    /^[a-z0-9.-]+$/i.test(value)
+  );
+}
+
 export async function loadConfig(configPath?: string): Promise<DuetConfig> {
   const candidate = configPath
     ? path.resolve(configPath)
@@ -293,6 +335,10 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
 
   return {
     service: {
+      host:
+        typeof service.host === "string" && isValidListenHost(service.host)
+          ? service.host
+          : defaultConfig.service.host,
       port:
         service.port === undefined
           ? defaultConfig.service.port
@@ -448,6 +494,11 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
     },
     dashboard: {
       persistentAccess: dashboard.persistent_access === true,
+      publicHost:
+        typeof dashboard.public_host === "string" &&
+        isValidPublicHost(dashboard.public_host)
+          ? dashboard.public_host
+          : defaultConfig.dashboard.publicHost,
     },
   };
 }

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile, realpath, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { ActivityManager, type LongRunningCommand } from "../application/activities.js";
@@ -37,11 +38,13 @@ interface ServerOptions {
   instanceId: string;
   config?: DuetConfig;
   idleTimeoutMs?: number;
+  listenHost?: string;
   listenPort?: number;
   onStop?: () => void;
   chatProviders?: ChatProviders;
   managerBudget?: ManagerBudget;
   managerProvider?: ManagerProviderName;
+  dashboardPublicHost?: string;
   dashboardAccessToken?: string;
 }
 
@@ -64,6 +67,44 @@ function equalSecret(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function normalizeHostName(value: string): string {
+  const trimmed = value.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return trimmed.toLowerCase();
+}
+
+function splitHostHeader(value: string): { hostname: string; port: string | undefined } {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    const match = /^\[([^\]]+)\](?::(\d+))?$/.exec(trimmed);
+    return {
+      hostname: normalizeHostName(match?.[1] ?? trimmed),
+      port: match?.[2],
+    };
+  }
+  const lastColon = trimmed.lastIndexOf(":");
+  if (lastColon > -1 && trimmed.indexOf(":") === lastColon) {
+    return {
+      hostname: normalizeHostName(trimmed.slice(0, lastColon)),
+      port: trimmed.slice(lastColon + 1),
+    };
+  }
+  return {
+    hostname: normalizeHostName(trimmed),
+    port: undefined,
+  };
+}
+
+function localInterfaceHosts(): Set<string> {
+  const hosts = new Set<string>(["127.0.0.1", "localhost", "::1"]);
+  hosts.add(normalizeHostName(os.hostname()));
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.address) hosts.add(normalizeHostName(entry.address));
+    }
+  }
+  return hosts;
 }
 
 function apiSuccess(requestId: string, data: unknown): string {
@@ -122,6 +163,7 @@ export class DuetService {
   private readonly sessions = new Map<string, number>();
   private readonly approvalFailures = new Map<string, { count: number; blockedUntil: number }>();
   private readonly idleTimeoutMs: number;
+  private readonly allowedHostnames: Set<string>;
   private activeStreams = 0;
   private readonly streams = new Set<ServerResponse>();
   private lastRequestAt = Date.now();
@@ -147,12 +189,23 @@ export class DuetService {
     // Marks interrupted operations (run + manager_turn) from prior instances.
     this.activities.recoverInterrupted();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 15 * 60_000;
+    this.allowedHostnames = localInterfaceHosts();
+    if (options.listenHost && options.listenHost !== "0.0.0.0" && options.listenHost !== "::") {
+      this.allowedHostnames.add(normalizeHostName(options.listenHost));
+    }
+    if (options.dashboardPublicHost) {
+      this.allowedHostnames.add(normalizeHostName(options.dashboardPublicHost));
+    }
   }
 
   async listen(): Promise<number> {
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
-      this.server.listen(this.options.listenPort ?? 0, "127.0.0.1", () => resolve());
+      this.server.listen(
+        this.options.listenPort ?? 0,
+        this.options.listenHost ?? "127.0.0.1",
+        () => resolve(),
+      );
     });
     this.idleTimer = setInterval(() => this.checkIdle(), 10_000);
     this.sweepTimer = setInterval(() => {
@@ -215,16 +268,22 @@ export class DuetService {
 
   private validateLocalRequest(request: IncomingMessage): void {
     const host = request.headers.host ?? "";
-    if (!/^127\.0\.0\.1:\d+$/.test(host) && !/^localhost:\d+$/.test(host) && !/^\[::1\]:\d+$/.test(host)) {
+    const parsedHost = splitHostHeader(host);
+    if (!parsedHost.port || !this.allowedHostnames.has(parsedHost.hostname)) {
       throw new DuetError("Invalid Host header.", "INVALID_HOST");
     }
     const origin = request.headers.origin;
-    if (
-      origin &&
-      origin !== `http://${host}` &&
-      origin !== `http://127.0.0.1:${host.split(":").at(-1)}`
-    ) {
-      throw new DuetError("Cross-origin request rejected.", "INVALID_ORIGIN");
+    if (origin) {
+      const parsedOrigin = new URL(origin);
+      const originHostname = normalizeHostName(parsedOrigin.hostname);
+      const originPort = parsedOrigin.port || (parsedOrigin.protocol === "https:" ? "443" : "80");
+      if (
+        parsedOrigin.protocol !== "http:" ||
+        originHostname !== parsedHost.hostname ||
+        originPort !== parsedHost.port
+      ) {
+        throw new DuetError("Cross-origin request rejected.", "INVALID_ORIGIN");
+      }
     }
   }
 

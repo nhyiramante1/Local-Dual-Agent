@@ -54,7 +54,9 @@ max_turns_per_day = 200
 
 
 [service]
+host = "0.0.0.0"
 port = 58208
 
 [dashboard]
 persistent_access = true
+public_host = "153.106.222.137"

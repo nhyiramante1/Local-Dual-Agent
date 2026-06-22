@@ -162,15 +162,19 @@ test("loadConfig reads fixed service port and persistent dashboard access mode",
   await withToml(
     `
 [service]
+host = "0.0.0.0"
 port = 58208
 
 [dashboard]
 persistent_access = true
+public_host = "192.168.1.50"
 `,
     async (tomlPath) => {
       const config = await loadConfig(tomlPath);
+      assert.equal(config.service.host, "0.0.0.0");
       assert.equal(config.service.port, 58208);
       assert.equal(config.dashboard.persistentAccess, true);
+      assert.equal(config.dashboard.publicHost, "192.168.1.50");
     },
   );
 });
