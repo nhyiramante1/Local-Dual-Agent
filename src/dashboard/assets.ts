@@ -1155,6 +1155,8 @@ q("chat-form").addEventListener("submit", async (event) => {
     q("chat-input").style.height = Math.min(q("chat-input").scrollHeight, 160) + "px";
     setChatStatus(error.message, true);
     setChatEnabled(!chatIsBusyForCurrentView());
+    const conv = currentConversation();
+    if (conv) refreshConversation(conv.id).catch(()=>{});
   }
 });
 q("chat-input").addEventListener("keydown", (event) => {
