@@ -1102,6 +1102,7 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
     }
   } catch (error) {
     setChatStatus(error.message, true);
+    refreshConversation(conversationId).catch(()=>{});
   } finally {
     chat.pendingTurn = null;
     if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
@@ -1288,6 +1289,10 @@ async function connectEvents() {
     if(item.type==="operation.updated" && item.operationId) {
       if(q("chat-turns").querySelector('[data-phi-operation="'+CSS.escape(item.operationId)+'"]')) {
         enrichHistoryOutcomes().catch(()=>{});
+      }
+      const TERMINAL_OP = new Set(["succeeded","failed","cancelled","interrupted"]);
+      if(chat.activeOperation && chat.activeOperation.id === item.operationId && item.payload && TERMINAL_OP.has(item.payload.status)) {
+        refreshConversation(chat.activeOperation.conversationId).catch(()=>{});
       }
     }
   });
