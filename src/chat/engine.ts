@@ -24,6 +24,11 @@ import {
 import { parseProposalBlock, tryValidateAndSynthesize, userIntentAllowsCreatePlan } from "./proposals.js";
 import { serviceLog } from "../service/logger.js";
 
+// Phrases a weaker manager model uses when it narrates an intent to propose but
+// forgets to emit the duet-proposal block. Used to trigger a single backstop retry.
+const INTENT_TO_PROPOSE_RE =
+  /\b(?:I (?:will |can |'ll |would )?propose|propose (?:the|a|this|an)\b|here is (?:the |a |my )?(?:proposal|plan)|a proposal can be|propose the following)/i;
+
 export const defaultManagerBudget: ManagerBudget = {
   claudeMaxUsdPerTurn: 0.5,
   claudeMaxUsdPerDay: 5,
@@ -179,11 +184,49 @@ export class ChatEngine {
       .map((turn) => turn.content)
       .join("\n");
     // Parse any proposal block from the reply. Strip it from visible content.
-    const parseResult = parseProposalBlock(result.finalText);
+    let parseResult = parseProposalBlock(result.finalText);
+    // Visible content is the original reply (block stripped if it was inline).
     let contentToStore =
       parseResult.kind === "parsed"
         ? parseResult.strippedText
         : result.finalText;
+    // Backstop for weaker manager models (e.g. Groq llama): they often narrate an
+    // intent to propose ("I propose the following plan:") without emitting the
+    // block. Retry once asking for ONLY the block. Gated to global chat (no
+    // fingerprint tracking) so it cannot affect a run's repository.
+    if (
+      parseResult.kind === "none" &&
+      !before &&
+      provider === "openai" &&
+      INTENT_TO_PROPOSE_RE.test(result.finalText)
+    ) {
+      try {
+        const retry = await adapter.run({
+          cwd,
+          prompt:
+            this.contextBuilder(conversation).prompt +
+            "\n\n---\nYou indicated you would propose an action but did not output a duet-proposal block. " +
+            "Reply with ONLY one ```duet-proposal fenced block containing the JSON object, and nothing else — no prose before or after.",
+          mode: "read-only",
+          timeoutMs: 60_000,
+          maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
+          shouldCancel,
+        });
+        const retryParse = parseProposalBlock(retry.finalText);
+        if (retryParse.kind === "parsed") {
+          // Keep the original narration as the visible message; the block came
+          // from the retry, so contentToStore stays as set above.
+          parseResult = retryParse;
+        } else if (retryParse.kind === "invalid") {
+          void serviceLog("warning", "manager proposal retry block was malformed", {
+            conversationId,
+            reason: retryParse.reason,
+          });
+        }
+      } catch {
+        // Retry failed (cancel, timeout, budget) — keep the original reply.
+      }
+    }
     const diagnostics: { reason?: string } = {};
     const synthesized =
       parseResult.kind === "parsed"
