@@ -167,21 +167,35 @@ These are architectural recommendations, not yet-completed implementation:
 - **Phase 6C (partial / dashboard polish)**: Run delete (× button, terminal
   runs only, cascades children), static timeline for finished runs, inline
   error banner, conversation context forwarded to planner on `create_plan`.
+- **Phase 5H**: `set_strategy` manager proposal that persists run lead/provider/
+  profile preferences (PR #17), plus manager-chat polish — conversational
+  defaults, `create_plan` intent gate (`userIntentAllowsCreatePlan`), and
+  optimistic pending-turn UI (PR #18).
+- **Phone dashboard access**: Fixed `[service].port`, `[dashboard]
+  .persistent_access` reusable access tokens, `duet dashboard --phone`, LAN-IP
+  detection, and a "Clear context" manager-chat button (PR #19).
+
+## Completed Phases (continued)
+
+- **Phase Next / Mobile + Conversational Manager** (`feature/improving-general-feel`,
+  pending PR):
+  - Bottom tab bar on mobile: icon rail becomes fixed bottom nav, sections open
+    as full-height drawer, chat is default home view. Mobile starts collapsed
+    without clobbering desktop localStorage preference. Tapping active tab closes
+    drawer.
+  - Phone access fixes: `SameSite=Lax` session cookie (was `Strict`, blocked
+    mobile browsers over LAN), `public_host` in `duet.toml`, `viewport-fit=cover`
+    + `env(safe-area-inset-bottom)` for iPhone home indicator.
+  - Manager chat head simplified: subtitle and status line hidden globally; on
+    mobile the title/conn row is also hidden, leaving only agent switcher and
+    Clear context.
+  - Manager prompt rewritten as reasoning partner. Conversation and reasoning
+    lead; proposal mode is secondary and only triggered when the operator clearly
+    asks to operate Duet. Repeated approval reminders and policy-wrapper framing
+    removed.
+  - Dropped stray `mkdir(codexHomePath())` startup side-effect from `duetd.ts`.
 
 ## Recommended Next Planning Targets
-
-### Phase 5H: Manager Strategy Proposals (structured)
-
-Goal:
-Turn manager strategy recommendations into actionable proposal cards, not just
-text advice.
-
-Key outcomes:
-
-- Manager can propose lead/provider/profile choices as a structured card.
-- Human approves the strategy card before it shapes the next run.
-- Cards show estimated cost/impact based on current usage and task weight.
-- Keeps the human-in-the-loop boundary intact.
 
 ### Phase 6C: Extension Points
 
@@ -217,7 +231,7 @@ npm run test:dashboard
 ## Planning Advice
 
 Start future branches from updated `main`, not old stacked feature branches.
-At the time of this note, `main` contains work through Phase 6B. Phase 5G and
-the Groq/OpenAI-compatible manager lane (5F extension) are on PR #16
-(`claude/legion-computer-access-bzsntl`) and not yet merged. Start the next
-phase from `main` after PR #16 merges.
+At the time of this note, `main` contains work through Phase 5H and phone
+dashboard access (PRs #16–#19 all merged). The current in-progress branch is
+`feature/improving-general-feel` (see In Progress above). Start the next phase
+from `main` after it merges.
