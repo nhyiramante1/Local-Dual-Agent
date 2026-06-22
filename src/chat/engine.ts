@@ -174,10 +174,11 @@ export class ChatEngine {
       .find((turn) => turn.role === "user")?.content;
     // Parse any proposal block from the reply. Strip it from visible content.
     const parseResult = parseProposalBlock(result.finalText);
-    const contentToStore =
+    let contentToStore =
       parseResult.kind === "parsed"
         ? parseResult.strippedText
         : result.finalText;
+    const diagnostics: { reason?: string } = {};
     const synthesized =
       parseResult.kind === "parsed"
         ? tryValidateAndSynthesize(
@@ -186,6 +187,7 @@ export class ChatEngine {
             this.store,
             latestUserMessage,
             this.configAliases,
+            diagnostics,
           )
         : null;
     if (parseResult.kind === "invalid") {
@@ -204,6 +206,12 @@ export class ChatEngine {
           : "manager proposal failed validation",
         { conversationId, action: parseResult.raw.action, runId: parseResult.raw.runId },
       );
+      // Surface the rejection reason to the operator so a dropped proposal is not
+      // silently invisible (the manager may have said "here is the proposal").
+      if (diagnostics.reason) {
+        contentToStore =
+          `${contentToStore}\n\n_⚠ Proposal could not be created: ${diagnostics.reason}_`.trim();
+      }
     }
 
     // Persist turn + optional proposal atomically.

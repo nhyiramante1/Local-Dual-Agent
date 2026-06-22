@@ -313,6 +313,7 @@ export function tryValidateAndSynthesize(
   store: Store,
   latestUserMessage?: string,
   configAliases: Record<string, string> = {},
+  diagnostics?: { reason?: string },
 ): SynthesizedProposal | null {
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
@@ -330,14 +331,20 @@ export function tryValidateAndSynthesize(
     let aliasRecord: AliasRecord | null = null;
     if (looksLikeAlias(repoPath)) {
       const resolved = resolveAlias(repoPath, store, configAliases);
-      if (!resolved) return null; // unknown alias — don't pass bad path to CLI
+      if (!resolved) {
+        if (diagnostics) diagnostics.reason = `No alias named "${repoPath}" exists. Provide a full path or create the alias first.`;
+        return null; // unknown alias — don't pass bad path to CLI
+      }
       aliasUsed = repoPath.toLowerCase();
       aliasRecord = resolved.record;
       repoPath = resolved.repoPath;
     }
 
     // Validate resolved path is a real git repo
-    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) {
+      if (diagnostics) diagnostics.reason = `The path "${repoPath}" is not a valid git repository (it must exist on disk and contain a .git directory).`;
+      return null;
+    }
 
     const lead: ProviderName = raw.lead === "codex" ? "codex" : (aliasRecord?.lead ?? "claude");
     const profile: AgentProfile = (raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile))
@@ -368,8 +375,14 @@ export function tryValidateAndSynthesize(
     const name = raw.name?.trim().toLowerCase() ?? "";
     const repoPath = raw.repoPath?.trim() ?? "";
     if (!name || !repoPath) return null;
-    if (!ALIAS_NAME_RE.test(name)) return null;
-    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+    if (!ALIAS_NAME_RE.test(name)) {
+      if (diagnostics) diagnostics.reason = `Alias name "${name}" is invalid (use only letters, numbers, hyphens, and underscores).`;
+      return null;
+    }
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) {
+      if (diagnostics) diagnostics.reason = `The path "${repoPath}" is not a valid git repository (it must exist on disk and contain a .git directory).`;
+      return null;
+    }
     const lead: ProviderName | undefined = (raw.lead && VALID_LEADS.has(raw.lead as ProviderName))
       ? raw.lead as ProviderName
       : undefined;
