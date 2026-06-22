@@ -409,7 +409,19 @@ async function api(path, options = {}) {
     fetchOptions.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
   }
   if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
-  const response = await fetch("/api/v1" + path, fetchOptions);
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs || 30000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  fetchOptions.signal = controller.signal;
+  let response;
+  try {
+    response = await fetch("/api/v1" + path, fetchOptions);
+  } catch (err) {
+    if (err && err.name === "AbortError") throw new Error("Request timed out — the service may be slow or unreachable.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   return payload.data;
