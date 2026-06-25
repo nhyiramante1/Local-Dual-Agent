@@ -71,4 +71,4 @@ port = 58208
 [dashboard]
 persistent_access = true
 # Set this only if you want a fixed LAN/public host for phone access.
-public_host = "153.106.222.137"
+public_host = "153.106.86.65"
