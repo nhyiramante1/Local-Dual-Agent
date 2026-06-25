@@ -312,6 +312,12 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .run-progress-title{font-weight:650;font-size:15px;margin-bottom:5px}
 .plan-dismiss{float:right;border:none;background:transparent;color:var(--muted,#888);cursor:pointer;font-size:14px;line-height:1;padding:0 2px;margin-left:8px}
 .plan-dismiss:hover{color:var(--text,#eee)}
+.chat-turn.working{opacity:.85}
+.working-dots{display:inline-flex;gap:4px;align-items:center;height:14px}
+.working-dots span{width:6px;height:6px;border-radius:50%;background:var(--muted,#888);display:inline-block;animation:working-bounce 1.2s infinite ease-in-out both}
+.working-dots span:nth-child(2){animation-delay:.16s}
+.working-dots span:nth-child(3){animation-delay:.32s}
+@keyframes working-bounce{0%,80%,100%{transform:scale(.5);opacity:.4}40%{transform:scale(1);opacity:1}}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -396,6 +402,7 @@ const chat = {
   pendingTurn: null,
   planOperations: new Map(),
   clearedHistory: new Set(),
+  activeActivity: null,
   statusError: null
 };
 let eventStream = null;
@@ -605,6 +612,40 @@ function renderPendingTurn() {
     +'<div class="meta"><b>You</b>'+badge("pending")+'<span>#…</span>'+ts+'</div>'
     +'<div class="body">'+visibleText(pending.content, 4000)+'</div>'
     +'</div></div>';
+}
+function managerActivityLabel(activity) {
+  if (!activity) return "Working…";
+  if (activity.phase === "tool") {
+    const map = {
+      list_runs: "Reviewing runs", inspect_run: "Inspecting a run",
+      check_path: "Checking a path", check_git_repo: "Checking the git repo",
+      resolve_alias: "Resolving an alias", search_files: "Searching files",
+      create_plan_proposal: "Preparing a plan suggestion",
+      set_strategy_proposal: "Preparing a strategy suggestion",
+      set_alias_proposal: "Preparing an alias suggestion",
+      request_agent_consultation: "Preparing a consultation"
+    };
+    return (map[activity.tool] || ("Using " + activity.tool)) + "…";
+  }
+  if (activity.phase === "summarizing") return "Writing the answer…";
+  return "Thinking…";
+}
+function renderManagerWorking() {
+  if (!chat.activeOperation || !pendingMatchesCurrentView()) return "";
+  const label = managerActivityLabel(chat.activeActivity);
+  return '<div class="chat-turn manager working" id="manager-working"><div class="manager-avatar"></div>'
+    +'<div class="turn-content"><div class="meta"><b>Manager: '+esc(chat.agent)+'</b>'+badge("working")
+    +'<span class="when">'+esc(label)+'</span></div>'
+    +'<div class="body"><span class="working-dots"><span></span><span></span><span></span></span></div></div></div>';
+}
+function updateManagerWorking() {
+  const host = q("chat-turns");
+  if (!host) return;
+  const existing = document.getElementById("manager-working");
+  const html = renderManagerWorking();
+  if (!html) { if (existing) existing.remove(); return; }
+  if (existing) { existing.outerHTML = html; }
+  else { host.insertAdjacentHTML("beforeend", html); host.scrollTop = host.scrollHeight; }
 }
 function renderRunProgressEmptyState() {
   if (!selected || !selectedRunDetail) return "";
@@ -843,7 +884,7 @@ function renderMarkdown(text) {
 }
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
-    q("chat-turns").innerHTML=renderPendingTurn() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
+    q("chat-turns").innerHTML=renderPendingTurn() + renderManagerWorking() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
     return;
   }
   const proposalsByTurn = new Map();
@@ -882,7 +923,7 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     }
     return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
   }).join("");
-  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
+  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderManagerWorking() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   enrichHistoryOutcomes().catch(() => {});
 }
@@ -1348,6 +1389,10 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
   try {
     while (true) {
       const operation = await api("/operations/"+encodeURIComponent(operationId));
+      if (["queued","running"].includes(operation.status)) {
+        chat.activeActivity = operation.activity || null;
+        updateManagerWorking();
+      }
       if (!["queued","running"].includes(operation.status)) {
         chat.pendingTurn = null;
         if (operation.status === "succeeded") {
@@ -1375,7 +1420,10 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
     refreshConversation(conversationId).catch(()=>{});
   } finally {
     chat.pendingTurn = null;
+    chat.activeActivity = null;
     if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
+    const working = document.getElementById("manager-working");
+    if (working) working.remove();
     setChatEnabled(!chatIsBusyForCurrentView());
   }
 }

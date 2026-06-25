@@ -69,6 +69,16 @@ export type ManagerToolRuntimeOptions = Pick<
   | "maxToolCallsPerTurn"
 >;
 
+// Live progress for a manager turn, surfaced to the dashboard while the turn
+// runs so the operator can see it is working and what it is doing.
+export interface ManagerActivity {
+  phase: "thinking" | "tool" | "summarizing";
+  tool?: string;
+  step: number;
+}
+
+export type ManagerActivityListener = (activity: ManagerActivity) => void;
+
 const defaultToolRuntimeOptions: ManagerToolRuntimeOptions = {
   nativeToolCalling: true,
   actionMode: "recommended",
@@ -176,6 +186,7 @@ export class ChatEngine {
     conversationId: string,
     operationId: string,
     shouldCancel?: () => boolean,
+    onActivity?: ManagerActivityListener,
   ): Promise<ConversationTurnRecord> {
     const conversation = this.store.getConversation(conversationId);
     const provider = conversation.interfaceAgent;
@@ -203,8 +214,12 @@ export class ChatEngine {
         cwd,
         before,
         shouldCancel,
+        onActivity,
       );
     }
+    // Non-tool providers do a single reasoning pass — report it so the operator
+    // sees the turn is alive even without tool steps.
+    onActivity?.({ phase: "thinking", step: 1 });
     let result: AgentResult | undefined;
     try {
       result = await adapter.run({
@@ -361,6 +376,7 @@ export class ChatEngine {
     cwd: string,
     before: Awaited<ReturnType<typeof fingerprintRepository>> | undefined,
     shouldCancel?: () => boolean,
+    onActivity?: ManagerActivityListener,
   ): Promise<ConversationTurnRecord> {
     // Consultation is a paid capability; only expose its tool when enabled for
     // this manager profile. Other tools are always available to a capable model.
@@ -377,6 +393,10 @@ export class ChatEngine {
     // bounds iterations, since every iteration that continues the loop must
     // consume at least one call.
     let budgetRemaining = Math.max(0, this.toolRuntime.maxToolCallsPerTurn);
+    let activityStep = 0;
+    const emit = (activity: Omit<ManagerActivity, "step">): void => {
+      onActivity?.({ ...activity, step: ++activityStep });
+    };
     let result: AgentResult | undefined;
     try {
       const prompt = this.toolContextBuilder(conversation).prompt;
@@ -385,6 +405,7 @@ export class ChatEngine {
       // answers in text (which ends the turn). With the loop disabled, this runs
       // exactly one tool round followed by one tool-free summarization pass.
       while (true) {
+        emit({ phase: "thinking" });
         const response = await adapter.run({
           cwd,
           prompt,
@@ -406,7 +427,7 @@ export class ChatEngine {
           break;
         }
         const allowed = requested.slice(0, budgetRemaining);
-        const stepExecutions = await this.executeToolCalls(allowed, conversation);
+        const stepExecutions = await this.executeToolCalls(allowed, conversation, emit);
         executions.push(...stepExecutions);
         budgetRemaining -= allowed.length;
         if (requested.length > allowed.length) {
@@ -440,6 +461,7 @@ export class ChatEngine {
           // Loop enabled but the call budget is spent mid-loop: one final
           // tool-free pass so the model writes a closing message over the
           // results instead of being cut off after a bare tool call.
+          emit({ phase: "summarizing" });
           const summary = await adapter.run({
             cwd,
             prompt,
@@ -510,9 +532,11 @@ export class ChatEngine {
   private async executeToolCalls(
     toolCalls: ManagerToolCall[],
     conversation: ConversationRecord,
+    emit?: (activity: Omit<ManagerActivity, "step">) => void,
   ): Promise<ManagerToolExecution[]> {
     const executions: ManagerToolExecution[] = [];
     for (const call of toolCalls) {
+      emit?.({ phase: "tool", tool: call.name });
       executions.push(
         await executeManagerTool({
           name: call.name,

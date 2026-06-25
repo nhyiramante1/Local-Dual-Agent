@@ -534,3 +534,71 @@ test("ChatEngine sends the bounded context prompt to the provider", async () => 
     assert.doesNotMatch(prompt, /voiced by the selected interface agent/);
   });
 });
+
+test("ChatEngine reports live activity for thinking and each tool call", async () => {
+  await withStore(async (store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    store.appendConversationTurn({
+      conversationId: conversation.id,
+      role: "user",
+      content: "show me the runs",
+    });
+    const toolProvider: ProviderAdapter = {
+      name: "groq" as ProviderName,
+      supportsNativeToolCalling: true,
+      async run(turn) {
+        // First pass requests a read-only tool; after the replayed result it
+        // answers in text and ends the turn.
+        if (!turn.priorSteps?.length) {
+          return {
+            provider: "groq",
+            sessionId: "act-1",
+            finalText: "",
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            toolCalls: [{ id: "call-1", name: "list_runs", argumentsJson: "{}" }],
+            usage: { inputTokens: 1, outputTokens: 1, costKnown: false },
+          };
+        }
+        return {
+          provider: "groq",
+          sessionId: "act-2",
+          finalText: "Here are your runs.",
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          usage: { inputTokens: 1, outputTokens: 1, costKnown: false },
+        };
+      },
+    };
+    const stub: ProviderAdapter = {
+      name: "codex" as ProviderName,
+      async run() {
+        throw new Error("should not be called");
+      },
+    };
+    const engine = new ChatEngine(store, {
+      claude: stub,
+      codex: stub,
+      groq: toolProvider,
+    });
+
+    const activities: { phase: string; tool?: string; step: number }[] = [];
+    await engine.runManagerTurn(conversation.id, "operation", undefined, (a) => {
+      activities.push(a);
+    });
+
+    // Steps are strictly increasing, and the running tool is reported by name.
+    assert.ok(activities.some((a) => a.phase === "thinking"));
+    assert.ok(
+      activities.some((a) => a.phase === "tool" && a.tool === "list_runs"),
+      `activities: ${JSON.stringify(activities)}`,
+    );
+    const steps = activities.map((a) => a.step);
+    assert.deepEqual(steps, [...steps].sort((x, y) => x - y));
+  });
+});

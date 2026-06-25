@@ -780,11 +780,13 @@ export class DuetService {
       return;
     }
     if (request.method === "GET" && route.startsWith("/operations/")) {
-      this.send(
-        response,
-        200,
-        apiSuccess(requestId, this.activities.get(decodeURIComponent(route.slice(12)))),
-      );
+      const operationId = decodeURIComponent(route.slice(12));
+      const operation = this.activities.get(operationId);
+      // Attach transient manager-turn activity (which tool is running) so the
+      // dashboard can show live progress while the turn is in flight.
+      const activity = this.chat.getActivity(operationId);
+      const payload = operation && activity ? { ...operation, activity } : operation;
+      this.send(response, 200, apiSuccess(requestId, payload));
       return;
     }
     if (request.method === "GET" && route.startsWith("/artifacts/")) {

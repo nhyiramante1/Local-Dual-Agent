@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import type { Store } from "../persistence/store.js";
-import type { ChatEngine } from "./engine.js";
+import type { ChatEngine, ManagerActivity } from "./engine.js";
 
 const operationErrorMessageLimit = 500;
 
@@ -28,6 +28,10 @@ export class ChatActivityManager {
   >();
   private readonly activeConversations = new Map<string, string>();
   private readonly activeProviders = new Map<string, string>();
+  // Latest live activity per running manager_turn operation. In-memory only —
+  // it is transient progress, polled by the dashboard, and cleared when the
+  // operation finishes. Never persisted.
+  private readonly activityByOperation = new Map<string, ManagerActivity>();
 
   constructor(
     private readonly store: Store,
@@ -37,6 +41,10 @@ export class ChatActivityManager {
 
   hasActiveOperations(): boolean {
     return this.activities.size > 0;
+  }
+
+  getActivity(operationId: string): ManagerActivity | undefined {
+    return this.activityByOperation.get(operationId);
   }
 
   async wait(operationId: string): Promise<void> {
@@ -137,6 +145,9 @@ export class ChatActivityManager {
         conversationId,
         operationId,
         () => controller.signal.aborted,
+        (activity) => {
+          this.activityByOperation.set(operationId, activity);
+        },
       );
       this.store.updateOperation(operationId, {
         status: "succeeded",
@@ -176,6 +187,7 @@ export class ChatActivityManager {
       });
     } finally {
       clearInterval(heartbeat);
+      this.activityByOperation.delete(operationId);
     }
   }
 }
