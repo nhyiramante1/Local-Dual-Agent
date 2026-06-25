@@ -3,6 +3,7 @@ import type {
   ConversationTurnRecord,
   DuetEvent,
   ManagerBudget,
+  OperationRecord,
   ProviderName,
   RunRecord,
   TaskRecord,
@@ -20,6 +21,8 @@ export interface ChatContextOptions {
   recentEventLimit: number;
   verificationLimit: number;
   messageLimit: number;
+  toolRuntime: boolean;
+  supportsAgentConsultation: boolean;
 }
 
 export interface ChatContextMetadata {
@@ -51,6 +54,8 @@ export const defaultChatContextOptions: ChatContextOptions = {
   recentEventLimit: 30,
   verificationLimit: 20,
   messageLimit: 20,
+  toolRuntime: false,
+  supportsAgentConsultation: true,
 };
 
 type TruncatedText = {
@@ -215,13 +220,22 @@ function formatProviderAvailability(
 }
 
 function formatRunSummary(run: RunRecord): string {
-  return `run ${run.id} goal=${truncateText(run.goal, 200).text} status=${run.status} lead=${run.leadProvider}`;
+  // Only the first line of the goal — defends against legacy runs whose goal
+  // was polluted with appended "Conversation context" turns, so old utterances
+  // in a prior run never resurface as a live instruction in manager context.
+  const goalLine = run.goal.split(/\r?\n/, 1)[0] ?? "";
+  return `run ${run.id} goal=${truncateText(goalLine, 160).text} status=${run.status} lead=${run.leadProvider}`;
 }
 
 function formatEvent(event: DuetEvent): string {
   const task = event.taskId ? ` task=${event.taskId}` : "";
   const operation = event.operationId ? ` operation=${event.operationId}` : "";
   return `event ${event.seq} ${event.severity} ${event.type}${task}${operation} payload=${jsonSnippet(event.payload, 500)}`;
+}
+
+function formatOperation(operation: OperationRecord): string {
+  const run = operation.runId ? ` run=${operation.runId}` : "";
+  return `operation ${operation.id} kind=${operation.kind} status=${operation.status}${run} created=${operation.createdAt}`;
 }
 
 function addSection(
@@ -277,12 +291,16 @@ export function buildManagerChatContext(
       "When to stay conversational (do not propose):",
       "- Answering questions, explaining concepts, discussing a plan idea, summarizing state, reasoning through options.",
       "- Any message that is exploratory, clarifying, or asking for your opinion.",
+      "- If a planner operation is already queued or running, stay in discussion mode. Do NOT offer, ask about, or emit create_plan. Say the planner is working, discuss ideas normally, and tell the operator tweaks can be captured for a later revision.",
       "- Do not tack a proposal onto a conversational answer.",
       "",
       "When to propose:",
       "- The operator clearly asks to start, execute, retry, resolve, cancel, or otherwise operate Duet (e.g. 'run it', 'create a plan', 'retry that task').",
-      "- A worker provider is near_limit or blocked — emit a set_strategy proposal rather than just text advice.",
-      "- You have enough context to propose accurately. If you are missing run_id, task_id, or repo path, ask for it instead of guessing.",
+      options.toolRuntime
+        ? "- If worker provider limits are relevant to the current request, explain the tradeoff; use set_strategy_proposal only when the operator asks to save or change strategy."
+        : "- A worker provider is near_limit or blocked — emit a set_strategy proposal rather than just text advice.",
+      "- You have enough context to propose accurately. If you are missing run_id, task_id, or repo path, ask for it — do not guess or invent a path.",
+      "- For create_plan: only propose when no planner operation is active AND the operator's latest message clearly asks to create/start a plan, or confirms a plan you just offered. Use the full absolute path the operator gives you directly as repoPath (it does not need to be pre-known), or a known alias name. Do NOT require an alias to be created first — set_alias is optional and only when the operator explicitly asks to save one.",
       "",
       "Accuracy rules:",
       "- Only reference IDs and repo paths visible in the context sections below.",
@@ -295,27 +313,63 @@ export function buildManagerChatContext(
     metadata,
   );
 
+  if (options.toolRuntime) addSection(
+    "Manager Tools",
+    [
+      "You have native Duet tools. Choose them with judgment — there is no rigid mode and no required confirmation step before you create a suggestion card.",
+      "",
+      "Default to conversation. Most turns need no tool at all:",
+      "- Greetings ('hi'), small talk, and bare acknowledgements ('okay', 'sure') are conversational. Do NOT create a proposal for them.",
+      "- Capability/help/about questions ('what can you do', 'how does this work') and opinion questions ('what do you think') are answered in plain text.",
+      "- Older turns in recent_turns are history, not a standing instruction. Do not act on a past plan idea unless the CURRENT message asks for it.",
+      "",
+      "Read-only tools (use freely, no side effects) when a question needs live facts:",
+      "- list_runs, inspect_run — run/task status.",
+      "- check_path, check_git_repo — does a path exist / is it a git repo. Prefer inspecting before proposing a plan against a path you are unsure of.",
+      "- resolve_alias — turn a short alias name into a full repo path.",
+      "",
+      "Proposal tools (create a durable suggestion CARD the operator must start — they do not execute anything):",
+      "- create_plan_proposal — only when the operator clearly asks to start/create a plan, or confirms a plan you just offered.",
+      "- set_strategy_proposal, set_alias_proposal — only when the operator asks to set a strategy or save an alias.",
+      ...(options.supportsAgentConsultation
+        ? ["- request_agent_consultation — creates a consent card to ask Claude/Codex (paid). Not executed yet."]
+        : []),
+      "",
+      "When a tool fails (e.g. path is not a git repo), explain the failure plainly and suggest the next step — do not retry blindly or invent state.",
+    ].join("\n"),
+    2_000,
+    sections,
+    metadata,
+  );
+
   const createPlanEntry = conversation.runId
     ? ""
-    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"REPO_PATH","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; omit profile to use balanced';
+    : '  create_plan   {"action":"create_plan","goal":"GOAL","repoPath":"FULL_PATH_OR_ALIAS","lead":"claude|codex","profile":"cheap|balanced|reasoning|max"} — global chat only; repoPath is the absolute path the operator gives you (it need NOT be pre-known) or a known alias. Use only when no planner operation is active AND the latest operator message asks to start planning or confirms your immediately previous plan offer. Omit profile to use balanced.';
   const setStrategyEntry = conversation.runId
     ? ""
     : '  set_strategy  {"action":"set_strategy","lead":"claude|codex","profile":"cheap|balanced|reasoning|max","rationale":"REASON"} — global chat only; propose when recommending provider/profile for next run';
   const setAliasEntry = conversation.runId
     ? ""
-    : '  set_alias     {"action":"set_alias","name":"NAME","repoPath":"FULL_PATH"} — global chat only; optional: lead, profile, description; saves alias for future create_plan calls';
+    : '  set_alias     {"action":"set_alias","name":"NAME","repoPath":"FULL_PATH"} — global chat only; name is REQUIRED; optional: lead, profile, description. Only propose when the operator explicitly asks to save/name an alias — never as a prerequisite for create_plan.';
 
-  addSection(
+  if (!options.toolRuntime) addSection(
     "Action Proposal Format",
     [
       "Only use this format when the operator is clearly asking to start, change, or operate Duet work.",
-      "To propose one Duet action, end your reply with exactly one ```duet-proposal block as the final trimmed content.",
+      "To propose one Duet action, end your reply with exactly one ```duet-proposal block as the LAST thing in your reply — no text after the closing fence.",
       "Proposals are suggestions only. Nothing executes automatically.",
+      "",
+      "Exact format (copy this structure — example for creating a plan):",
+      "```duet-proposal",
+      '{"action":"create_plan","goal":"Add a moveable camera gun","repoPath":"C:\\\\path\\\\to\\\\repo","lead":"codex","profile":"balanced"}',
+      "```",
+      "",
       "Rules:",
+      "- The block must be the very last content — no sentences, punctuation, or blank lines after the closing ```.",
       "- Only reference run_id, task_id, and repo paths visible in the context below.",
       "- Do NOT include command, commandCli, cli, tier, or commandJson fields - the server synthesizes these.",
       "- Duplicate, nested, or mid-reply blocks are rejected and stored as plain chat.",
-      "- If you lack sufficient information to propose, reply with plain text only.",
+      "- If you lack sufficient information to propose, reply with plain text only and ask for what is missing.",
       "- create_plan, set_strategy, and set_alias are only valid in global chat (no linked run).",
       "",
       "Supported actions (required fields shown):",
@@ -352,7 +406,8 @@ export function buildManagerChatContext(
         ? valueLine("summary", conversation.summary, 2_000)
         : "",
       "",
-      "recent_turns:",
+      "recent_turns (history of THIS thread — context only, not the current request;",
+      "the operator's current request is the LAST user turn below):",
       ...store.listRecentConversationTurns(conversation.id, options.recentTurnLimit).map(formatTurn),
     ].join("\n"),
     options.conversationSectionCap,
@@ -490,10 +545,29 @@ export function buildManagerChatContext(
       metadata,
     );
 
+    const activeOperations = store
+      .listActiveOperations()
+      .filter((operation) => operation.kind !== "manager_turn")
+      .slice(0, 10);
+    addSection(
+      "Background Operations",
+      [
+        "Active non-chat operations. If a plan operation is queued/running, the planner is already working.",
+        ...(activeOperations.length ? activeOperations.map(formatOperation) : ["none"]),
+      ].join("\n"),
+      1_500,
+      sections,
+      metadata,
+    );
+
     const runs = store.listRuns().slice(0, 10);
     const repoPaths = [...new Set(runs.map((r) => r.repoRoot))].slice(0, 5);
     const storedStrategyRaw = store.getServiceSetting("next_run_strategy");
-    let strategyLine = "preferred_strategy: none (propose set_strategy to store a preference)";
+    // State lines describe state only — no imperative "propose X" hints. An
+    // over-eager model treats such hints as a to-do list and proposes on
+    // unrelated turns (e.g. a bare "hi"). Whether/when to propose is decided
+    // from the operator's current message per the Manager Tools/Rules sections.
+    let strategyLine = "preferred_strategy: none saved";
     if (storedStrategyRaw) {
       try {
         const storedStrategy = JSON.parse(storedStrategyRaw) as { lead: string; profile: string; setAt: string };
@@ -516,7 +590,7 @@ export function buildManagerChatContext(
     }
     const aliasesLine = allAliases.length
       ? `known_aliases:\n${allAliases.join("\n")}\nUse an alias name as the repoPath in create_plan to resolve it automatically.`
-      : "known_aliases: none (propose set_alias to save one)";
+      : "known_aliases: none saved";
 
     addSection(
       "System Defaults",

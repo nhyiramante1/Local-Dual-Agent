@@ -106,11 +106,24 @@ profile = "turbo-mode"
   );
 });
 
-test("loadConfig returns openai as default manager provider when [manager] is absent", async () => {
+test("loadConfig returns groq as default manager provider when [manager] is absent", async () => {
   await withToml("", async (tomlPath) => {
     const config = await loadConfig(tomlPath);
-    assert.equal(config.manager.provider, "openai");
+    assert.equal(config.manager.provider, "groq");
   });
+});
+
+test("loadConfig reads manager provider = gemini from TOML", async () => {
+  await withToml(
+    `
+[manager]
+provider = "gemini"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.provider, "gemini");
+    },
+  );
 });
 
 test("loadConfig reads manager provider = openai from TOML", async () => {
@@ -126,7 +139,7 @@ provider = "openai"
   );
 });
 
-test("loadConfig falls back to openai for unrecognised manager provider", async () => {
+test("loadConfig falls back to groq for unrecognised manager provider", async () => {
   await withToml(
     `
 [manager]
@@ -134,7 +147,7 @@ provider = "gpt-wizard"
 `,
     async (tomlPath) => {
       const config = await loadConfig(tomlPath);
-      assert.equal(config.manager.provider, "openai");
+      assert.equal(config.manager.provider, "groq");
     },
   );
 });
@@ -154,6 +167,32 @@ openai_max_usd_per_day = 5.0
       const budget = resolveManagerBudget(config);
       assert.equal(budget.openaiMaxUsdPerTurn, 0.20);
       assert.equal(budget.openaiMaxUsdPerDay, 5.0);
+    },
+  );
+});
+
+test("loadConfig reads manager tool capability fields", async () => {
+  await withToml(
+    `
+[manager]
+native_tool_calling = false
+action_mode = "experimental"
+supports_multi_step_tool_loop = false
+supports_agent_consultation = false
+latency_tier = "fast"
+max_tool_calls_per_turn = 3
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.nativeToolCalling, false);
+      assert.equal(config.manager.actionMode, "experimental");
+      assert.equal(config.manager.supportsMultiStepToolLoop, false);
+      assert.equal(config.manager.supportsAgentConsultation, false);
+      assert.equal(config.manager.latencyTier, "fast");
+      assert.equal(config.manager.maxToolCallsPerTurn, 3);
+      const budget = resolveManagerBudget(config);
+      assert.equal("nativeToolCalling" in budget, false);
+      assert.equal("actionMode" in budget, false);
     },
   );
 });

@@ -39,6 +39,7 @@ export const dashboardHtml = `<!doctype html>
         </div>
         <div class="aside-section" id="aside-sec-timeline">
           <div class="aside-sec-head"><h2>Timeline</h2></div>
+          <div id="timeline-active"></div>
           <div id="events"></div>
         </div>
         <div class="aside-section" id="aside-sec-verification">
@@ -74,7 +75,8 @@ export const dashboardHtml = `<!doctype html>
             <div class="chat-agents" role="group" aria-label="Manager voice">
               <button id="chat-codex" type="button" data-agent="codex">Codex</button>
               <button id="chat-claude" type="button" data-agent="claude">Claude</button>
-              <button id="chat-openai" type="button" data-agent="openai">OpenAI</button>
+              <button id="chat-groq" type="button" data-agent="groq">Groq</button>
+              <button id="chat-gemini" type="button" data-agent="gemini">Gemini</button>
             </div>
             <button id="chat-clear" type="button" class="chat-clear" title="Start a fresh manager thread for the current run and voice">Clear context</button>
           </div>
@@ -182,6 +184,15 @@ section{display:flex;flex-direction:column;height:100%;overflow:hidden;padding:1
 .timeline-details>summary h2{margin:0;pointer-events:none}
 .timeline-details>summary::after{content:"▸";font-size:10px;color:var(--faint);transition:transform .15s}
 .timeline-details[open]>summary::after{transform:rotate(90deg)}
+#timeline-active{font-size:13px;padding:0 0 8px;border-bottom:1px solid var(--line-2);margin-bottom:6px}
+#timeline-active:empty{display:none}
+.tl-row{display:flex;align-items:center;gap:6px;line-height:1.4}
+.tl-dot{font-size:15px;flex-shrink:0}
+.tl-dot.active{color:var(--accent);animation:tl-pulse 1.4s ease-in-out infinite}
+.tl-dot.done{color:var(--ok)}
+.tl-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-elapsed{color:var(--faint);font-variant-numeric:tabular-nums;flex-shrink:0}
+@keyframes tl-pulse{0%,100%{opacity:1}50%{opacity:.3}}
 /* ── shared components ── */
 .pill{font-size:12px;font-weight:500;padding:4px 11px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
 .pill.ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
@@ -297,6 +308,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-history-item:last-child{border-bottom:none}
 .proposal-history-item .phi-action{font-weight:600}
 .proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.run-progress-state{align-self:flex-start;max-width:560px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:14px 16px;margin:12px 2px}
+.run-progress-title{font-weight:650;font-size:15px;margin-bottom:5px}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -378,12 +391,19 @@ const chat = {
   conversations: new Map(),
   activeOperation: null,
   polling: null,
-  pendingTurn: null
+  pendingTurn: null,
+  planOperations: new Map(),
+  statusError: null
 };
 let eventStream = null;
 let eventRunId = null;
 let eventCursor = 0;
 const renderedEventSeqs = new Set();
+let activeAttempt = null; // { provider, role, taskId, taskOrdinal, startedAt }
+let activeTimer = null;
+let runTasks = []; // task list from last selectRun
+let selectedRunDetail = null;
+let bootInstanceId = null; // service instance seen at page load; a change means a restart
 function requestKey(prefix) {
   const id = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
   return prefix + "-" + id;
@@ -396,10 +416,58 @@ async function api(path, options = {}) {
     fetchOptions.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
   }
   if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
-  const response = await fetch("/api/v1" + path, fetchOptions);
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs || 30000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  fetchOptions.signal = controller.signal;
+  let response;
+  try {
+    response = await fetch("/api/v1" + path, fetchOptions);
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      // A timeout after a good boot almost always means a stale/black-holed
+      // pooled connection (common behind a VPN after a service restart) while
+      // the SSE stream may still look alive. A full reload drops the pool and
+      // reconnects fresh; reloadOnce has a cooldown so it cannot loop.
+      if (bootInstanceId) reloadOnce();
+      throw new Error("Request timed out — the service may be slow or unreachable.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+  // Session expired (commonly after a service restart wipes in-memory sessions).
+  // Re-auth once with the saved access token and replay the original request so
+  // open windows self-heal instead of failing. The same idempotency key is safe
+  // to reuse: a 401 is rejected before any work, so no idempotency record exists.
+  if (response.status === 401 && !options._retried && await reauth()) {
+    return api(path, Object.assign({}, options, { _retried: true }));
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message || response.statusText);
   return payload.data;
+}
+let reauthInFlight = null;
+function reauth() {
+  const savedAccessToken = localStorage.getItem(DASHBOARD_ACCESS_KEY);
+  if (!savedAccessToken) return Promise.resolve(false);
+  // Dedupe concurrent 401s into a single re-auth round-trip.
+  if (!reauthInFlight) {
+    reauthInFlight = (async () => {
+      try {
+        const r = await fetch("/dashboard/session", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ accessToken: savedAccessToken }),
+        });
+        if (!r.ok) localStorage.removeItem(DASHBOARD_ACCESS_KEY);
+        return r.ok;
+      } catch {
+        return false;
+      }
+    })().finally(() => { reauthInFlight = null; });
+  }
+  return reauthInFlight;
 }
 function esc(value){const d=document.createElement("div");d.textContent=String(value??"");return d.innerHTML.replaceAll('"',"&quot;").replaceAll("'","&#39;")}
 function statusClass(value){const s=String(value??"").toLowerCase();
@@ -473,11 +541,14 @@ async function selectRun(id) {
     if (eventStream) eventStream.close();
     eventStream=null;
     eventRunId=null;
+    clearActiveRow();
   }
   q("runs").querySelectorAll("button").forEach(b=>b.classList.toggle("sel",b.dataset.id===id));
   const detail=await api("/runs/"+encodeURIComponent(id));
+  selectedRunDetail = detail.run;
+  runTasks = detail.tasks || [];
   q("summary").innerHTML='<h2>'+esc(detail.run.goal)+'</h2><div class="card"><div class="row">'+badge(detail.run.status)+'<span class="kv">lead <b>'+esc(detail.run.leadProvider)+'</b></span><span class="kv">'+detail.usage.totalTurns+' turns</span></div></div>';
-  q("tasks").innerHTML=detail.tasks.map(t=>'<div class="card"><div class="row"><b>'+esc(t.plan.title)+'</b>'+badge(t.status)+'</div><div class="kv">'+esc(t.provider)+' -> '+esc(t.reviewerProvider)+'</div><div class="muted">'+esc(t.plan.allowedPaths.join(", "))+'</div></div>').join("")||'<span class="empty">No tasks.</span>';
+  q("tasks").innerHTML=runTasks.map(t=>'<div class="card"><div class="row"><b>'+esc(t.plan.title)+'</b>'+badge(t.status)+'</div><div class="kv">'+esc(t.provider)+' -> '+esc(t.reviewerProvider)+'</div><div class="muted">'+esc(t.plan.allowedPaths.join(", "))+'</div></div>').join("")||'<span class="empty">No tasks.</span>';
   const [verification,messages,artifacts,conflicts]=await Promise.all([
     api("/runs/"+encodeURIComponent(id)+"/verification"),
     api("/runs/"+encodeURIComponent(id)+"/messages"),
@@ -532,6 +603,53 @@ function renderPendingTurn() {
     +'<div class="body">'+visibleText(pending.content, 4000)+'</div>'
     +'</div></div>';
 }
+function renderRunProgressEmptyState() {
+  if (!selected || !selectedRunDetail) return "";
+  const status = String(selectedRunDetail.status || "");
+  const lead = selectedRunDetail.leadProvider || "agent";
+  if (status === "planning") {
+    return '<div class="run-progress-state"><div class="run-progress-title">'+esc(lead)+' is planning</div><div class="kv">The planner is creating a plan for this run. Watch the Timeline for live progress.</div></div>';
+  }
+  if (status === "awaiting_plan_approval") {
+    return '<div class="run-progress-state"><div class="run-progress-title">Plan ready for approval</div><div class="kv">Review the Plan panel, then approve the plan when it looks right.</div></div>';
+  }
+  return "";
+}
+function currentConversationId() {
+  return currentConversation()?.id || null;
+}
+function renderPlanOperationNotices() {
+  const conversationId = currentConversationId();
+  if (!conversationId) return "";
+  const notices = Array.from(chat.planOperations.values())
+    .filter(item => item.conversationId === conversationId);
+  if (!notices.length) return "";
+  return notices.map(item => {
+    const title = item.status === "succeeded"
+      ? "Plan ready"
+      : item.status === "failed"
+        ? "Plan generation failed"
+        : item.status === "cancelled" || item.status === "interrupted"
+          ? "Plan generation stopped"
+          : "Plan generation running";
+    const body = item.status === "succeeded"
+      ? "The planner finished. You can open the run, or show the plan here without leaving this chat."
+      : item.status === "failed"
+        ? visibleText(item.error || "The planner operation failed.", 700)
+        : "A planner agent is working in the background. You can keep chatting with the Manager while it runs.";
+    const actions = item.status === "succeeded" && item.runId
+      ? '<div class="proposal-actions"><button type="button" data-plan-open="'+esc(item.runId)+'">Open run</button><button type="button" data-plan-show="'+esc(item.operationId)+'" data-run-id="'+esc(item.runId)+'">Show plan here</button></div>'
+      : "";
+    const plan = item.planHtml ? '<div class="proposal-copy">Plan</div>'+item.planHtml : "";
+    return '<div class="run-progress-state" data-plan-operation="'+esc(item.operationId)+'">'
+      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+'</div>'
+      +'<div class="kv">'+body+'</div>'
+      +(item.runId ? '<div class="kv">run <b>'+esc(item.runId)+'</b></div>' : "")
+      +actions
+      +plan
+      +'</div>';
+  }).join("");
+}
 function rememberConversation(conversation) {
   const key = conversationKey(conversation.runId, conversation.interfaceAgent);
   const existing = chat.conversations.get(key);
@@ -552,7 +670,7 @@ function isCurrentConversation(conversation) {
   );
 }
 function chatIsBusyForCurrentView() {
-  return Boolean(chat.activeOperation);
+  return Boolean(chat.activeOperation || chat.pendingTurn);
 }
 async function loadChat() {
   clearTimeout(chat.polling);
@@ -569,7 +687,7 @@ async function loadChat() {
     const conversation = currentConversation();
     if (!conversation) {
       const scope = selected ? esc(chat.agent)+" manager" : "global";
-      q("chat-turns").innerHTML=(renderPendingTurn() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
+      q("chat-turns").innerHTML=(renderPendingTurn() || renderRunProgressEmptyState() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
       setChatEnabled(!chatIsBusyForCurrentView());
       return;
     }
@@ -631,6 +749,9 @@ async function refreshConversation(conversationId) {
   const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
   const failure = failedTurnMessage(failed);
   if (failure) setChatStatus(failure, true);
+  else if (chat.statusError && chat.statusError.conversationId === data.conversation.id) {
+    setChatStatus(chat.statusError.message, true);
+  }
   else setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
   setChatEnabled(!chatIsBusyForCurrentView());
   return data;
@@ -638,8 +759,10 @@ async function refreshConversation(conversationId) {
 function renderChatShell() {
   q("chat-codex").classList.toggle("active", chat.agent === "codex");
   q("chat-claude").classList.toggle("active", chat.agent === "claude");
-  const openaiBtn = q("chat-openai");
-  if (openaiBtn) openaiBtn.classList.toggle("active", chat.agent === "openai");
+  const groqBtn = q("chat-groq");
+  if (groqBtn) groqBtn.classList.toggle("active", chat.agent === "groq");
+  const geminiBtn = q("chat-gemini");
+  if (geminiBtn) geminiBtn.classList.toggle("active", chat.agent === "gemini");
   setChatEnabled(!chatIsBusyForCurrentView());
 }
 function setChatStatus(message, bad=false) {
@@ -710,7 +833,7 @@ function renderMarkdown(text) {
 }
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
-    q("chat-turns").innerHTML=renderPendingTurn() || '<span class="empty">No turns yet.</span>';
+    q("chat-turns").innerHTML=renderPendingTurn() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
     return;
   }
   const proposalsByTurn = new Map();
@@ -749,7 +872,7 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     }
     return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
   }).join("");
-  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderProposalHistory(proposalHistory);
+  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   enrichHistoryOutcomes().catch(() => {});
 }
@@ -819,6 +942,18 @@ function renderProposalCard(proposal) {
       +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
       +'</div>';
   }
+  if (proposal.action === "agent_consultation") {
+    let meta = {};
+    try { meta = JSON.parse(proposal.commandJson); } catch {}
+    return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("consent")+'</div>'
+      +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
+      +'<div class="proposal-kv"><b>Agents:</b> '+visibleText((meta.agents||[]).join ? meta.agents.join(", ") : "", 200)+'</div>'
+      +'<div class="proposal-kv"><b>Profile:</b> '+esc(meta.profile||"balanced")+'&nbsp;&nbsp;<b>Mode:</b> '+esc(meta.mode||"independent")+'</div>'
+      +'<div class="proposal-copy">This records consent intent only. Asking Claude/Codex is deferred until the consultation executor is added.</div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'</div>';
+  }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
   const isMerge = proposal.action === "merge_run";
   const isFingerprint = proposal.tier === "fingerprint";
@@ -845,6 +980,10 @@ function renderProposalCard(proposal) {
   '</div>';
 }
 function renderReadiness(prepared) {
+  if (!prepared.available && /no longer active|already been started|expired/i.test(prepared.blockedReason || "")) {
+    return '<div><b>Suggestion is no longer active</b></div><div class="kv">It may already be running or it was replaced by a newer state.</div>'
+      + (prepared.run ? '<div class="kv">run <b>'+esc(prepared.run.id)+'</b> '+badge(prepared.run.status)+' version '+esc(prepared.run.version)+'</div>' : "");
+  }
   const state = prepared.available ? '<span class="ok">Ready to copy</span>' : '<span class="bad">Not ready</span>';
   const run = prepared.run ? '<div class="kv">run <b>'+esc(prepared.run.id)+'</b> '+badge(prepared.run.status)+' version '+esc(prepared.run.version)+'</div>' : "";
   const task = prepared.task ? '<div class="kv">task <b>'+esc(prepared.task.id)+'</b> '+badge(prepared.task.status)+' version '+esc(prepared.task.version)+'</div>' : "";
@@ -852,7 +991,7 @@ function renderReadiness(prepared) {
   const requirements = (prepared.requirements || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
   const warnings = (prepared.warnings || []).map(item => '<li>'+visibleText(item, 500)+'</li>').join("");
   const start = prepared.available && prepared.tier === "ordinary"
-    ? '<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(prepared.proposalId)+'"><button type="button" disabled data-proposal-start="'+esc(prepared.proposalId)+'" data-run-version="'+esc(prepared.run?.version ?? "")+'" data-task-version="'+esc(prepared.task?.version ?? "")+'">Start operation</button></div>'
+    ? '<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(prepared.proposalId)+'"><button type="button" disabled data-proposal-start="'+esc(prepared.proposalId)+'" data-proposal-action="'+esc(prepared.action || "")+'" data-run-version="'+esc(prepared.run?.version ?? "")+'" data-task-version="'+esc(prepared.task?.version ?? "")+'">Start operation</button></div>'
     : "";
   return '<div><b>'+state+'</b></div>'+run+task+blocked+
     (requirements ? '<div class="proposal-copy">Requirements</div><ul>'+requirements+'</ul>' : "")+
@@ -888,10 +1027,106 @@ async function dismissProposal(proposalId) {
 async function prepareProposal(proposalId) {
   const conversation = currentConversation();
   if (!conversation) return;
-  const prepared = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/prepare");
+  let prepared;
+  try {
+    prepared = await api("/chat/conversations/"+encodeURIComponent(conversation.id)+"/proposals/"+encodeURIComponent(proposalId)+"/prepare");
+  } catch (error) {
+    // A proposal that has already been started/dismissed/expired is no longer
+    // preparable — that is expected, not an error worth alarming the operator.
+    if (/no longer active|already been started|not in conversation|expired/i.test(error.message || "")) {
+      const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
+      if (panel) panel.innerHTML = '<div class="muted">This suggestion has already been started or is no longer pending.</div>';
+      setChatStatus("This suggestion is no longer pending (it may already be running).");
+      return;
+    }
+    throw error;
+  }
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
   if (panel) panel.innerHTML = renderReadiness(prepared);
+  if (!prepared.available && /no longer active|already been started|expired/i.test(prepared.blockedReason || "")) {
+    const card = panel?.closest(".proposal-card");
+    card?.querySelectorAll("[data-proposal-prepare], [data-proposal-start], [data-proposal-copy]").forEach((button) => {
+      button.disabled = true;
+    });
+    setChatStatus("This suggestion is no longer active. Watch the run in the sidebar and Timeline.");
+    return;
+  }
   setChatStatus(prepared.available ? "Suggestion checked. Copy the CLI command if you choose to proceed." : "Suggestion checked, but it is not currently ready.");
+}
+function renderInlinePlan(detail) {
+  const plan = detail.run?.plan;
+  const tasks = detail.tasks || [];
+  if (!plan && !tasks.length) return '<div class="muted">No plan details are available yet.</div>';
+  const summary = plan?.summary ? '<p>'+visibleText(plan.summary, 1200)+'</p>' : "";
+  const taskRows = tasks.slice(0, 6).map(task =>
+    '<li><b>'+esc(task.id)+': '+visibleText(task.plan?.title || "Task", 160)+'</b>'
+    +'<div class="kv">'+visibleText(task.plan?.objective || "", 400)+'</div>'
+    +'<div class="muted">paths: '+esc((task.plan?.allowedPaths || []).join(", ") || "none")+'</div></li>'
+  ).join("");
+  const risks = (plan?.risks || []).slice(0, 5).map(risk => '<li>'+visibleText(risk, 300)+'</li>').join("");
+  return summary
+    +(taskRows ? '<ol>'+taskRows+'</ol>' : "")
+    +(risks ? '<div class="proposal-copy">Risks</div><ul>'+risks+'</ul>' : "");
+}
+async function showPlanInChat(operationId, runId) {
+  const notice = chat.planOperations.get(operationId);
+  if (!notice) return;
+  const detail = await api("/runs/"+encodeURIComponent(runId));
+  notice.planHtml = renderInlinePlan(detail);
+  chat.planOperations.set(operationId, notice);
+  const conversation = currentConversation();
+  if (conversation) await refreshConversation(conversation.id);
+}
+async function watchPlanOperation(operationId, conversationId) {
+  const original = chat.planOperations.get(operationId);
+  if (!original) return;
+  try {
+    while (true) {
+      const operation = await api("/operations/"+encodeURIComponent(operationId));
+      const notice = chat.planOperations.get(operationId) || original;
+      notice.status = operation.status;
+      if (operation.resultJson) {
+        try {
+          const result = JSON.parse(operation.resultJson);
+          if (result?.id) notice.runId = result.id;
+        } catch {}
+      }
+      if (operation.errorJson) {
+        try {
+          const parsed = JSON.parse(operation.errorJson);
+          notice.error = parsed.message || parsed.code || operation.errorJson;
+        } catch {
+          notice.error = operation.errorJson;
+        }
+      }
+      chat.planOperations.set(operationId, notice);
+      if (!["queued","running"].includes(operation.status)) {
+        await loadRuns().catch(()=>{});
+        const conversation = currentConversation();
+        if (conversation?.id === conversationId) {
+          await refreshConversation(conversationId);
+          setChatStatus(
+            operation.status === "succeeded"
+              ? "Plan ready. You can keep chatting, open the run, or show the plan here."
+              : "Plan generation "+operation.status+".",
+            operation.status !== "succeeded",
+          );
+        }
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  } catch (error) {
+    const notice = chat.planOperations.get(operationId) || original;
+    notice.status = "failed";
+    notice.error = error.message || String(error);
+    chat.planOperations.set(operationId, notice);
+    const conversation = currentConversation();
+    if (conversation?.id === conversationId) {
+      setChatStatus(notice.error, true);
+      await refreshConversation(conversationId).catch(()=>{});
+    }
+  }
 }
 async function startProposal(proposalId, button) {
   const conversation = currentConversation();
@@ -904,36 +1139,43 @@ async function startProposal(proposalId, button) {
     idempotencyKey: requestKey("dashboard-proposal-start"),
     body
   });
+  // create_plan kicks off a planner run; other actions are quick mutations.
+  const isPlan = (button.dataset.proposalAction || "") === "create_plan";
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
-  if (panel) panel.innerHTML = '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
+  if (panel) panel.innerHTML = isPlan
+    ? '<div><b>Generating plan…</b></div><div class="kv">A planner agent is working — this can take a minute. The run appears in the sidebar; watch the Timeline for live progress.</div>'
+    : '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
+  if (isPlan) {
+    chat.planOperations.set(operation.id, {
+      operationId: operation.id,
+      conversationId: conversation.id,
+      proposalId,
+      status: operation.status || "queued",
+      runId: operation.runId || null,
+    });
+    setChatStatus("Plan generation started. You can keep chatting while the planner works.");
+    setChatEnabled(true);
+    refreshConversation(conversation.id).catch(()=>{});
+    watchPlanOperation(operation.id, conversation.id).catch(()=>{});
+    return;
+  }
   await pollOperation(operation.id, conversation.id, "Duet operation");
+  // Surface the result reliably by opening the new run (its Plan and Timeline
+  // panels render the plan dependably — far more robust than injecting a bubble
+  // into a chat thread that pollOperation may have just re-rendered).
   try {
     const completedOp = await api("/operations/"+encodeURIComponent(operation.id));
     if (completedOp.status === "succeeded" && completedOp.resultJson) {
       const result = JSON.parse(completedOp.resultJson);
       if (result && result.id) {
-        const msgs = await api("/runs/"+encodeURIComponent(result.id)+"/messages");
-        const planMsg = (msgs.value || msgs).find(m => m.kind === "plan");
-        if (planMsg) {
-          const card = q("chat-turns").querySelector('[data-proposal-id="'+CSS.escape(proposalId)+'"]');
-          if (card) {
-            let plan = { summary: "", tasks: [], risks: [] };
-            try { plan = JSON.parse(planMsg.body); } catch {}
-            const taskList = plan.tasks.map(t =>
-              '<div class="plan-task"><div class="plan-task-title">'+esc(t.title)+'</div><div class="muted" style="font-size:12px">'+esc(t.objective||"")+'</div></div>'
-            ).join("");
-            const riskList = plan.risks && plan.risks.length
-              ? '<div class="plan-section-head" style="margin-top:10px">Risks</div>'+plan.risks.map(r=>'<div class="plan-risk muted">'+esc(r)+'</div>').join("")
-              : "";
-            const bubble = document.createElement("div");
-            bubble.className = "chat-turn manager";
-            bubble.innerHTML = '<div class="turn-content"><div class="meta"><b>Plan</b>'+badge("ready")+'</div><div class="body"><div class="plan-card" style="padding:0"><div class="plan-summary">'+esc(plan.summary)+'</div><div class="plan-section-head">Tasks</div>'+taskList+riskList+'</div></div></div>';
-            card.after(bubble);
-          }
-        }
+        await loadRuns();
+        await selectRun(result.id);
+        setChatStatus("Plan ready — opened run "+result.id.slice(0,8)+". Review it in the Plan and Timeline panels.");
+        return;
       }
     }
   } catch {}
+  await loadRuns().catch(()=>{});
   if (selected) await selectRun(selected);
 }
 let approvalModal = { proposalId: null, runId: null, stage: null, bindingHash: null, runVersion: null };
@@ -1017,8 +1259,18 @@ q("chat-turns").addEventListener("click", async (event) => {
   const dismiss = event.target.closest("[data-proposal-dismiss]");
   const approve = event.target.closest("[data-proposal-approve]");
   const turnCopy = event.target.closest("[data-turn-copy]");
-  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy) return;
+  const planOpen = event.target.closest("[data-plan-open]");
+  const planShow = event.target.closest("[data-plan-show]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow) return;
   try {
+    if (planOpen) {
+      await selectRun(planOpen.dataset.planOpen);
+      return;
+    }
+    if (planShow) {
+      await showPlanInChat(planShow.dataset.planShow, planShow.dataset.runId);
+      return;
+    }
     if (turnCopy) {
       await copyText(turnCopy.dataset.turnCopy || "");
       const svg = turnCopy.querySelector("svg");
@@ -1068,8 +1320,9 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
       const operation = await api("/operations/"+encodeURIComponent(operationId));
       if (!["queued","running"].includes(operation.status)) {
         chat.pendingTurn = null;
-        await refreshConversation(conversationId);
         if (operation.status === "succeeded") {
+          if (chat.statusError?.conversationId === conversationId) chat.statusError = null;
+          await refreshConversation(conversationId);
           if (currentConversation()?.id === conversationId) {
             setChatStatus("Ready. Manager voice: "+chat.agent+".");
           }
@@ -1079,6 +1332,8 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
             try { message += " " + JSON.parse(operation.errorJson).message; }
             catch { message += " " + operation.errorJson; }
           }
+          chat.statusError = { conversationId, message };
+          await refreshConversation(conversationId);
           if (currentConversation()?.id === conversationId) setChatStatus(message, true);
         }
         return;
@@ -1087,6 +1342,7 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
     }
   } catch (error) {
     setChatStatus(error.message, true);
+    refreshConversation(conversationId).catch(()=>{});
   } finally {
     chat.pendingTurn = null;
     if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
@@ -1100,6 +1356,7 @@ async function sendChat(message) {
     idempotencyKey: requestKey("dashboard-chat-turn"),
     body: { message }
   });
+  chat.activeOperation = { id: operation.id, conversationId: conversation.id };
   chat.pendingTurn = null;
   await refreshConversation(conversation.id);
   await pollOperation(operation.id, conversation.id);
@@ -1109,6 +1366,10 @@ q("chat-form").addEventListener("submit", async (event) => {
   const text = q("chat-input").value.trim();
   if (!text || chatIsBusyForCurrentView()) return;
   const original = q("chat-input").value;
+  const existingConversation = currentConversation();
+  if (existingConversation && chat.statusError?.conversationId === existingConversation.id) {
+    chat.statusError = null;
+  }
   chat.pendingTurn = {
     agent: chat.agent,
     runId: selected || null,
@@ -1139,6 +1400,8 @@ q("chat-form").addEventListener("submit", async (event) => {
     q("chat-input").style.height = Math.min(q("chat-input").scrollHeight, 160) + "px";
     setChatStatus(error.message, true);
     setChatEnabled(!chatIsBusyForCurrentView());
+    const conv = currentConversation();
+    if (conv) refreshConversation(conv.id).catch(()=>{});
   }
 });
 q("chat-input").addEventListener("keydown", (event) => {
@@ -1160,8 +1423,12 @@ q("chat-claude").onclick = async () => {
   chat.agent = "claude";
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
-q("chat-openai").onclick = async () => {
-  chat.agent = "openai";
+q("chat-groq").onclick = async () => {
+  chat.agent = "groq";
+  await loadChat().catch(error => setChatStatus(error.message, true));
+};
+q("chat-gemini").onclick = async () => {
+  chat.agent = "gemini";
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
 q("chat-clear").onclick = async () => {
@@ -1180,6 +1447,25 @@ q("theme-toggle").onclick = () => {
   localStorage.setItem("duet-theme", next);
   q("theme-toggle").innerHTML = next === "light" ? "&#9790;" : "&#9728;";
 };
+function fmtElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return m > 0 ? m + "m " + ss + "s" : ss + "s";
+}
+function renderActiveRow() {
+  const el = q("timeline-active");
+  if (!el || !activeAttempt) return;
+  const elapsed = fmtElapsed(Date.now() - activeAttempt.startedAt);
+  const ordinal = activeAttempt.taskOrdinal != null ? " task " + activeAttempt.taskOrdinal + " of " + runTasks.length : "";
+  el.innerHTML = '<div class="tl-row"><span class="tl-dot active">&#9679;</span><span class="tl-label">' + esc(activeAttempt.provider) + " &mdash; " + esc(activeAttempt.role) + ordinal + '</span><span class="tl-elapsed">' + elapsed + "</span></div>";
+}
+function clearActiveRow() {
+  if (activeTimer) { clearInterval(activeTimer); activeTimer = null; }
+  activeAttempt = null;
+  const el = q("timeline-active");
+  if (el) el.innerHTML = "";
+}
 async function connectEvents() {
   const targetRunId = selected || "";
   if (eventStream && eventRunId === targetRunId) return;
@@ -1199,13 +1485,52 @@ async function connectEvents() {
     renderedEventSeqs.add(item.seq);
     eventCursor=Math.max(eventCursor, Number(item.seq)||0);
     const sev=item.severity==="error"?"ev-error":item.severity==="warning"?"ev-warning":"ev-info";
+    const p=item.payload||{};
+    let label="";
+    switch(item.type){
+      case "provider.attempt_started": label="▶ "+(p.provider||"agent")+" — "+(p.role||"worker"); break;
+      case "provider.attempt_finished": label="■ "+(p.provider||"agent")+" — "+(p.status||"done"); break;
+      case "provider.turn_completed": label="✓ turn done"; break;
+      case "task.updated": label="task → "+(p.status||"?"); break;
+      case "run.updated": label="run → "+(p.status||"?"); break;
+      case "chat.turn.created": label="message received"; break;
+      case "chat.turn.completed": label="manager replied"; break;
+      case "chat.proposal.created": label="proposal created — "+(p.action||""); break;
+      case "chat.proposal.started": label="proposal started"; break;
+      case "operation.created": case "operation.updated": label=""; break;
+      default: label=item.type;
+    }
+    if(!label) { renderedEventSeqs.delete(item.seq); } else {
     const line=document.createElement("div");
     line.className="ev "+sev;
     const parsed=new Date(item.occurredAt);
     const ts=isNaN(parsed.getTime())?item.occurredAt:parsed.toLocaleTimeString();
-    line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(item.type)+'</span>';
+    line.innerHTML='<time>'+esc(ts)+'</time><span class="ty">'+esc(label)+'</span>';
     q("events").prepend(line);
-    if(item.type==="run.updated"||item.type==="task.updated") loadRuns().catch(()=>{});
+    }
+    if((item.type && item.type.indexOf("run.")===0)||item.type==="task.updated") loadRuns().catch(()=>{});
+    const TERMINAL = new Set(["failed","cancelled","merged","cleaned_up"]);
+    if(item.type==="provider.attempt_started" && item.payload) {
+      if(activeTimer) { clearInterval(activeTimer); activeTimer=null; }
+      const taskId = item.taskId || null;
+      const taskOrdinal = taskId ? runTasks.findIndex(t=>t.id===taskId)+1 || null : null;
+      activeAttempt = { provider: item.payload.provider||"agent", role: item.payload.role||"worker", taskId, taskOrdinal: taskOrdinal||null, startedAt: Date.now() };
+      renderActiveRow();
+      activeTimer = setInterval(renderActiveRow, 1000);
+    }
+    if(item.type==="provider.attempt_finished") {
+      if(activeTimer) { clearInterval(activeTimer); activeTimer=null; }
+      const finished = activeAttempt;
+      activeAttempt = null;
+      if(finished) {
+        const el = q("timeline-active");
+        const elapsed = fmtElapsed(Date.now() - finished.startedAt);
+        const ordinal = finished.taskOrdinal != null ? " task " + finished.taskOrdinal : "";
+        if(el) el.innerHTML = '<div class="tl-row"><span class="tl-dot done">&#10003;</span><span class="tl-label">' + esc(finished.provider) + " &mdash; " + esc(finished.role) + ordinal + '</span><span class="tl-elapsed">' + elapsed + "</span></div>";
+        setTimeout(()=>{ const e=q("timeline-active"); if(e&&!activeAttempt) e.innerHTML=""; }, 3000);
+      }
+    }
+    if(item.type==="run.updated" && item.payload && TERMINAL.has(item.payload.status)) clearActiveRow();
     if(item.type && item.type.startsWith("chat.turn.")) {
       const conversation = currentConversation();
       if (conversation && item.payload && item.payload.conversationId === conversation.id) {
@@ -1216,10 +1541,41 @@ async function connectEvents() {
       if(q("chat-turns").querySelector('[data-phi-operation="'+CSS.escape(item.operationId)+'"]')) {
         enrichHistoryOutcomes().catch(()=>{});
       }
+      const TERMINAL_OP = new Set(["succeeded","failed","cancelled","interrupted"]);
+      if(chat.activeOperation && chat.activeOperation.id === item.operationId && item.payload && TERMINAL_OP.has(item.payload.status)) {
+        refreshConversation(chat.activeOperation.conversationId).catch(()=>{});
+      }
     }
   });
   stream.addEventListener("duet.reset",()=>location.reload());
-  stream.onerror=()=>{ if(eventStream===stream) setConn("reconnecting"); setTimeout(()=>{ if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); } },2000); };
+  stream.onerror=()=>{
+    if(eventStream===stream) setConn("reconnecting");
+    setTimeout(async ()=>{
+      if (eventStream !== stream) return;
+      // A dropped stream usually means the service restarted (e.g. npm run up).
+      // After a restart the browser may hold stale pooled connections that hang
+      // (notably behind a VPN). A full reload drops the pool, re-auths, and picks
+      // up fresh assets. Reload when the instance changed OR when health is
+      // unreachable after we had a good boot — both indicate a stale connection.
+      try {
+        const h = await api("/health", { timeoutMs: 5000 });
+        if (bootInstanceId && h.instanceId && h.instanceId !== bootInstanceId) {
+          return reloadOnce();
+        }
+      } catch (e) {
+        if (bootInstanceId) return reloadOnce();
+      }
+      if (eventStream === stream) { stream.close(); eventStream=null; connectEvents(); }
+    },2000);
+  };
+}
+// Reload at most once per cooldown so a genuinely-down service cannot loop.
+function reloadOnce() {
+  const now = Date.now();
+  const last = Number(sessionStorage.getItem("duet-last-reload") || "0");
+  if (now - last < 15000) return;
+  sessionStorage.setItem("duet-last-reload", String(now));
+  location.reload();
 }
 (function(){
   const chatHandle=document.getElementById("chat-resize-handle");
@@ -1275,6 +1631,6 @@ async function connectEvents() {
 })();
 await authenticate();
 renderChatShell();
-try{const h=await api("/health");q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
+try{const h=await api("/health");bootInstanceId=h.instanceId;q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
 catch(error){q("health").textContent=error.message;q("health").className="pill bad"}
 `;

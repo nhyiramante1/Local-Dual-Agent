@@ -1,6 +1,18 @@
 export type ProviderName = "claude" | "codex";
 
-export type ManagerProviderName = ProviderName | "openai";
+// "openai", "groq", and "gemini" are all OpenAI-compatible manager identities
+// served through OpenAIManagerAdapter (different model/baseURL per identity).
+export type ManagerProviderName = ProviderName | "openai" | "groq" | "gemini";
+
+// OpenAI-compatible manager identities share the native tool-call runtime and
+// the same budget bucket; the only difference is the configured model/baseURL.
+export function isOpenAiCompatibleManager(
+  provider: ManagerProviderName,
+): provider is "openai" | "groq" | "gemini" {
+  return (
+    provider === "openai" || provider === "groq" || provider === "gemini"
+  );
+}
 
 export type AgentProfile = "cheap" | "balanced" | "reasoning" | "max";
 
@@ -89,6 +101,8 @@ export interface AgentResult {
   stderr: string;
   durationMs: number;
   usage: UsageRecord;
+  model?: string;
+  toolCalls?: ManagerToolCall[];
 }
 
 export interface ReviewedArtifact {
@@ -204,6 +218,7 @@ export type ProposalAction =
   | "create_plan"
   | "set_strategy"
   | "set_alias"
+  | "agent_consultation"
   | "execute_run"
   | "resume_run"
   | "retry_task"
@@ -246,6 +261,20 @@ export interface DuetEvent {
   operationId?: string;
   occurredAt: string;
   payload: unknown;
+}
+
+export type ManagerToolArgumentSchema = Record<string, unknown>;
+
+export interface ManagerToolDefinition {
+  name: string;
+  description: string;
+  parameters: ManagerToolArgumentSchema;
+}
+
+export interface ManagerToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
 }
 
 export interface ArtifactRecord {

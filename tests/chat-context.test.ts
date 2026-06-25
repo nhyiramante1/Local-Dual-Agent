@@ -144,6 +144,7 @@ test("context includes recent conversation turns chronologically without a run",
     assert.match(context.prompt, /create_plan.*set_strategy.*set_alias are only valid in global chat/);
     assert.match(context.prompt, /general workflow or tooling questions, answer them directly/i);
     assert.match(context.prompt, /Do not tack a proposal onto a conversational answer/i);
+    assert.match(context.prompt, /If a planner operation is already queued or running/i);
     assert.match(context.prompt, /## Conversation/);
     assert.doesNotMatch(context.prompt, /message 1/);
     assert.match(context.prompt, /message 4/);
@@ -151,6 +152,142 @@ test("context includes recent conversation turns chronologically without a run",
       context.prompt.indexOf("message 4") < context.prompt.indexOf("message 6"),
     );
     assert.ok(context.metadata.omitted.includes("Run And Tasks"));
+  });
+});
+
+test("tool-runtime context omits the legacy proposal format and labels turns as history", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    store.appendConversationTurn({
+      conversationId: conversation.id,
+      role: "user",
+      content: "what can you do",
+    });
+
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+      { toolRuntime: true },
+    );
+
+    // Legacy fenced-block instructions must not appear in the tool runtime.
+    assert.doesNotMatch(context.prompt, /## Action Proposal Format/);
+    assert.doesNotMatch(context.prompt, /duet-proposal/);
+    // Native tool guidance replaces it.
+    assert.match(context.prompt, /## Manager Tools/);
+    assert.match(context.prompt, /Default to conversation/i);
+    assert.match(context.prompt, /bare acknowledgements/i);
+    // Recent turns are explicitly framed as history, not the current request.
+    assert.match(context.prompt, /history of THIS thread/i);
+    assert.match(context.prompt, /current request is the LAST user turn/i);
+  });
+});
+
+test("context state lines describe state without imperative propose nudges", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+      { toolRuntime: true },
+    );
+    // State lines must not instruct the model to propose; over-eager models
+    // treat "(propose X ...)" hints as a to-do list and propose on a bare "hi".
+    assert.doesNotMatch(context.prompt, /\(propose set_strategy/);
+    assert.doesNotMatch(context.prompt, /\(propose set_alias/);
+    assert.doesNotMatch(context.prompt, /emit a set_strategy proposal/);
+    assert.match(context.prompt, /preferred_strategy: none saved/);
+    assert.match(context.prompt, /known_aliases: none saved/);
+  });
+});
+
+test("tool-runtime context hides consultation guidance when capability is disabled", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+      { toolRuntime: true, supportsAgentConsultation: false },
+    );
+
+    assert.doesNotMatch(context.prompt, /request_agent_consultation/);
+    assert.match(context.prompt, /## Manager Tools/);
+  });
+});
+
+test("available runs show only the first line of a polluted goal", async () => {
+  await withStore((store) => {
+    const stamp = "2026-06-01T00:00:00.000Z";
+    store.createRun(
+      {
+        id: "run-polluted",
+        repoPath: "/repo",
+        repoRoot: "/repo",
+        goal: "Add dark mode\n\nConversation context:\n[1] lets do a new plan\n[2] go ahead",
+        status: "failed",
+        leadProvider: "codex",
+        baseBranch: "main",
+        baseCommit: "abc",
+        integrationBranch: "duet/run-polluted/integration",
+        configJson: "{}",
+        cancellationRequested: false,
+        createdAt: stamp,
+        updatedAt: stamp,
+      },
+      [],
+    );
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+      { toolRuntime: true },
+    );
+    assert.match(context.prompt, /run run-polluted goal=Add dark mode status=failed/);
+    assert.doesNotMatch(context.prompt, /lets do a new plan/);
+    assert.doesNotMatch(context.prompt, /Conversation context:/);
+  });
+});
+
+test("global context includes active background planner operations", async () => {
+  await withStore((store) => {
+    store.createOperation({
+      id: "planning-op",
+      kind: "plan",
+      status: "running",
+      serviceInstanceId: "test",
+      inputHash: "hash",
+      createdAt: new Date().toISOString(),
+    });
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "openai",
+    });
+
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+    );
+
+    assert.match(context.prompt, /## Background Operations/);
+    assert.match(context.prompt, /planner is already working/i);
+    assert.match(context.prompt, /operation planning-op kind=plan status=running/);
   });
 });
 

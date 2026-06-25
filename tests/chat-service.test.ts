@@ -439,6 +439,36 @@ test("malformed or invalid proposal output degrades to plain chat without a prop
   }
 });
 
+test("malformed proposal-shaped manager output is stripped from visible chat", async () => {
+  const h = await startService({
+    text:
+      'This idea is workable. The planner is already running, so keep chatting.\n\n```duet-proposal\n{"action":"create_plan","goal":"x","repoPath":"C:\\\\repo"}',
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(
+      h.base,
+      conversationId,
+      "what do you think of the plan",
+      "chatkey-malformed-proposal-strip",
+    );
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager);
+    assert.match(manager.content, /This idea is workable/);
+    assert.doesNotMatch(manager.content, /duet-proposal/);
+    assert.doesNotMatch(manager.content, /"action":"create_plan"/);
+    assert.equal(h.store.listProposals(conversationId).length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("action-like chat can create a proposal without mutating run state", async () => {
   const h = await startService({
     text: proposalReply("approve_plan", {
@@ -1848,12 +1878,15 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /data-proposal-start/);
   assert.match(dashboardJs, /Start operation/);
   assert.match(dashboardJs, /\/start/);
+  assert.match(dashboardJs, /planOperations/);
+  assert.match(dashboardJs, /Plan generation started\. You can keep chatting/);
+  assert.match(dashboardJs, /data-plan-show/);
+  assert.match(dashboardJs, /Show plan here/);
   assert.match(dashboardJs, /\/proposals\/"\+encodeURIComponent\(proposalId\)\+"\/dismiss/);
   assert.match(dashboardJs, /Copy CLI/);
-  assert.match(dashboardJs, /return Boolean\(chat\.activeOperation\)/);
+  assert.match(dashboardJs, /return Boolean\(chat\.activeOperation \|\| chat\.pendingTurn\)/);
   assert.match(dashboardJs, /loadRuns\(\{selectCurrent:true\}\)/);
   assert.doesNotMatch(dashboardJs, /if\(selected\) await selectRun\(selected\)/);
-  assert.doesNotMatch(dashboardJs, /setChatEnabled\(true\)/);
   assert.doesNotMatch(dashboardJs, /activeOperationId/);
   assert.doesNotMatch(dashboardJs, /action-ticket/);
   // /approve is intentionally present — 6B adds browser-confirm approval path
@@ -2341,6 +2374,358 @@ test("openai provider mock completes a manager turn successfully", async () => {
   }
 });
 
+test("openai native tool call creates a plan proposal without prose parsing", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-openai-tools-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-tools-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  let sawTools = false;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      if (turn.tools?.length) {
+        sawTools = true;
+        assert.ok(turn.tools.some((tool) => tool.name === "create_plan_proposal"));
+        return {
+          provider: "openai",
+          sessionId: "tool-call-1",
+          finalText: "I'll create the proposal.",
+          stdout: "",
+          stderr: "",
+          durationMs: 5,
+          model: "openai-compatible-test",
+          toolCalls: [{
+            id: "call-1",
+            name: "create_plan_proposal",
+            argumentsJson: JSON.stringify({
+              repoPath,
+              goal: "Refactor auth module",
+              lead: "codex",
+              profile: "cheap",
+              rationale: "The user asked to create a plan.",
+            }),
+          }],
+          usage: { inputTokens: 20, outputTokens: 5, costKnown: false },
+        };
+      }
+      return {
+        provider: "openai",
+        sessionId: "tool-final-1",
+        finalText: "I created a plan suggestion card for the refactor.",
+        stdout: "",
+        stderr: "",
+        durationMs: 4,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 10, outputTokens: 8, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-tool-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "go ahead", "openai-tool-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    assert.equal(calls, 2);
+    assert.equal(sawTools, true);
+    const turns = store.listConversationTurns(conversationId);
+    const managerTurn = turns.find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, "I created a plan suggestion card for the refactor.");
+    assert.doesNotMatch(managerTurn?.content ?? "", /duet-proposal/);
+    assert.match(managerTurn?.usageJson ?? "", /"toolRuntime":true/);
+    const proposals = store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "create_plan");
+    assert.equal(proposals[0].commandCli, `duet plan --repo "${repoPath}" --lead codex "Refactor auth module"`);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("gemini interface agent runs the native tool runtime and creates a plan proposal", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-gemini-tools-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-gemini-tools-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let sawTools = false;
+  const geminiProvider: ProviderAdapter = {
+    name: "gemini" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      if (turn.tools?.length) {
+        sawTools = true;
+        return {
+          provider: "gemini",
+          sessionId: "gemini-tool-1",
+          finalText: "Creating the plan proposal.",
+          stdout: "",
+          stderr: "",
+          durationMs: 5,
+          model: "gemini-2.5-flash",
+          toolCalls: [{
+            id: "call-1",
+            name: "create_plan_proposal",
+            argumentsJson: JSON.stringify({
+              repoPath,
+              goal: "Add docs",
+              lead: "claude",
+            }),
+          }],
+          usage: { inputTokens: 20, outputTokens: 5, costKnown: false },
+        };
+      }
+      return {
+        provider: "gemini",
+        sessionId: "gemini-final-1",
+        finalText: "I created a plan suggestion card.",
+        stdout: "",
+        stderr: "",
+        durationMs: 4,
+        model: "gemini-2.5-flash",
+        usage: { inputTokens: 10, outputTokens: 8, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "gemini-tool-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: geminiProvider, codex: geminiProvider, gemini: geminiProvider },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "gemini" });
+    assert.equal(store.getConversation(conversationId).interfaceAgent, "gemini");
+    const response = await postTurn(base, conversationId, "create a plan", "gemini-tool-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    assert.equal(sawTools, true);
+    const proposals = store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "create_plan");
+    const managerTurn = store.listConversationTurns(conversationId).find((t) => t.role === "manager");
+    assert.equal(managerTurn?.interfaceAgent, "gemini");
+    assert.doesNotMatch(managerTurn?.content ?? "", /duet-proposal/);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("openai native tool runtime stores text-only manager responses without proposals", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-tools-text-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      assert.ok(turn.tools?.some((tool) => tool.name === "list_runs"));
+      return {
+        provider: "openai",
+        sessionId: "text-only",
+        finalText: "Hi. What would you like to work on?",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-tool-text-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "hi", "openai-tool-text-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    assert.equal(calls, 1);
+    assert.equal(store.listProposals(conversationId).length, 0);
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, "Hi. What would you like to work on?");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("openai tool runtime honors disabled consultation, single-step loop, and fast latency", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-openai-tools-single-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-tools-single-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      assert.equal(turn.timeoutMs, 30_000);
+      assert.ok(turn.tools?.some((tool) => tool.name === "create_plan_proposal"));
+      assert.equal(
+        turn.tools?.some((tool) => tool.name === "request_agent_consultation"),
+        false,
+      );
+      return {
+        provider: "openai",
+        sessionId: "single-step",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [{
+          id: "call-1",
+          name: "create_plan_proposal",
+          argumentsJson: JSON.stringify({
+            repoPath,
+            goal: "Add focused docs",
+            lead: "claude",
+          }),
+        }],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-tool-single-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: {
+      supportsAgentConsultation: false,
+      supportsMultiStepToolLoop: false,
+      latencyTier: "fast",
+    },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "create a plan", "openai-tool-single-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    assert.equal(calls, 1);
+    assert.equal(store.listProposals(conversationId).length, 1);
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, "I created a create_plan suggestion card.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("openai action mode disabled stores conversational output without proposals", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-disabled-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run() {
+      return {
+        provider: "openai",
+        sessionId: "disabled",
+        finalText: proposalReply("execute_run", { runId: "proposal-run" }),
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-disabled-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { actionMode: "disabled" },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    seedRunWithTask(store);
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "run it", "openai-disabled-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    assert.equal(store.listProposals(conversationId).length, 0);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("proposal start stores operationId on the proposal and listProposalsHistory includes it", async () => {
   const h = await startService();
   try {
@@ -2518,6 +2903,56 @@ test("direct global questions do not persist create_plan proposals", async () =>
     assert.doesNotMatch(managerTurn?.content ?? "", /duet-proposal/);
   } finally {
     await h.cleanup();
+  }
+});
+
+test("create_plan proposal accepts goal confirmation after manager plan offer", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-plan-confirm-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.email", "chat-test@example.invalid"]);
+  await git(repoPath, ["config", "user.name", "Chat Test"]);
+  await git(repoPath, ["commit", "--allow-empty", "-m", "seed"]);
+  const goal = "Add a moveable camera gun that tracks";
+  const h = await startService({
+    text: proposalReply("create_plan", {
+      goal,
+      repoPath,
+      lead: "codex",
+      profile: "balanced",
+    }),
+  });
+  try {
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+    h.store.appendConversationTurn({
+      conversationId,
+      role: "manager",
+      interfaceAgent: "codex",
+      content: "I propose the following plan once you confirm.",
+    });
+
+    const turnResponse = await postTurn(
+      h.base,
+      conversationId,
+      "yes that is the goal",
+      `create-plan-confirm-${randomUUID()}`,
+    );
+    assert.equal(turnResponse.status, 202);
+    const op = ((await turnResponse.json()) as { data: { id: string } }).data;
+
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!h.store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+
+    const proposals = h.store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "create_plan");
+    assert.equal(JSON.parse(proposals[0].commandJson).goal, goal);
+  } finally {
+    await h.cleanup();
+    await rm(repoPath, { recursive: true, force: true });
   }
 });
 

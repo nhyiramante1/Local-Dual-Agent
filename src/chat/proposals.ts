@@ -29,6 +29,11 @@ export interface RawProposal {
   profile?: string;
   description?: string;
   rationale?: string;
+  question?: string;
+  agents?: unknown;
+  mode?: string;
+  maxTurns?: unknown;
+  maxRuntimeSeconds?: unknown;
   // model may supply command/commandCli/cli/tier/commandJson - all ignored
 }
 
@@ -59,7 +64,24 @@ const CREATE_PLAN_INTENT_PATTERNS: readonly RegExp[] = [
   /\bpropose\s+(?:a\s+)?plan\b/i,
   /\bdraft\s+(?:a\s+)?plan\b/i,
   /\bcome\s+up\s+with\s+(?:a\s+)?plan\b/i,
-  /\bplan\s+(?:for|out)\b/i,
+  /\bplan\s+(?:for|out|it|this)\b/i,
+  // Broader natural phrasings the original list missed — kept phrase-specific so
+  // bare mentions like "what is planning poker?" do not count as intent.
+  /\bfor\s+planning\b/i,
+  /\bpropose\b[^.!?\n]*\bplan\b/i,
+  /\bplan(?:ning)?\b[^.!?\n]*\bpropose\b/i,
+];
+
+// Affirmative confirmations ("go ahead", "yes do it") only count as create_plan
+// intent when the manager's previous turn actually offered to propose a plan —
+// otherwise a bare "yes" elsewhere in the chat must not trigger a plan.
+const AFFIRMATIVE_PATTERNS: readonly RegExp[] = [
+  /\bgo\s+ahead\b/i,
+  /\b(?:yes|yeah|yep|yup|sure|ok|okay)\b[^.!?\n]*\b(?:go|proceed|do it|create|plan|propose)\b/i,
+  /\b(?:yes|yeah|yep|yup)\b[^.!?\n]*\b(?:that(?:'s| is)|this(?: is)?|it(?:'s| is))\s+(?:the\s+)?goal\b/i,
+  /\b(?:that(?:'s| is)|this(?: is)?|it(?:'s| is))\s+(?:the\s+)?goal\b/i,
+  /\b(?:correct|exactly|that'?s right)\b[.!?\s]*$/i,
+  /\b(?:proceed|do it|let'?s go|sounds good|go for it|please do)\b/i,
 ];
 
 export interface PreparedProposalAction {
@@ -123,6 +145,12 @@ const ACTION_SPECS: Readonly<Record<ProposalAction, ActionSpec>> = {
     requiresTask: false,
     cli: () => "",
     jsonFields: () => ({}),
+  },
+  agent_consultation: {
+    tier: "ordinary",
+    requiresTask: false,
+    cli: () => "duet consultation request (dashboard consent only; execution deferred)",
+    jsonFields: () => ({ action: "agent_consultation" }),
   },
   execute_run: {
     tier: "ordinary",
@@ -269,10 +297,32 @@ export function parseProposalBlock(text: string): ParseResult {
       lead: typeof obj.lead === "string" ? obj.lead : undefined,
       profile: typeof obj.profile === "string" ? obj.profile : undefined,
       rationale: typeof obj.rationale === "string" ? obj.rationale : undefined,
+      // agent_consultation fields — extracted so the legacy fenced-block path
+      // (Codex/Claude managers) can also synthesize consultation consent cards.
+      question: typeof obj.question === "string" ? obj.question : undefined,
+      agents: Array.isArray(obj.agents) ? obj.agents : undefined,
+      mode: typeof obj.mode === "string" ? obj.mode : undefined,
+      maxTurns: typeof obj.maxTurns === "number" ? obj.maxTurns : undefined,
+      maxRuntimeSeconds:
+        typeof obj.maxRuntimeSeconds === "number" ? obj.maxRuntimeSeconds : undefined,
       // command, commandCli, cli, tier, commandJson are intentionally not extracted
     },
     strippedText: text.slice(0, firstOpenIndex).trimEnd(),
   };
+}
+
+export function stripMalformedProposalArtifacts(text: string): string {
+  const fenceIndex = text.indexOf(FENCE_OPEN);
+  if (fenceIndex >= 0) {
+    return text.slice(0, fenceIndex).trimEnd();
+  }
+
+  const actionJsonAtLine = /(^|\r?\n)\s*\{[^\r\n]*"action"\s*:\s*"[^"]+"[\s\S]*$/m.exec(text);
+  if (actionJsonAtLine?.index !== undefined) {
+    return text.slice(0, actionJsonAtLine.index).trimEnd();
+  }
+
+  return text;
 }
 
 /**
@@ -313,31 +363,61 @@ export function tryValidateAndSynthesize(
   store: Store,
   latestUserMessage?: string,
   configAliases: Record<string, string> = {},
+  diagnostics?: { reason?: string },
+  managerOfferedPlan = false,
+  trustedToolCall = false,
 ): SynthesizedProposal | null {
   if (!VALID_ACTIONS.has(raw.action)) return null;
   const action = raw.action as ProposalAction;
   const spec = ACTION_SPECS[action];
 
   if (action === "create_plan") {
-    if (!userIntentAllowsCreatePlan(latestUserMessage)) return null;
+    if (
+      !trustedToolCall &&
+      !userIntentAllowsCreatePlan(latestUserMessage, managerOfferedPlan)
+    ) {
+      if (diagnostics) {
+        diagnostics.reason =
+          'I can only turn this into a plan proposal when you ask for a plan, or confirm one I just offered. Ask me to create a plan, or say "go ahead" right after I offer one.';
+      }
+      return null;
+    }
     const goal = raw.goal?.trim() ?? "";
     let repoPath = raw.repoPath?.trim() ?? "";
-    if (!goal || !repoPath) return null;
+    if (!goal || !repoPath) {
+      if (diagnostics) diagnostics.reason = `create_plan needs both a "goal" and a "repoPath" — ${!goal ? "goal" : "repoPath"} was missing.`;
+      return null;
+    }
     if (conversation.runId) return null; // create_plan is global-chat only
+    const activePlan = store
+      .listActiveOperations()
+      .find((operation) => operation.kind === "plan");
+    if (activePlan) {
+      if (diagnostics) {
+        diagnostics.reason = `Planner operation ${activePlan.id} is already ${activePlan.status}. Keep chatting while it runs, then revise from the completed plan if needed.`;
+      }
+      return null;
+    }
 
     // Resolve alias if repoPath looks like a shorthand name
     let aliasUsed: string | null = null;
     let aliasRecord: AliasRecord | null = null;
     if (looksLikeAlias(repoPath)) {
       const resolved = resolveAlias(repoPath, store, configAliases);
-      if (!resolved) return null; // unknown alias — don't pass bad path to CLI
+      if (!resolved) {
+        if (diagnostics) diagnostics.reason = `No alias named "${repoPath}" exists. Provide a full path or create the alias first.`;
+        return null; // unknown alias — don't pass bad path to CLI
+      }
       aliasUsed = repoPath.toLowerCase();
       aliasRecord = resolved.record;
       repoPath = resolved.repoPath;
     }
 
     // Validate resolved path is a real git repo
-    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) {
+      if (diagnostics) diagnostics.reason = `The path "${repoPath}" is not a valid git repository (it must exist on disk and contain a .git directory).`;
+      return null;
+    }
 
     const lead: ProviderName = raw.lead === "codex" ? "codex" : (aliasRecord?.lead ?? "claude");
     const profile: AgentProfile = (raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile))
@@ -367,9 +447,18 @@ export function tryValidateAndSynthesize(
     if (conversation.runId) return null; // global-chat only
     const name = raw.name?.trim().toLowerCase() ?? "";
     const repoPath = raw.repoPath?.trim() ?? "";
-    if (!name || !repoPath) return null;
-    if (!ALIAS_NAME_RE.test(name)) return null;
-    if (!existsSync(repoPath) || !isGitRepo(repoPath)) return null;
+    if (!name || !repoPath) {
+      if (diagnostics) diagnostics.reason = `set_alias needs both a "name" and a "repoPath" — ${!name ? "name" : "repoPath"} was missing.`;
+      return null;
+    }
+    if (!ALIAS_NAME_RE.test(name)) {
+      if (diagnostics) diagnostics.reason = `Alias name "${name}" is invalid (use only letters, numbers, hyphens, and underscores).`;
+      return null;
+    }
+    if (!existsSync(repoPath) || !isGitRepo(repoPath)) {
+      if (diagnostics) diagnostics.reason = `The path "${repoPath}" is not a valid git repository (it must exist on disk and contain a .git directory).`;
+      return null;
+    }
     const lead: ProviderName | undefined = (raw.lead && VALID_LEADS.has(raw.lead as ProviderName))
       ? raw.lead as ProviderName
       : undefined;
@@ -409,6 +498,52 @@ export function tryValidateAndSynthesize(
     return {
       action: "set_strategy",
       commandCli,
+      commandJson,
+      tier: "ordinary",
+      summary,
+      expiresAt: new Date(Date.now() + PROPOSAL_EXPIRY_MS).toISOString(),
+    };
+  }
+
+  if (action === "agent_consultation") {
+    const question = raw.question?.trim() ?? raw.goal?.trim() ?? "";
+    const agents = Array.isArray(raw.agents)
+      ? raw.agents.filter((agent): agent is ProviderName => VALID_LEADS.has(agent as ProviderName))
+      : [];
+    const uniqueAgents = [...new Set(agents)];
+    // Phase 7A only supports independent consultation; debate mode is deferred.
+    const mode = "independent";
+    const profile: AgentProfile =
+      raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile)
+        ? (raw.profile as AgentProfile)
+        : "balanced";
+    if (!question || uniqueAgents.length === 0) {
+      if (diagnostics) diagnostics.reason = "agent_consultation needs a question and at least one agent.";
+      return null;
+    }
+    const maxTurns =
+      typeof raw.maxTurns === "number" && Number.isFinite(raw.maxTurns)
+        ? Math.max(1, Math.min(5, Math.floor(raw.maxTurns)))
+        : 1;
+    const maxRuntimeSeconds =
+      typeof raw.maxRuntimeSeconds === "number" && Number.isFinite(raw.maxRuntimeSeconds)
+        ? Math.max(10, Math.min(300, Math.floor(raw.maxRuntimeSeconds)))
+        : 90;
+    const commandJson = JSON.stringify({
+      action: "agent_consultation",
+      question,
+      agents: uniqueAgents,
+      mode,
+      profile,
+      maxTurns,
+      maxRuntimeSeconds,
+    });
+    const summary = raw.rationale
+      ? raw.rationale.slice(0, 500)
+      : `Ask ${uniqueAgents.join(" + ")} for a read-only ${mode} consultation.`;
+    return {
+      action: "agent_consultation",
+      commandCli: "Agent consultation consent request (execution is deferred in Phase 7A).",
       commandJson,
       tier: "ordinary",
       summary,
@@ -457,11 +592,20 @@ export function tryValidateAndSynthesize(
 
 export function userIntentAllowsCreatePlan(
   latestUserMessage?: string,
+  managerOfferedPlan = false,
 ): boolean {
   if (!latestUserMessage) return false;
   const message = latestUserMessage.trim();
   if (!message) return false;
-  return CREATE_PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message));
+  if (CREATE_PLAN_INTENT_PATTERNS.some((pattern) => pattern.test(message))) {
+    return true;
+  }
+  // A plain affirmation only counts when the manager just offered to propose a
+  // plan — this is the natural "create a plan" -> Q&A -> "go ahead" flow.
+  return (
+    managerOfferedPlan &&
+    AFFIRMATIVE_PATTERNS.some((pattern) => pattern.test(message))
+  );
 }
 
 export function prepareProposalAction(
@@ -489,6 +633,13 @@ export function prepareProposalAction(
 
   if (proposal.action === "set_strategy") {
     return prepared; // no run to check; availability determined by expiry only
+  }
+
+  if (proposal.action === "agent_consultation") {
+    return unavailable(
+      prepared,
+      "Agent consultation execution is not available in Phase 7A.",
+    );
   }
 
   if (conversation.runId && proposal.runId !== conversation.runId) {
@@ -589,6 +740,13 @@ export function startProposalAction(
   }
   if (proposal.action === "set_strategy") {
     return { proposal, command: null };
+  }
+
+  if (proposal.action === "agent_consultation") {
+    throw new DuetError(
+      "Agent consultation execution is not available in Phase 7A.",
+      "NOT_IMPLEMENTED",
+    );
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
@@ -693,6 +851,7 @@ function runChangingAction(action: ProposalAction): boolean {
     case "create_plan":
     case "set_strategy":
     case "set_alias":
+    case "agent_consultation":
     default:
       return false;
   }
@@ -715,6 +874,12 @@ function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand
     throw new DuetError(
       "set_alias proposals are dispatched by the server, not commandForProposal.",
       "INVALID_PROPOSAL",
+    );
+  }
+  if (proposal.action === "agent_consultation") {
+    throw new DuetError(
+      "agent_consultation execution is deferred in Phase 7A.",
+      "NOT_IMPLEMENTED",
     );
   }
   if (!proposal.runId) {
