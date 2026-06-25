@@ -361,10 +361,26 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
         configAliases: {},
       });
       assert.equal(byName.ok, true);
-      const nameResult = byName.result as { matches: { path: string }[] };
+      const nameResult = byName.result as { matches: { path: string; type: string }[] };
       const names = nameResult.matches.map((m) => path.basename(m.path)).sort();
       assert.deepEqual(names, ["auth.ts", "util.ts"]);
+      assert.ok(nameResult.matches.every((m) => m.type === "file"));
       assert.ok(!nameResult.matches.some((m) => m.path.includes("node_modules")));
+
+      // Directory search (kind:"dir") locates a folder by name and does not
+      // descend into node_modules.
+      const byDir = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "src", kind: "dir" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byDir.ok, true);
+      const dirResult = byDir.result as { matches: { path: string; type: string }[] };
+      assert.equal(dirResult.matches.length, 1);
+      assert.equal(dirResult.matches[0].type, "dir");
+      assert.equal(path.basename(dirResult.matches[0].path), "src");
 
       // Content search returns the matching line and number, only in tracked src.
       const byContent = await executeManagerTool({

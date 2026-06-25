@@ -310,6 +310,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 .run-progress-state{align-self:flex-start;max-width:560px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:14px 16px;margin:12px 2px}
 .run-progress-title{font-weight:650;font-size:15px;margin-bottom:5px}
+.plan-dismiss{float:right;border:none;background:transparent;color:var(--muted,#888);cursor:pointer;font-size:14px;line-height:1;padding:0 2px;margin-left:8px}
+.plan-dismiss:hover{color:var(--text,#eee)}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -393,6 +395,7 @@ const chat = {
   polling: null,
   pendingTurn: null,
   planOperations: new Map(),
+  clearedHistory: new Set(),
   statusError: null
 };
 let eventStream = null;
@@ -641,8 +644,15 @@ function renderPlanOperationNotices() {
       ? '<div class="proposal-actions"><button type="button" data-plan-open="'+esc(item.runId)+'">Open run</button><button type="button" data-plan-show="'+esc(item.operationId)+'" data-run-id="'+esc(item.runId)+'">Show plan here</button></div>'
       : "";
     const plan = item.planHtml ? '<div class="proposal-copy">Plan</div>'+item.planHtml : "";
+    // Terminal notices (failed/succeeded/stopped) can be cleared by the operator;
+    // a running planner has no X so it is not dismissed mid-flight.
+    const isTerminal = item.status === "failed" || item.status === "succeeded"
+      || item.status === "cancelled" || item.status === "interrupted";
+    const dismissX = isTerminal
+      ? '<button type="button" class="plan-dismiss" title="Dismiss" aria-label="Dismiss" data-plan-dismiss="'+esc(item.operationId)+'">&#x2715;</button>'
+      : "";
     return '<div class="run-progress-state" data-plan-operation="'+esc(item.operationId)+'">'
-      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+'</div>'
+      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+dismissX+'</div>'
       +'<div class="kv">'+body+'</div>'
       +(item.runId ? '<div class="kv">run <b>'+esc(item.runId)+'</b></div>' : "")
       +actions
@@ -880,6 +890,8 @@ function actionLabel(action) {
   return String(action || "").replaceAll("_", " ");
 }
 function renderProposalHistory(proposals) {
+  const cid = currentConversationId();
+  if (cid && chat.clearedHistory.has(cid)) return '';
   const inactive = proposals.filter(p => p.status !== 'proposed');
   if (!inactive.length) return '';
   const items = inactive.map(p => {
@@ -896,7 +908,8 @@ function renderProposalHistory(proposals) {
       +'</div>';
   }).join('');
   const count = inactive.length;
-  return '<details class="proposal-history"><summary>'+count+' past suggestion'+(count===1?'':'s')+'</summary>'+items+'</details>';
+  const clearBtn = '<button type="button" class="plan-dismiss" title="Clear" aria-label="Clear past suggestions" data-history-clear="1">&#x2715;</button>';
+  return '<details class="proposal-history"><summary>'+count+' past suggestion'+(count===1?'':'s')+clearBtn+'</summary>'+items+'</details>';
 }
 async function enrichHistoryOutcomes() {
   const spans = q("chat-turns").querySelectorAll("[data-phi-operation]");
@@ -1261,8 +1274,25 @@ q("chat-turns").addEventListener("click", async (event) => {
   const turnCopy = event.target.closest("[data-turn-copy]");
   const planOpen = event.target.closest("[data-plan-open]");
   const planShow = event.target.closest("[data-plan-show]");
-  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow) return;
+  const planDismiss = event.target.closest("[data-plan-dismiss]");
+  const historyClear = event.target.closest("[data-history-clear]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow && !planDismiss && !historyClear) return;
   try {
+    if (historyClear) {
+      event.preventDefault();
+      const cid = currentConversationId();
+      if (cid) chat.clearedHistory.add(cid);
+      const node = q("chat-turns").querySelector(".proposal-history");
+      if (node) node.remove();
+      return;
+    }
+    if (planDismiss) {
+      const operationId = planDismiss.dataset.planDismiss;
+      chat.planOperations.delete(operationId);
+      const node = q("chat-turns").querySelector('[data-plan-operation="'+CSS.escape(operationId)+'"]');
+      if (node) node.remove();
+      return;
+    }
     if (planOpen) {
       await selectRun(planOpen.dataset.planOpen);
       return;

@@ -328,7 +328,7 @@ export function buildManagerChatContext(
       "- list_runs, inspect_run — run/task status.",
       "- check_path, check_git_repo — does a path exist / is it a git repo. Prefer inspecting before proposing a plan against a path you are unsure of.",
       "- resolve_alias — turn a short alias name into a full repo path.",
-      "- search_files — find files by name and/or search file contents under a directory. Use it to locate the right code area before proposing a plan; chain it with check_git_repo and create_plan_proposal.",
+      "- search_files — find files OR folders by name and/or search file contents. If the operator names a project without a path, search for it: omit path (defaults to their home directory) and use kind:'dir' with a namePattern to locate the folder, then chain check_git_repo and create_plan_proposal. Never claim you cannot search the filesystem. If a name search returns nothing, the folder may be named differently — try a broader namePattern or a contentPattern before giving up. Only ever cite an exact path returned by a tool; never invent or reformat one.",
       "",
       "Proposal tools (create a durable suggestion CARD the operator must start — they do not execute anything):",
       "- create_plan_proposal — only when the operator clearly asks to start/create a plan, or confirms a plan you just offered.",

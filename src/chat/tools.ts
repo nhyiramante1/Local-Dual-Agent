@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -88,15 +89,15 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
   {
     name: "search_files",
     description:
-      "Read-only search of a local directory tree. Find files by name and/or search file contents. Skips node_modules/.git/dist/build/.duet. Use to locate code before proposing a plan against a path.",
+      "Read-only search of a local directory tree. Find files OR folders by name (kind:'dir' locates a project/repo folder), and/or search file contents. If path is omitted it searches the user's home directory, so you can locate a project the operator names without being given a path. Skips node_modules/.git/dist/build/.duet. Chain with check_git_repo + create_plan_proposal.",
     parameters: {
       type: "object",
       additionalProperties: false,
-      required: ["path"],
       properties: {
         path: { type: "string", minLength: 1, maxLength: 1_000 },
         namePattern: { type: "string", minLength: 1, maxLength: 200 },
         contentPattern: { type: "string", minLength: 1, maxLength: 200 },
+        kind: { type: "string", enum: ["file", "dir", "any"] },
         maxResults: { type: "integer", minimum: 1, maximum: 100 },
       },
     },
@@ -222,9 +223,14 @@ function boundedRuns(store: Store, limit: number): unknown[] {
 const SEARCH_SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".duet", ".next", "coverage", ".cache",
 ]);
-const SEARCH_MAX_FILES = 8_000;
+// Name/dir searches only stat entries (cheap), so they get a larger budget than
+// content searches, which read file bodies.
+const SEARCH_MAX_ENTRIES_NAME = 40_000;
+const SEARCH_MAX_ENTRIES_CONTENT = 8_000;
 const SEARCH_MAX_DEPTH = 12;
 const SEARCH_MAX_FILE_BYTES = 512_000;
+
+type SearchKind = "file" | "dir" | "any";
 
 // Build a case-insensitive matcher. Glob-ish (`*`/`?`) name patterns are honored;
 // otherwise the pattern is a substring. Content patterns are treated as a regex,
@@ -251,23 +257,37 @@ function buildMatcher(pattern: string, glob: boolean): (value: string) => boolea
 
 interface SearchHit {
   path: string;
+  type: "file" | "dir";
   line?: number;
   snippet?: string;
 }
 
 function searchFiles(
   root: string,
-  options: { namePattern?: string; contentPattern?: string; maxResults: number },
-): { matches: SearchHit[]; filesScanned: number; truncated: boolean } {
+  options: {
+    namePattern?: string;
+    contentPattern?: string;
+    kind: SearchKind;
+    maxResults: number;
+  },
+): { matches: SearchHit[]; entriesScanned: number; truncated: boolean } {
   const matchName = options.namePattern
     ? buildMatcher(options.namePattern, true)
     : undefined;
   const matchContent = options.contentPattern
     ? buildMatcher(options.contentPattern, false)
     : undefined;
+  const wantDirs = options.kind === "dir" || options.kind === "any";
+  const wantFiles = options.kind === "file" || options.kind === "any";
+  const scanBudget = matchContent ? SEARCH_MAX_ENTRIES_CONTENT : SEARCH_MAX_ENTRIES_NAME;
   const matches: SearchHit[] = [];
-  let filesScanned = 0;
+  let entriesScanned = 0;
   let truncated = false;
+
+  const record = (hit: SearchHit): void => {
+    matches.push(hit);
+    if (matches.length >= options.maxResults) truncated = true;
+  };
 
   const walk = (dir: string, depth: number): void => {
     if (truncated || depth > SEARCH_MAX_DEPTH) return;
@@ -279,22 +299,29 @@ function searchFiles(
     }
     for (const entry of entries) {
       if (truncated) return;
-      if (entry.isDirectory()) {
-        if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
-        walk(path.join(dir, entry.name), depth + 1);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (++filesScanned > SEARCH_MAX_FILES) {
+      if (++entriesScanned > scanBudget) {
         truncated = true;
         return;
       }
+      if (entry.isDirectory()) {
+        if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        const full = path.join(dir, entry.name);
+        // A directory match (e.g. finding a repo folder) is recorded but we still
+        // descend, unless content search would be pointless on a pure dir match.
+        if (wantDirs && matchName && matchName(entry.name) && !matchContent) {
+          record({ path: full, type: "dir" });
+          // Don't descend into a matched project folder — repos rarely nest.
+          continue;
+        }
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !wantFiles) continue;
       const full = path.join(dir, entry.name);
       const nameOk = !matchName || matchName(entry.name);
       if (!nameOk) continue;
       if (!matchContent) {
-        // name-only search
-        matches.push({ path: full });
+        record({ path: full, type: "file" });
       } else {
         let text: string;
         try {
@@ -306,20 +333,16 @@ function searchFiles(
         const lines = text.split(/\r?\n/);
         for (let i = 0; i < lines.length; i++) {
           if (matchContent(lines[i])) {
-            matches.push({ path: full, line: i + 1, snippet: lines[i].trim().slice(0, 200) });
+            record({ path: full, type: "file", line: i + 1, snippet: lines[i].trim().slice(0, 200) });
             break; // first hit per file is enough
           }
         }
-      }
-      if (matches.length >= options.maxResults) {
-        truncated = true;
-        return;
       }
     }
   };
 
   walk(root, 0);
-  return { matches, filesScanned, truncated };
+  return { matches, entriesScanned, truncated };
 }
 
 function proposalResult(proposal: SynthesizedProposal): unknown {
@@ -455,7 +478,11 @@ async function executeKnownTool(
     };
   }
   if (name === "search_files") {
-    const root = pathArg(args, "path");
+    // Path is optional: default to the user's home directory so the manager can
+    // locate a project the operator names without being handed an exact path.
+    const root = typeof args.path === "string" && args.path.trim() !== ""
+      ? pathArg(args, "path")
+      : os.homedir();
     if (!existsSync(root)) {
       return { result: { code: "PATH_NOT_FOUND", path: root, matches: [] } };
     }
@@ -474,12 +501,15 @@ async function executeKnownTool(
         "INVALID_ARGUMENT",
       );
     }
+    const kind: SearchKind =
+      args.kind === "dir" || args.kind === "any" ? args.kind : "file";
     const maxResults = typeof args.maxResults === "number"
       ? Math.max(1, Math.min(100, Math.floor(args.maxResults)))
       : 20;
-    const { matches, filesScanned, truncated } = searchFiles(root, {
+    const { matches, entriesScanned, truncated } = searchFiles(root, {
       namePattern,
       contentPattern,
+      kind,
       maxResults,
     });
     return {
@@ -487,7 +517,8 @@ async function executeKnownTool(
         root,
         namePattern,
         contentPattern,
-        filesScanned,
+        kind,
+        entriesScanned,
         truncated,
         matchCount: matches.length,
         matches,
