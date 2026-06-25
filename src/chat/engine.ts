@@ -13,7 +13,7 @@ import type {
 import { isOpenAiCompatibleManager } from "../core/domain.js";
 import type { DuetConfig } from "../config.js";
 import { DuetError } from "../core/errors.js";
-import type { ProviderAdapter } from "../providers/adapter.js";
+import type { AgentToolStep, ProviderAdapter } from "../providers/adapter.js";
 import type { Store } from "../persistence/store.js";
 import {
   assertFingerprintUnchanged,
@@ -34,7 +34,6 @@ import { serviceLog } from "../service/logger.js";
 import {
   executeManagerTool,
   managerToolDefinitions,
-  serializeToolExecutions,
   type ManagerToolExecution,
 } from "./tools.js";
 
@@ -363,9 +362,6 @@ export class ChatEngine {
     before: Awaited<ReturnType<typeof fingerprintRepository>> | undefined,
     shouldCancel?: () => boolean,
   ): Promise<ConversationTurnRecord> {
-    let first: AgentResult | undefined;
-    let final: AgentResult | undefined;
-    let executions: ManagerToolExecution[] = [];
     // Consultation is a paid capability; only expose its tool when enabled for
     // this manager profile. Other tools are always available to a capable model.
     const tools = this.toolRuntime.supportsAgentConsultation
@@ -374,64 +370,102 @@ export class ChatEngine {
           (tool) => tool.name !== "request_agent_consultation",
         );
     const timeoutMs = this.toolRuntimeTimeoutMs();
+    const executions: ManagerToolExecution[] = [];
+    const responses: AgentResult[] = [];
+    const priorSteps: AgentToolStep[] = [];
+    // maxToolCallsPerTurn is a GLOBAL budget across loop iterations. It also
+    // bounds iterations, since every iteration that continues the loop must
+    // consume at least one call.
+    let budgetRemaining = Math.max(0, this.toolRuntime.maxToolCallsPerTurn);
+    let result: AgentResult | undefined;
     try {
       const prompt = this.toolContextBuilder(conversation).prompt;
-      first = await adapter.run({
-        cwd,
-        prompt,
-        mode: "read-only",
-        timeoutMs,
-        maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
-        shouldCancel,
-        tools,
-      });
-      if (shouldCancel?.()) {
-        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
-      }
-      const toolCalls = (first.toolCalls ?? []).slice(
-        0,
-        this.toolRuntime.maxToolCallsPerTurn,
-      );
-      executions = await this.executeToolCalls(toolCalls, conversation);
-      if ((first.toolCalls?.length ?? 0) > toolCalls.length) {
-        executions.push({
-          name: "tool_runtime",
-          ok: false,
-          elapsedMs: 0,
-          result: {
-            code: "TOOL_CALL_LIMIT_EXCEEDED",
-            message: `Only ${this.toolRuntime.maxToolCallsPerTurn} tool calls are allowed per manager turn.`,
-          },
-        });
-      }
-      if (executions.length > 0 && this.toolRuntime.supportsMultiStepToolLoop) {
-        final = await adapter.run({
+      // Bounded native tool loop. Each pass offers the tools; the model either
+      // requests calls (which we execute and replay as real tool messages) or
+      // answers in text (which ends the turn). With the loop disabled, this runs
+      // exactly one tool round followed by one tool-free summarization pass.
+      while (true) {
+        const response = await adapter.run({
           cwd,
-          prompt:
-            prompt +
-            "\n\n## Duet Tool Results\n" +
-            "These are trusted backend tool results. Explain them naturally. If a proposal was created, mention it briefly; do not output JSON blocks.\n" +
-            serializeToolExecutions(executions),
+          prompt,
           mode: "read-only",
           timeoutMs,
           maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
           shouldCancel,
+          tools,
+          priorSteps: priorSteps.length ? [...priorSteps] : undefined,
         });
-      } else {
-        final = first;
+        responses.push(response);
+        if (shouldCancel?.()) {
+          throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+        }
+        const requested = response.toolCalls ?? [];
+        if (requested.length === 0) {
+          // Model answered in text — the turn is complete.
+          result = response;
+          break;
+        }
+        const allowed = requested.slice(0, budgetRemaining);
+        const stepExecutions = await this.executeToolCalls(allowed, conversation);
+        executions.push(...stepExecutions);
+        budgetRemaining -= allowed.length;
+        if (requested.length > allowed.length) {
+          executions.push({
+            name: "tool_runtime",
+            ok: false,
+            elapsedMs: 0,
+            result: {
+              code: "TOOL_CALL_LIMIT_EXCEEDED",
+              message: `Only ${this.toolRuntime.maxToolCallsPerTurn} tool calls are allowed per manager turn.`,
+            },
+          });
+        }
+        priorSteps.push({
+          assistantToolCalls: allowed,
+          assistantText: response.finalText || undefined,
+          results: allowed.map((call, index) => ({
+            toolCallId: call.id,
+            name: call.name,
+            resultJson: JSON.stringify(stepExecutions[index]?.result ?? {}),
+          })),
+        });
+        if (!this.toolRuntime.supportsMultiStepToolLoop) {
+          // Legacy single-step: run exactly one tool round, then stop. The
+          // response that carried the tool calls is the turn's result (its text,
+          // or a fallback summary of what the tools did).
+          result = response;
+          break;
+        }
+        if (budgetRemaining <= 0) {
+          // Loop enabled but the call budget is spent mid-loop: one final
+          // tool-free pass so the model writes a closing message over the
+          // results instead of being cut off after a bare tool call.
+          const summary = await adapter.run({
+            cwd,
+            prompt,
+            mode: "read-only",
+            timeoutMs,
+            maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
+            shouldCancel,
+            priorSteps: [...priorSteps],
+          });
+          responses.push(summary);
+          result = summary;
+          break;
+        }
+        // Otherwise loop again with tools and the replayed steps.
       }
       if (shouldCancel?.()) {
         throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
       }
     } finally {
-      if (before && (first || final)) {
+      if (before && responses.length > 0) {
         const after = await fingerprintRepository(cwd);
         assertFingerprintUnchanged(before, after);
       }
     }
-    const result = final ?? first;
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
-    const usage = this.combineUsage(first, final);
+    const usage = this.combineUsage(responses);
     return this.store.transaction(() => {
       const turn = this.store.appendConversationTurn({
         conversationId: conversation.id,
@@ -492,27 +526,45 @@ export class ChatEngine {
     return executions;
   }
 
-  private combineUsage(
-    first: AgentResult | undefined,
-    final: AgentResult | undefined,
-  ): AgentResult["usage"] {
-    if (!first) {
-      return final?.usage ?? { inputTokens: 0, outputTokens: 0, costKnown: false };
+  private combineUsage(responses: AgentResult[]): AgentResult["usage"] {
+    if (responses.length === 0) {
+      return { inputTokens: 0, outputTokens: 0, costKnown: false };
     }
-    if (!final || first === final) return first.usage;
+    if (responses.length === 1) return responses[0].usage;
+    let anyCostKnown = false;
+    let anyCostUsd = false;
+    const totals = responses.reduce(
+      (acc, response) => {
+        const usage = response.usage;
+        anyCostKnown ||= usage.costKnown === true;
+        anyCostUsd ||= usage.costUsd !== undefined;
+        return {
+          inputTokens: acc.inputTokens + (usage.inputTokens ?? 0),
+          cachedInputTokens: acc.cachedInputTokens + (usage.cachedInputTokens ?? 0),
+          outputTokens: acc.outputTokens + (usage.outputTokens ?? 0),
+          reasoningOutputTokens:
+            acc.reasoningOutputTokens + (usage.reasoningOutputTokens ?? 0),
+          costUsd: acc.costUsd + (usage.costUsd ?? 0),
+          // costKnown is true only if EVERY pass reported known cost.
+          costKnown: acc.costKnown && usage.costKnown === true,
+        };
+      },
+      {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        costUsd: 0,
+        costKnown: true,
+      },
+    );
     return {
-      inputTokens: (first.usage.inputTokens ?? 0) + (final.usage.inputTokens ?? 0),
-      cachedInputTokens:
-        (first.usage.cachedInputTokens ?? 0) + (final.usage.cachedInputTokens ?? 0),
-      outputTokens: (first.usage.outputTokens ?? 0) + (final.usage.outputTokens ?? 0),
-      reasoningOutputTokens:
-        (first.usage.reasoningOutputTokens ?? 0) +
-        (final.usage.reasoningOutputTokens ?? 0),
-      costKnown: first.usage.costKnown && final.usage.costKnown,
-      costUsd:
-        first.usage.costUsd !== undefined || final.usage.costUsd !== undefined
-          ? (first.usage.costUsd ?? 0) + (final.usage.costUsd ?? 0)
-          : undefined,
+      inputTokens: totals.inputTokens,
+      cachedInputTokens: totals.cachedInputTokens,
+      outputTokens: totals.outputTokens,
+      reasoningOutputTokens: totals.reasoningOutputTokens,
+      costKnown: anyCostKnown ? totals.costKnown : false,
+      costUsd: anyCostUsd ? totals.costUsd : undefined,
     };
   }
 

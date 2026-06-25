@@ -1,7 +1,8 @@
 import OpenAI from "openai";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import type { AgentResult, ManagerToolDefinition } from "../core/domain.js";
-import type { AgentTurn, ProviderAdapter } from "./adapter.js";
+import type { AgentToolStep, AgentTurn, ProviderAdapter } from "./adapter.js";
 
 const DEFAULT_MODEL = "gpt-4o-mini";
 
@@ -32,6 +33,32 @@ function sanitizeSchema(schema: Record<string, unknown>): Record<string, unknown
     }
   }
   return out;
+}
+
+// Replay prior tool-loop steps as real assistant(tool_calls) + tool messages so
+// the model sees correct conversation state on each iteration. Far more reliable
+// than appending tool-result JSON into the system prompt.
+function replaySteps(steps: AgentToolStep[]): ChatCompletionMessageParam[] {
+  const messages: ChatCompletionMessageParam[] = [];
+  for (const step of steps) {
+    messages.push({
+      role: "assistant",
+      content: step.assistantText ?? "",
+      tool_calls: step.assistantToolCalls.map((call) => ({
+        id: call.id,
+        type: "function" as const,
+        function: { name: call.name, arguments: call.argumentsJson },
+      })),
+    });
+    for (const result of step.results) {
+      messages.push({
+        role: "tool",
+        tool_call_id: result.toolCallId,
+        content: result.resultJson,
+      });
+    }
+  }
+  return messages;
 }
 
 function serializeTools(tools: ManagerToolDefinition[]) {
@@ -73,9 +100,12 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
           // `system` -> systemInstruction, so a system-only request leaves
           // `contents` empty and 400s ("contents is not specified"). The context
           // already embeds the conversation; this nudges a reply to it.
+          // Prior tool-loop steps (if any) are replayed between the nudge and now
+          // so the model can chain tools with real tool-result messages.
           messages: [
             { role: "system", content: turn.prompt },
             { role: "user", content: "Respond to the latest operator message in the conversation above." },
+            ...(turn.priorSteps?.length ? replaySteps(turn.priorSteps) : []),
           ],
           tools: hasTools ? serializeTools(turn.tools!) : undefined,
           tool_choice: hasTools ? "auto" : undefined,

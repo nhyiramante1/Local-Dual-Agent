@@ -2388,7 +2388,9 @@ test("openai native tool call creates a plan proposal without prose parsing", as
     supportsNativeToolCalling: true,
     async run(turn) {
       calls += 1;
-      if (turn.tools?.length) {
+      // First pass offers tools and requests a call; once the model sees the
+      // replayed tool result (priorSteps), it answers in text and ends the turn.
+      if (turn.tools?.length && !turn.priorSteps?.length) {
         sawTools = true;
         assert.ok(turn.tools.some((tool) => tool.name === "create_plan_proposal"));
         return {
@@ -2478,7 +2480,7 @@ test("gemini interface agent runs the native tool runtime and creates a plan pro
     name: "gemini" as const,
     supportsNativeToolCalling: true,
     async run(turn) {
-      if (turn.tools?.length) {
+      if (turn.tools?.length && !turn.priorSteps?.length) {
         sawTools = true;
         return {
           provider: "gemini",
@@ -2675,6 +2677,177 @@ test("openai tool runtime honors disabled consultation, single-step loop, and fa
     store.close();
     await rm(directory, { recursive: true, force: true });
     await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("native tool loop chains multiple rounds and persists a later-round proposal", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-tool-loop-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-tool-loop-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  const seenPriorStepCounts: number[] = [];
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      seenPriorStepCounts.push(turn.priorSteps?.length ?? 0);
+      // Round 1: read-only list_runs. Round 2 (after seeing the first result):
+      // create_plan_proposal. Round 3 (after two replayed steps): plain text.
+      const priorCount = turn.priorSteps?.length ?? 0;
+      if (priorCount === 0) {
+        return {
+          provider: "openai",
+          sessionId: "loop-1",
+          finalText: "Let me check the runs first.",
+          stdout: "",
+          stderr: "",
+          durationMs: 3,
+          model: "openai-compatible-test",
+          toolCalls: [{ id: "call-1", name: "list_runs", argumentsJson: "{}" }],
+          usage: { inputTokens: 5, outputTokens: 3, costKnown: false },
+        };
+      }
+      if (priorCount === 1) {
+        // The replayed step must carry the list_runs result back to the model.
+        assert.equal(turn.priorSteps?.[0]?.results[0]?.name, "list_runs");
+        return {
+          provider: "openai",
+          sessionId: "loop-2",
+          finalText: "Now I'll propose the plan.",
+          stdout: "",
+          stderr: "",
+          durationMs: 4,
+          model: "openai-compatible-test",
+          toolCalls: [{
+            id: "call-2",
+            name: "create_plan_proposal",
+            argumentsJson: JSON.stringify({ repoPath, goal: "Add a changelog", lead: "claude" }),
+          }],
+          usage: { inputTokens: 6, outputTokens: 4, costKnown: false },
+        };
+      }
+      return {
+        provider: "openai",
+        sessionId: "loop-3",
+        finalText: "I checked the runs and created a plan suggestion card.",
+        stdout: "",
+        stderr: "",
+        durationMs: 4,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 7, outputTokens: 5, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "tool-loop-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: true, maxToolCallsPerTurn: 5 },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "create a plan", "tool-loop-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    // Three model calls: two tool rounds plus the final text answer.
+    assert.equal(calls, 3);
+    assert.deepEqual(seenPriorStepCounts, [0, 1, 2]);
+    const proposals = store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "create_plan");
+    const managerTurn = store.listConversationTurns(conversationId).find((t) => t.role === "manager");
+    assert.equal(managerTurn?.content, "I checked the runs and created a plan suggestion card.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("native tool loop stops at the global call budget and writes a closing summary", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-tool-budget-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  let summaryHadNoTools = false;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      // The model keeps asking for read-only tools; only the tool-free
+      // summarization pass (no tools) produces the closing text.
+      if (turn.tools?.length) {
+        return {
+          provider: "openai",
+          sessionId: `budget-${calls}`,
+          finalText: "Checking again.",
+          stdout: "",
+          stderr: "",
+          durationMs: 2,
+          model: "openai-compatible-test",
+          toolCalls: [{ id: `call-${calls}`, name: "list_runs", argumentsJson: "{}" }],
+          usage: { inputTokens: 4, outputTokens: 2, costKnown: false },
+        };
+      }
+      summaryHadNoTools = true;
+      return {
+        provider: "openai",
+        sessionId: "budget-summary",
+        finalText: "I reviewed the available runs for you.",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 5, outputTokens: 4, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "tool-budget-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: true, maxToolCallsPerTurn: 2 },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "show me the runs", "tool-budget-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    // Budget 2 => two tool rounds, then one tool-free summary pass = 3 calls.
+    assert.equal(calls, 3);
+    assert.equal(summaryHadNoTools, true);
+    assert.equal(store.listProposals(conversationId).length, 0);
+    const managerTurn = store.listConversationTurns(conversationId).find((t) => t.role === "manager");
+    assert.equal(managerTurn?.content, "I reviewed the available runs for you.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
