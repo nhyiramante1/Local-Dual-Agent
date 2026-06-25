@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -82,6 +82,22 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
       required: ["name"],
       properties: {
         name: { type: "string", minLength: 1, maxLength: 80 },
+      },
+    },
+  },
+  {
+    name: "search_files",
+    description:
+      "Read-only search of a local directory tree. Find files by name and/or search file contents. Skips node_modules/.git/dist/build/.duet. Use to locate code before proposing a plan against a path.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: {
+        path: { type: "string", minLength: 1, maxLength: 1_000 },
+        namePattern: { type: "string", minLength: 1, maxLength: 200 },
+        contentPattern: { type: "string", minLength: 1, maxLength: 200 },
+        maxResults: { type: "integer", minimum: 1, maximum: 100 },
       },
     },
   },
@@ -201,6 +217,109 @@ function boundedRuns(store: Store, limit: number): unknown[] {
     version: run.version,
     updatedAt: run.updatedAt,
   }));
+}
+
+const SEARCH_SKIP_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", ".duet", ".next", "coverage", ".cache",
+]);
+const SEARCH_MAX_FILES = 8_000;
+const SEARCH_MAX_DEPTH = 12;
+const SEARCH_MAX_FILE_BYTES = 512_000;
+
+// Build a case-insensitive matcher. Glob-ish (`*`/`?`) name patterns are honored;
+// otherwise the pattern is a substring. Content patterns are treated as a regex,
+// falling back to a literal substring when the regex is invalid.
+function buildMatcher(pattern: string, glob: boolean): (value: string) => boolean {
+  if (glob && /[*?]/.test(pattern)) {
+    const re = new RegExp(
+      "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+      "i",
+    );
+    return (value) => re.test(value);
+  }
+  if (!glob) {
+    try {
+      const re = new RegExp(pattern, "i");
+      return (value) => re.test(value);
+    } catch {
+      // fall through to literal substring
+    }
+  }
+  const needle = pattern.toLowerCase();
+  return (value) => value.toLowerCase().includes(needle);
+}
+
+interface SearchHit {
+  path: string;
+  line?: number;
+  snippet?: string;
+}
+
+function searchFiles(
+  root: string,
+  options: { namePattern?: string; contentPattern?: string; maxResults: number },
+): { matches: SearchHit[]; filesScanned: number; truncated: boolean } {
+  const matchName = options.namePattern
+    ? buildMatcher(options.namePattern, true)
+    : undefined;
+  const matchContent = options.contentPattern
+    ? buildMatcher(options.contentPattern, false)
+    : undefined;
+  const matches: SearchHit[] = [];
+  let filesScanned = 0;
+  let truncated = false;
+
+  const walk = (dir: string, depth: number): void => {
+    if (truncated || depth > SEARCH_MAX_DEPTH) return;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory — skip quietly
+    }
+    for (const entry of entries) {
+      if (truncated) return;
+      if (entry.isDirectory()) {
+        if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        walk(path.join(dir, entry.name), depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (++filesScanned > SEARCH_MAX_FILES) {
+        truncated = true;
+        return;
+      }
+      const full = path.join(dir, entry.name);
+      const nameOk = !matchName || matchName(entry.name);
+      if (!nameOk) continue;
+      if (!matchContent) {
+        // name-only search
+        matches.push({ path: full });
+      } else {
+        let text: string;
+        try {
+          if (statSync(full).size > SEARCH_MAX_FILE_BYTES) continue;
+          text = readFileSync(full, "utf8");
+        } catch {
+          continue; // binary/unreadable — skip
+        }
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          if (matchContent(lines[i])) {
+            matches.push({ path: full, line: i + 1, snippet: lines[i].trim().slice(0, 200) });
+            break; // first hit per file is enough
+          }
+        }
+      }
+      if (matches.length >= options.maxResults) {
+        truncated = true;
+        return;
+      }
+    }
+  };
+
+  walk(root, 0);
+  return { matches, filesScanned, truncated };
 }
 
 function proposalResult(proposal: SynthesizedProposal): unknown {
@@ -333,6 +452,46 @@ async function executeKnownTool(
       result: repoPath
         ? { found: true, name: alias, repoPath, source: record ? "sqlite" : "config" }
         : { found: false, name: alias },
+    };
+  }
+  if (name === "search_files") {
+    const root = pathArg(args, "path");
+    if (!existsSync(root)) {
+      return { result: { code: "PATH_NOT_FOUND", path: root, matches: [] } };
+    }
+    if (!statSync(root).isDirectory()) {
+      return { result: { code: "NOT_A_DIRECTORY", path: root, matches: [] } };
+    }
+    const namePattern = typeof args.namePattern === "string" && args.namePattern.trim() !== ""
+      ? args.namePattern.trim()
+      : undefined;
+    const contentPattern = typeof args.contentPattern === "string" && args.contentPattern.trim() !== ""
+      ? args.contentPattern.trim()
+      : undefined;
+    if (!namePattern && !contentPattern) {
+      throw new DuetError(
+        "search_files needs at least one of namePattern or contentPattern.",
+        "INVALID_ARGUMENT",
+      );
+    }
+    const maxResults = typeof args.maxResults === "number"
+      ? Math.max(1, Math.min(100, Math.floor(args.maxResults)))
+      : 20;
+    const { matches, filesScanned, truncated } = searchFiles(root, {
+      namePattern,
+      contentPattern,
+      maxResults,
+    });
+    return {
+      result: {
+        root,
+        namePattern,
+        contentPattern,
+        filesScanned,
+        truncated,
+        matchCount: matches.length,
+        matches,
+      },
     };
   }
   if (name === "create_plan_proposal") {

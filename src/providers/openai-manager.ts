@@ -104,7 +104,7 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
           // so the model can chain tools with real tool-result messages.
           messages: [
             { role: "system", content: turn.prompt },
-            { role: "user", content: "Respond to the latest operator message in the conversation above." },
+            { role: "user", content: "Reply directly to the operator's latest message above. Do not restate or quote it back — open with your answer." },
             ...(turn.priorSteps?.length ? replaySteps(turn.priorSteps) : []),
           ],
           tools: hasTools ? serializeTools(turn.tools!) : undefined,

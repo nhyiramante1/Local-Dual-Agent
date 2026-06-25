@@ -339,6 +339,63 @@ test("manager path tools normalize over-escaped/redundant path segments", async 
   });
 });
 
+test("search_files finds files by name and by content, skipping ignored dirs", async () => {
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "duet-search-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await writeFile(path.join(root, "src", "auth.ts"), "export function login() {\n  return TOKEN_SECRET;\n}\n");
+    await writeFile(path.join(root, "src", "util.ts"), "export const noop = () => {};\n");
+    await writeFile(path.join(root, "node_modules", "pkg", "auth.ts"), "TOKEN_SECRET in deps\n");
+
+    await withStore(async (store) => {
+      const conversation = store.createConversation({ id: randomUUID(), interfaceAgent: "groq" });
+
+      // Name search matches the glob and excludes node_modules.
+      const byName = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*.ts" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byName.ok, true);
+      const nameResult = byName.result as { matches: { path: string }[] };
+      const names = nameResult.matches.map((m) => path.basename(m.path)).sort();
+      assert.deepEqual(names, ["auth.ts", "util.ts"]);
+      assert.ok(!nameResult.matches.some((m) => m.path.includes("node_modules")));
+
+      // Content search returns the matching line and number, only in tracked src.
+      const byContent = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, contentPattern: "TOKEN_SECRET" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byContent.ok, true);
+      const contentResult = byContent.result as { matches: { path: string; line: number; snippet: string }[] };
+      assert.equal(contentResult.matches.length, 1);
+      assert.equal(path.basename(contentResult.matches[0].path), "auth.ts");
+      assert.equal(contentResult.matches[0].line, 2);
+      assert.match(contentResult.matches[0].snippet, /TOKEN_SECRET/);
+
+      // Missing both patterns is a usage error.
+      const noPattern = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(noPattern.ok, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {
   await withStore(async (store) => {
     const conversation = seed(store);
