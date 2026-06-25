@@ -641,6 +641,69 @@ test("proposal readiness shows blocked reasons safely", async () => {
   }
 });
 
+test("stale proposal readiness collapses instead of showing a live not-ready card", async () => {
+  const h = await startHarness();
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      const card = page.locator('[data-proposal-id="proposal-a"]');
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "duet retry run-a task-a1");
+      await page.route("**/api/v1/chat/conversations/conv-a/proposals/proposal-a/prepare", (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            apiVersion: "v1",
+            requestId: "smoke-stale-prepare",
+            data: {
+              proposalId: "proposal-a",
+              action: "retry_task",
+              tier: "ordinary",
+              runId: "run-a",
+              taskId: "task-a1",
+              commandCli: "duet retry run-a task-a1",
+              available: false,
+              requirements: [],
+              warnings: ["This suggestion is no longer active."],
+              blockedReason: "This suggestion is no longer active.",
+            },
+          }),
+        });
+      });
+      await card.locator("button", { hasText: "Check readiness" }).click();
+      await waitForText(page, '[data-proposal-id="proposal-a"]', "Suggestion is no longer active");
+      await waitForNoText(page, '[data-proposal-id="proposal-a"]', "Not ready");
+      assert.equal(await card.locator('button', { hasText: "Check readiness" }).isDisabled(), true);
+      assert.equal(await card.locator('button', { hasText: "Copy CLI" }).isDisabled(), true);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("run-scoped manager empty state shows planning status", async () => {
+  const h = await startHarness();
+  try {
+    h.store.updateRun("run-a", { status: "planning", error: null });
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await page.locator("#chat-groq").click();
+      await waitForText(page, "#chat-turns", "claude is planning");
+      await waitForText(page, "#chat-turns", "Watch the Timeline");
+
+      h.store.updateRun("run-a", { status: "awaiting_plan_approval", error: null });
+      await selectRun(page, "run-a");
+      await page.locator("#chat-groq").click();
+      await waitForText(page, "#chat-turns", "Plan ready for approval");
+      await waitForText(page, "#chat-turns", "Review the Plan panel");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("dismissing a proposal removes only chat-state suggestion data", async () => {
   const h = await startHarness();
   try {

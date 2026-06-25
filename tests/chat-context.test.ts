@@ -144,6 +144,7 @@ test("context includes recent conversation turns chronologically without a run",
     assert.match(context.prompt, /create_plan.*set_strategy.*set_alias are only valid in global chat/);
     assert.match(context.prompt, /general workflow or tooling questions, answer them directly/i);
     assert.match(context.prompt, /Do not tack a proposal onto a conversational answer/i);
+    assert.match(context.prompt, /If a planner operation is already queued or running/i);
     assert.match(context.prompt, /## Conversation/);
     assert.doesNotMatch(context.prompt, /message 1/);
     assert.match(context.prompt, /message 4/);
@@ -151,6 +152,65 @@ test("context includes recent conversation turns chronologically without a run",
       context.prompt.indexOf("message 4") < context.prompt.indexOf("message 6"),
     );
     assert.ok(context.metadata.omitted.includes("Run And Tasks"));
+  });
+});
+
+test("tool-runtime context omits the legacy proposal format and labels turns as history", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    store.appendConversationTurn({
+      conversationId: conversation.id,
+      role: "user",
+      content: "what can you do",
+    });
+
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+      { toolRuntime: true },
+    );
+
+    // Legacy fenced-block instructions must not appear in the tool runtime.
+    assert.doesNotMatch(context.prompt, /## Action Proposal Format/);
+    assert.doesNotMatch(context.prompt, /duet-proposal/);
+    // Native tool guidance replaces it.
+    assert.match(context.prompt, /## Manager Tools/);
+    assert.match(context.prompt, /Default to conversation/i);
+    assert.match(context.prompt, /bare acknowledgements/i);
+    // Recent turns are explicitly framed as history, not the current request.
+    assert.match(context.prompt, /history of THIS thread/i);
+    assert.match(context.prompt, /current request is the LAST user turn/i);
+  });
+});
+
+test("global context includes active background planner operations", async () => {
+  await withStore((store) => {
+    store.createOperation({
+      id: "planning-op",
+      kind: "plan",
+      status: "running",
+      serviceInstanceId: "test",
+      inputHash: "hash",
+      createdAt: new Date().toISOString(),
+    });
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "openai",
+    });
+
+    const context = buildManagerChatContext(
+      store,
+      conversation,
+      defaultManagerBudget,
+    );
+
+    assert.match(context.prompt, /## Background Operations/);
+    assert.match(context.prompt, /planner is already working/i);
+    assert.match(context.prompt, /operation planning-op kind=plan status=running/);
   });
 });
 

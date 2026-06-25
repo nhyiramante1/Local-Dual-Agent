@@ -75,7 +75,8 @@ export const dashboardHtml = `<!doctype html>
             <div class="chat-agents" role="group" aria-label="Manager voice">
               <button id="chat-codex" type="button" data-agent="codex">Codex</button>
               <button id="chat-claude" type="button" data-agent="claude">Claude</button>
-              <button id="chat-openai" type="button" data-agent="openai">OpenAI</button>
+              <button id="chat-groq" type="button" data-agent="groq">Groq</button>
+              <button id="chat-gemini" type="button" data-agent="gemini">Gemini</button>
             </div>
             <button id="chat-clear" type="button" class="chat-clear" title="Start a fresh manager thread for the current run and voice">Clear context</button>
           </div>
@@ -307,6 +308,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-history-item:last-child{border-bottom:none}
 .proposal-history-item .phi-action{font-weight:600}
 .proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.run-progress-state{align-self:flex-start;max-width:560px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:14px 16px;margin:12px 2px}
+.run-progress-title{font-weight:650;font-size:15px;margin-bottom:5px}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -388,7 +391,9 @@ const chat = {
   conversations: new Map(),
   activeOperation: null,
   polling: null,
-  pendingTurn: null
+  pendingTurn: null,
+  planOperations: new Map(),
+  statusError: null
 };
 let eventStream = null;
 let eventRunId = null;
@@ -397,6 +402,7 @@ const renderedEventSeqs = new Set();
 let activeAttempt = null; // { provider, role, taskId, taskOrdinal, startedAt }
 let activeTimer = null;
 let runTasks = []; // task list from last selectRun
+let selectedRunDetail = null;
 let bootInstanceId = null; // service instance seen at page load; a change means a restart
 function requestKey(prefix) {
   const id = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
@@ -539,6 +545,7 @@ async function selectRun(id) {
   }
   q("runs").querySelectorAll("button").forEach(b=>b.classList.toggle("sel",b.dataset.id===id));
   const detail=await api("/runs/"+encodeURIComponent(id));
+  selectedRunDetail = detail.run;
   runTasks = detail.tasks || [];
   q("summary").innerHTML='<h2>'+esc(detail.run.goal)+'</h2><div class="card"><div class="row">'+badge(detail.run.status)+'<span class="kv">lead <b>'+esc(detail.run.leadProvider)+'</b></span><span class="kv">'+detail.usage.totalTurns+' turns</span></div></div>';
   q("tasks").innerHTML=runTasks.map(t=>'<div class="card"><div class="row"><b>'+esc(t.plan.title)+'</b>'+badge(t.status)+'</div><div class="kv">'+esc(t.provider)+' -> '+esc(t.reviewerProvider)+'</div><div class="muted">'+esc(t.plan.allowedPaths.join(", "))+'</div></div>').join("")||'<span class="empty">No tasks.</span>';
@@ -596,6 +603,53 @@ function renderPendingTurn() {
     +'<div class="body">'+visibleText(pending.content, 4000)+'</div>'
     +'</div></div>';
 }
+function renderRunProgressEmptyState() {
+  if (!selected || !selectedRunDetail) return "";
+  const status = String(selectedRunDetail.status || "");
+  const lead = selectedRunDetail.leadProvider || "agent";
+  if (status === "planning") {
+    return '<div class="run-progress-state"><div class="run-progress-title">'+esc(lead)+' is planning</div><div class="kv">The planner is creating a plan for this run. Watch the Timeline for live progress.</div></div>';
+  }
+  if (status === "awaiting_plan_approval") {
+    return '<div class="run-progress-state"><div class="run-progress-title">Plan ready for approval</div><div class="kv">Review the Plan panel, then approve the plan when it looks right.</div></div>';
+  }
+  return "";
+}
+function currentConversationId() {
+  return currentConversation()?.id || null;
+}
+function renderPlanOperationNotices() {
+  const conversationId = currentConversationId();
+  if (!conversationId) return "";
+  const notices = Array.from(chat.planOperations.values())
+    .filter(item => item.conversationId === conversationId);
+  if (!notices.length) return "";
+  return notices.map(item => {
+    const title = item.status === "succeeded"
+      ? "Plan ready"
+      : item.status === "failed"
+        ? "Plan generation failed"
+        : item.status === "cancelled" || item.status === "interrupted"
+          ? "Plan generation stopped"
+          : "Plan generation running";
+    const body = item.status === "succeeded"
+      ? "The planner finished. You can open the run, or show the plan here without leaving this chat."
+      : item.status === "failed"
+        ? visibleText(item.error || "The planner operation failed.", 700)
+        : "A planner agent is working in the background. You can keep chatting with the Manager while it runs.";
+    const actions = item.status === "succeeded" && item.runId
+      ? '<div class="proposal-actions"><button type="button" data-plan-open="'+esc(item.runId)+'">Open run</button><button type="button" data-plan-show="'+esc(item.operationId)+'" data-run-id="'+esc(item.runId)+'">Show plan here</button></div>'
+      : "";
+    const plan = item.planHtml ? '<div class="proposal-copy">Plan</div>'+item.planHtml : "";
+    return '<div class="run-progress-state" data-plan-operation="'+esc(item.operationId)+'">'
+      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+'</div>'
+      +'<div class="kv">'+body+'</div>'
+      +(item.runId ? '<div class="kv">run <b>'+esc(item.runId)+'</b></div>' : "")
+      +actions
+      +plan
+      +'</div>';
+  }).join("");
+}
 function rememberConversation(conversation) {
   const key = conversationKey(conversation.runId, conversation.interfaceAgent);
   const existing = chat.conversations.get(key);
@@ -616,7 +670,7 @@ function isCurrentConversation(conversation) {
   );
 }
 function chatIsBusyForCurrentView() {
-  return Boolean(chat.activeOperation);
+  return Boolean(chat.activeOperation || chat.pendingTurn);
 }
 async function loadChat() {
   clearTimeout(chat.polling);
@@ -633,7 +687,7 @@ async function loadChat() {
     const conversation = currentConversation();
     if (!conversation) {
       const scope = selected ? esc(chat.agent)+" manager" : "global";
-      q("chat-turns").innerHTML=(renderPendingTurn() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
+      q("chat-turns").innerHTML=(renderPendingTurn() || renderRunProgressEmptyState() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
       setChatEnabled(!chatIsBusyForCurrentView());
       return;
     }
@@ -695,6 +749,9 @@ async function refreshConversation(conversationId) {
   const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
   const failure = failedTurnMessage(failed);
   if (failure) setChatStatus(failure, true);
+  else if (chat.statusError && chat.statusError.conversationId === data.conversation.id) {
+    setChatStatus(chat.statusError.message, true);
+  }
   else setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
   setChatEnabled(!chatIsBusyForCurrentView());
   return data;
@@ -702,8 +759,10 @@ async function refreshConversation(conversationId) {
 function renderChatShell() {
   q("chat-codex").classList.toggle("active", chat.agent === "codex");
   q("chat-claude").classList.toggle("active", chat.agent === "claude");
-  const openaiBtn = q("chat-openai");
-  if (openaiBtn) openaiBtn.classList.toggle("active", chat.agent === "openai");
+  const groqBtn = q("chat-groq");
+  if (groqBtn) groqBtn.classList.toggle("active", chat.agent === "groq");
+  const geminiBtn = q("chat-gemini");
+  if (geminiBtn) geminiBtn.classList.toggle("active", chat.agent === "gemini");
   setChatEnabled(!chatIsBusyForCurrentView());
 }
 function setChatStatus(message, bad=false) {
@@ -774,7 +833,7 @@ function renderMarkdown(text) {
 }
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
-    q("chat-turns").innerHTML=renderPendingTurn() || '<span class="empty">No turns yet.</span>';
+    q("chat-turns").innerHTML=renderPendingTurn() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
     return;
   }
   const proposalsByTurn = new Map();
@@ -813,7 +872,7 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     }
     return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
   }).join("");
-  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderProposalHistory(proposalHistory);
+  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   enrichHistoryOutcomes().catch(() => {});
 }
@@ -883,6 +942,18 @@ function renderProposalCard(proposal) {
       +'<div class="proposal-actions"><button type="button" data-proposal-prepare="'+esc(proposal.id)+'">Check readiness</button><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
       +'</div>';
   }
+  if (proposal.action === "agent_consultation") {
+    let meta = {};
+    try { meta = JSON.parse(proposal.commandJson); } catch {}
+    return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("consent")+'</div>'
+      +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
+      +'<div class="proposal-kv"><b>Agents:</b> '+visibleText((meta.agents||[]).join ? meta.agents.join(", ") : "", 200)+'</div>'
+      +'<div class="proposal-kv"><b>Profile:</b> '+esc(meta.profile||"balanced")+'&nbsp;&nbsp;<b>Mode:</b> '+esc(meta.mode||"independent")+'</div>'
+      +'<div class="proposal-copy">This records consent intent only. Asking Claude/Codex is deferred until the consultation executor is added.</div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'</div>';
+  }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
   const isMerge = proposal.action === "merge_run";
   const isFingerprint = proposal.tier === "fingerprint";
@@ -909,6 +980,10 @@ function renderProposalCard(proposal) {
   '</div>';
 }
 function renderReadiness(prepared) {
+  if (!prepared.available && /no longer active|already been started|expired/i.test(prepared.blockedReason || "")) {
+    return '<div><b>Suggestion is no longer active</b></div><div class="kv">It may already be running or it was replaced by a newer state.</div>'
+      + (prepared.run ? '<div class="kv">run <b>'+esc(prepared.run.id)+'</b> '+badge(prepared.run.status)+' version '+esc(prepared.run.version)+'</div>' : "");
+  }
   const state = prepared.available ? '<span class="ok">Ready to copy</span>' : '<span class="bad">Not ready</span>';
   const run = prepared.run ? '<div class="kv">run <b>'+esc(prepared.run.id)+'</b> '+badge(prepared.run.status)+' version '+esc(prepared.run.version)+'</div>' : "";
   const task = prepared.task ? '<div class="kv">task <b>'+esc(prepared.task.id)+'</b> '+badge(prepared.task.status)+' version '+esc(prepared.task.version)+'</div>' : "";
@@ -968,7 +1043,90 @@ async function prepareProposal(proposalId) {
   }
   const panel = q("chat-turns").querySelector('[data-proposal-readiness="'+CSS.escape(proposalId)+'"]');
   if (panel) panel.innerHTML = renderReadiness(prepared);
+  if (!prepared.available && /no longer active|already been started|expired/i.test(prepared.blockedReason || "")) {
+    const card = panel?.closest(".proposal-card");
+    card?.querySelectorAll("[data-proposal-prepare], [data-proposal-start], [data-proposal-copy]").forEach((button) => {
+      button.disabled = true;
+    });
+    setChatStatus("This suggestion is no longer active. Watch the run in the sidebar and Timeline.");
+    return;
+  }
   setChatStatus(prepared.available ? "Suggestion checked. Copy the CLI command if you choose to proceed." : "Suggestion checked, but it is not currently ready.");
+}
+function renderInlinePlan(detail) {
+  const plan = detail.run?.plan;
+  const tasks = detail.tasks || [];
+  if (!plan && !tasks.length) return '<div class="muted">No plan details are available yet.</div>';
+  const summary = plan?.summary ? '<p>'+visibleText(plan.summary, 1200)+'</p>' : "";
+  const taskRows = tasks.slice(0, 6).map(task =>
+    '<li><b>'+esc(task.id)+': '+visibleText(task.plan?.title || "Task", 160)+'</b>'
+    +'<div class="kv">'+visibleText(task.plan?.objective || "", 400)+'</div>'
+    +'<div class="muted">paths: '+esc((task.plan?.allowedPaths || []).join(", ") || "none")+'</div></li>'
+  ).join("");
+  const risks = (plan?.risks || []).slice(0, 5).map(risk => '<li>'+visibleText(risk, 300)+'</li>').join("");
+  return summary
+    +(taskRows ? '<ol>'+taskRows+'</ol>' : "")
+    +(risks ? '<div class="proposal-copy">Risks</div><ul>'+risks+'</ul>' : "");
+}
+async function showPlanInChat(operationId, runId) {
+  const notice = chat.planOperations.get(operationId);
+  if (!notice) return;
+  const detail = await api("/runs/"+encodeURIComponent(runId));
+  notice.planHtml = renderInlinePlan(detail);
+  chat.planOperations.set(operationId, notice);
+  const conversation = currentConversation();
+  if (conversation) await refreshConversation(conversation.id);
+}
+async function watchPlanOperation(operationId, conversationId) {
+  const original = chat.planOperations.get(operationId);
+  if (!original) return;
+  try {
+    while (true) {
+      const operation = await api("/operations/"+encodeURIComponent(operationId));
+      const notice = chat.planOperations.get(operationId) || original;
+      notice.status = operation.status;
+      if (operation.resultJson) {
+        try {
+          const result = JSON.parse(operation.resultJson);
+          if (result?.id) notice.runId = result.id;
+        } catch {}
+      }
+      if (operation.errorJson) {
+        try {
+          const parsed = JSON.parse(operation.errorJson);
+          notice.error = parsed.message || parsed.code || operation.errorJson;
+        } catch {
+          notice.error = operation.errorJson;
+        }
+      }
+      chat.planOperations.set(operationId, notice);
+      if (!["queued","running"].includes(operation.status)) {
+        await loadRuns().catch(()=>{});
+        const conversation = currentConversation();
+        if (conversation?.id === conversationId) {
+          await refreshConversation(conversationId);
+          setChatStatus(
+            operation.status === "succeeded"
+              ? "Plan ready. You can keep chatting, open the run, or show the plan here."
+              : "Plan generation "+operation.status+".",
+            operation.status !== "succeeded",
+          );
+        }
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  } catch (error) {
+    const notice = chat.planOperations.get(operationId) || original;
+    notice.status = "failed";
+    notice.error = error.message || String(error);
+    chat.planOperations.set(operationId, notice);
+    const conversation = currentConversation();
+    if (conversation?.id === conversationId) {
+      setChatStatus(notice.error, true);
+      await refreshConversation(conversationId).catch(()=>{});
+    }
+  }
 }
 async function startProposal(proposalId, button) {
   const conversation = currentConversation();
@@ -987,7 +1145,21 @@ async function startProposal(proposalId, button) {
   if (panel) panel.innerHTML = isPlan
     ? '<div><b>Generating plan…</b></div><div class="kv">A planner agent is working — this can take a minute. The run appears in the sidebar; watch the Timeline for live progress.</div>'
     : '<div><b>Operation started</b></div><div class="kv">operation <b>'+esc(operation.id)+'</b> '+badge(operation.status)+'</div>';
-  await pollOperation(operation.id, conversation.id, isPlan ? "Plan generation" : "Duet operation");
+  if (isPlan) {
+    chat.planOperations.set(operation.id, {
+      operationId: operation.id,
+      conversationId: conversation.id,
+      proposalId,
+      status: operation.status || "queued",
+      runId: operation.runId || null,
+    });
+    setChatStatus("Plan generation started. You can keep chatting while the planner works.");
+    setChatEnabled(true);
+    refreshConversation(conversation.id).catch(()=>{});
+    watchPlanOperation(operation.id, conversation.id).catch(()=>{});
+    return;
+  }
+  await pollOperation(operation.id, conversation.id, "Duet operation");
   // Surface the result reliably by opening the new run (its Plan and Timeline
   // panels render the plan dependably — far more robust than injecting a bubble
   // into a chat thread that pollOperation may have just re-rendered).
@@ -1087,8 +1259,18 @@ q("chat-turns").addEventListener("click", async (event) => {
   const dismiss = event.target.closest("[data-proposal-dismiss]");
   const approve = event.target.closest("[data-proposal-approve]");
   const turnCopy = event.target.closest("[data-turn-copy]");
-  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy) return;
+  const planOpen = event.target.closest("[data-plan-open]");
+  const planShow = event.target.closest("[data-plan-show]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow) return;
   try {
+    if (planOpen) {
+      await selectRun(planOpen.dataset.planOpen);
+      return;
+    }
+    if (planShow) {
+      await showPlanInChat(planShow.dataset.planShow, planShow.dataset.runId);
+      return;
+    }
     if (turnCopy) {
       await copyText(turnCopy.dataset.turnCopy || "");
       const svg = turnCopy.querySelector("svg");
@@ -1138,8 +1320,9 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
       const operation = await api("/operations/"+encodeURIComponent(operationId));
       if (!["queued","running"].includes(operation.status)) {
         chat.pendingTurn = null;
-        await refreshConversation(conversationId);
         if (operation.status === "succeeded") {
+          if (chat.statusError?.conversationId === conversationId) chat.statusError = null;
+          await refreshConversation(conversationId);
           if (currentConversation()?.id === conversationId) {
             setChatStatus("Ready. Manager voice: "+chat.agent+".");
           }
@@ -1149,6 +1332,8 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
             try { message += " " + JSON.parse(operation.errorJson).message; }
             catch { message += " " + operation.errorJson; }
           }
+          chat.statusError = { conversationId, message };
+          await refreshConversation(conversationId);
           if (currentConversation()?.id === conversationId) setChatStatus(message, true);
         }
         return;
@@ -1171,6 +1356,7 @@ async function sendChat(message) {
     idempotencyKey: requestKey("dashboard-chat-turn"),
     body: { message }
   });
+  chat.activeOperation = { id: operation.id, conversationId: conversation.id };
   chat.pendingTurn = null;
   await refreshConversation(conversation.id);
   await pollOperation(operation.id, conversation.id);
@@ -1180,6 +1366,10 @@ q("chat-form").addEventListener("submit", async (event) => {
   const text = q("chat-input").value.trim();
   if (!text || chatIsBusyForCurrentView()) return;
   const original = q("chat-input").value;
+  const existingConversation = currentConversation();
+  if (existingConversation && chat.statusError?.conversationId === existingConversation.id) {
+    chat.statusError = null;
+  }
   chat.pendingTurn = {
     agent: chat.agent,
     runId: selected || null,
@@ -1233,8 +1423,12 @@ q("chat-claude").onclick = async () => {
   chat.agent = "claude";
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
-q("chat-openai").onclick = async () => {
-  chat.agent = "openai";
+q("chat-groq").onclick = async () => {
+  chat.agent = "groq";
+  await loadChat().catch(error => setChatStatus(error.message, true));
+};
+q("chat-gemini").onclick = async () => {
+  chat.agent = "gemini";
   await loadChat().catch(error => setChatStatus(error.message, true));
 };
 q("chat-clear").onclick = async () => {

@@ -7,8 +7,11 @@ import type {
   ConversationTurnRecord,
   ManagerBudget,
   ManagerProviderName,
+  ManagerToolCall,
   ProviderName,
 } from "../core/domain.js";
+import { isOpenAiCompatibleManager } from "../core/domain.js";
+import type { DuetConfig } from "../config.js";
 import { DuetError } from "../core/errors.js";
 import type { ProviderAdapter } from "../providers/adapter.js";
 import type { Store } from "../persistence/store.js";
@@ -21,8 +24,19 @@ import {
   type ChatContextBuilder,
   type ChatContextOptions,
 } from "./context.js";
-import { parseProposalBlock, tryValidateAndSynthesize, userIntentAllowsCreatePlan } from "./proposals.js";
+import {
+  parseProposalBlock,
+  stripMalformedProposalArtifacts,
+  tryValidateAndSynthesize,
+  userIntentAllowsCreatePlan,
+} from "./proposals.js";
 import { serviceLog } from "../service/logger.js";
+import {
+  executeManagerTool,
+  managerToolDefinitions,
+  serializeToolExecutions,
+  type ManagerToolExecution,
+} from "./tools.js";
 
 // Phrases a weaker manager model uses when it narrates an intent to propose but
 // forgets to emit the duet-proposal block. Used to trigger a single backstop retry.
@@ -42,6 +56,27 @@ export const defaultManagerBudget: ManagerBudget = {
 
 export type ChatProviders = Record<ProviderName, ProviderAdapter> & {
   openai?: ProviderAdapter;
+  groq?: ProviderAdapter;
+  gemini?: ProviderAdapter;
+};
+
+export type ManagerToolRuntimeOptions = Pick<
+  DuetConfig["manager"],
+  | "nativeToolCalling"
+  | "actionMode"
+  | "supportsMultiStepToolLoop"
+  | "supportsAgentConsultation"
+  | "latencyTier"
+  | "maxToolCallsPerTurn"
+>;
+
+const defaultToolRuntimeOptions: ManagerToolRuntimeOptions = {
+  nativeToolCalling: true,
+  actionMode: "recommended",
+  supportsMultiStepToolLoop: true,
+  supportsAgentConsultation: true,
+  latencyTier: "balanced",
+  maxToolCallsPerTurn: 5,
 };
 
 function oneDayAgo(): string {
@@ -63,7 +98,9 @@ export class ChatEngine {
     cwdFor?: (conversation: ConversationRecord) => string,
     context?: ChatContextBuilder | Partial<ChatContextOptions>,
     private readonly configAliases: Record<string, string> = {},
+    toolRuntime?: Partial<ManagerToolRuntimeOptions>,
   ) {
+    this.toolRuntime = { ...defaultToolRuntimeOptions, ...(toolRuntime ?? {}) };
     this.cwdFor =
       cwdFor ??
       ((conversation) =>
@@ -75,13 +112,28 @@ export class ChatEngine {
         ? context
         : (conversation) =>
             buildManagerChatContext(this.store, conversation, this.budget, context, this.configAliases);
+    this.toolContextBuilder =
+      typeof context === "function"
+        ? context
+        : (conversation) =>
+            buildManagerChatContext(
+              this.store,
+              conversation,
+              this.budget,
+              { ...(context ?? {}), toolRuntime: true },
+              this.configAliases,
+            );
   }
 
   private readonly contextBuilder: ChatContextBuilder;
+  private readonly toolContextBuilder: ChatContextBuilder;
+  private readonly toolRuntime: ManagerToolRuntimeOptions;
 
   assertBudget(provider: ManagerProviderName): void {
     const since = oneDayAgo();
-    const reservedTurns = this.store.countActiveManagerTurns();
+    // Reserve the turn currently being attempted even if the caller has not
+    // yet made its operation visible as queued/running in the Store.
+    const reservedTurns = Math.max(1, this.store.countActiveManagerTurns());
     if (
       this.store.countManagerTurns(since) + reservedTurns >
       this.budget.maxTurnsPerDay
@@ -99,9 +151,10 @@ export class ChatEngine {
           "BUDGET_EXCEEDED",
         );
       }
-    } else if (provider === "openai") {
-      // OpenAI: turn-limit gate above covers cost control.
-      // USD per-day gate deferred until cost tracking is added (costKnown: false).
+    } else if (isOpenAiCompatibleManager(provider)) {
+      // OpenAI-compatible (openai/groq/gemini): turn-limit gate above covers
+      // cost control. USD per-day gate deferred until cost tracking is added
+      // (costKnown: false).
     } else {
       const usage = this.store.sumManagerUsage("codex", since);
       if (
@@ -128,10 +181,7 @@ export class ChatEngine {
     if (shouldCancel?.()) {
       throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
     }
-    const adapter =
-      provider === "openai"
-        ? this.providers.openai
-        : this.providers[provider as ProviderName];
+    const adapter = this.providers[provider];
     if (!adapter) {
       throw new DuetError(
         `Manager provider "${provider}" is not configured.`,
@@ -142,6 +192,16 @@ export class ChatEngine {
     const before = conversation.runId
       ? await fingerprintRepository(cwd)
       : undefined;
+    if (this.shouldUseToolRuntime(provider, adapter)) {
+      return this.runToolManagerTurn(
+        conversation,
+        operationId,
+        adapter,
+        cwd,
+        before,
+        shouldCancel,
+      );
+    }
     let result: AgentResult | undefined;
     try {
       result = await adapter.run({
@@ -155,7 +215,7 @@ export class ChatEngine {
         maxBudgetUsd:
           provider === "claude"
             ? this.budget.claudeMaxUsdPerTurn
-            : provider === "openai"
+            : isOpenAiCompatibleManager(provider)
               ? this.budget.openaiMaxUsdPerTurn
               : undefined,
         shouldCancel,
@@ -189,49 +249,24 @@ export class ChatEngine {
     const managerOfferedPlan =
       !!lastManagerTurn && INTENT_TO_PROPOSE_RE.test(lastManagerTurn.content || "");
     // Parse any proposal block from the reply. Strip it from visible content.
-    let parseResult = parseProposalBlock(result.finalText);
+    // If OpenAI-compatible action mode is disabled, keep the response purely
+    // conversational; do not silently fall back to the legacy fenced protocol.
+    // The legacy fenced-block path runs only for providers that did NOT take the
+    // tool runtime above: non-tool-capable providers (codex/claude), or an
+    // OpenAI-compatible provider whose action mode is "disabled".
+    const allowLegacyProposalProtocol =
+      adapter.supportsNativeToolCalling !== true ||
+      this.toolRuntime.actionMode !== "disabled";
+    let parseResult = allowLegacyProposalProtocol
+      ? parseProposalBlock(result.finalText)
+      : ({ kind: "none" } as const);
     // Visible content is the original reply (block stripped if it was inline).
     let contentToStore =
       parseResult.kind === "parsed"
         ? parseResult.strippedText
-        : result.finalText;
-    // Backstop for weaker manager models (e.g. Groq llama): they often narrate an
-    // intent to propose ("I propose the following plan:") without emitting the
-    // block. Retry once asking for ONLY the block. Gated to global chat (no
-    // fingerprint tracking) so it cannot affect a run's repository.
-    if (
-      parseResult.kind === "none" &&
-      !before &&
-      provider === "openai" &&
-      INTENT_TO_PROPOSE_RE.test(result.finalText)
-    ) {
-      try {
-        const retry = await adapter.run({
-          cwd,
-          prompt:
-            this.contextBuilder(conversation).prompt +
-            "\n\n---\nYou indicated you would propose an action but did not output a duet-proposal block. " +
-            "Reply with ONLY one ```duet-proposal fenced block containing the JSON object, and nothing else — no prose before or after.",
-          mode: "read-only",
-          timeoutMs: 60_000,
-          maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
-          shouldCancel,
-        });
-        const retryParse = parseProposalBlock(retry.finalText);
-        if (retryParse.kind === "parsed") {
-          // Keep the original narration as the visible message; the block came
-          // from the retry, so contentToStore stays as set above.
-          parseResult = retryParse;
-        } else if (retryParse.kind === "invalid") {
-          void serviceLog("warning", "manager proposal retry block was malformed", {
-            conversationId,
-            reason: retryParse.reason,
-          });
-        }
-      } catch {
-        // Retry failed (cancel, timeout, budget) — keep the original reply.
-      }
-    }
+        : allowLegacyProposalProtocol
+          ? result.finalText
+          : stripMalformedProposalArtifacts(result.finalText);
     const diagnostics: { reason?: string } = {};
     const synthesized =
       parseResult.kind === "parsed"
@@ -246,6 +281,7 @@ export class ChatEngine {
           )
         : null;
     if (parseResult.kind === "invalid") {
+      contentToStore = stripMalformedProposalArtifacts(contentToStore);
       void serviceLog("warning", "manager proposal block was malformed", {
         conversationId,
         reason: parseResult.reason,
@@ -263,7 +299,7 @@ export class ChatEngine {
       );
       // Surface the rejection reason to the operator so a dropped proposal is not
       // silently invisible (the manager may have said "here is the proposal").
-      if (diagnostics.reason) {
+      if (diagnostics.reason && !isIntentBlocked) {
         contentToStore =
           `${contentToStore}\n\n_⚠ Proposal could not be created: ${diagnostics.reason}_`.trim();
       }
@@ -299,6 +335,193 @@ export class ChatEngine {
       }
       return turn;
     });
+  }
+
+  private shouldUseToolRuntime(
+    provider: ManagerProviderName,
+    adapter: ProviderAdapter,
+  ): boolean {
+    // Any OpenAI-compatible manager (openai/groq/gemini) with a tool-capable
+    // adapter uses the native tool runtime; identity no longer hardcoded.
+    return (
+      isOpenAiCompatibleManager(provider) &&
+      adapter.supportsNativeToolCalling === true &&
+      this.toolRuntime.nativeToolCalling &&
+      this.toolRuntime.actionMode !== "disabled"
+    );
+  }
+
+  private async runToolManagerTurn(
+    conversation: ConversationRecord,
+    operationId: string,
+    adapter: ProviderAdapter,
+    cwd: string,
+    before: Awaited<ReturnType<typeof fingerprintRepository>> | undefined,
+    shouldCancel?: () => boolean,
+  ): Promise<ConversationTurnRecord> {
+    let first: AgentResult | undefined;
+    let final: AgentResult | undefined;
+    let executions: ManagerToolExecution[] = [];
+    // Consultation is a paid capability; only expose its tool when enabled for
+    // this manager profile. Other tools are always available to a capable model.
+    const tools = this.toolRuntime.supportsAgentConsultation
+      ? managerToolDefinitions
+      : managerToolDefinitions.filter(
+          (tool) => tool.name !== "request_agent_consultation",
+        );
+    try {
+      const prompt = this.toolContextBuilder(conversation).prompt;
+      first = await adapter.run({
+        cwd,
+        prompt,
+        mode: "read-only",
+        timeoutMs: 60_000,
+        maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
+        shouldCancel,
+        tools,
+      });
+      if (shouldCancel?.()) {
+        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+      }
+      const toolCalls = (first.toolCalls ?? []).slice(
+        0,
+        this.toolRuntime.maxToolCallsPerTurn,
+      );
+      executions = await this.executeToolCalls(toolCalls, conversation);
+      if ((first.toolCalls?.length ?? 0) > toolCalls.length) {
+        executions.push({
+          name: "tool_runtime",
+          ok: false,
+          elapsedMs: 0,
+          result: {
+            code: "TOOL_CALL_LIMIT_EXCEEDED",
+            message: `Only ${this.toolRuntime.maxToolCallsPerTurn} tool calls are allowed per manager turn.`,
+          },
+        });
+      }
+      if (executions.length > 0) {
+        final = await adapter.run({
+          cwd,
+          prompt:
+            prompt +
+            "\n\n## Duet Tool Results\n" +
+            "These are trusted backend tool results. Explain them naturally. If a proposal was created, mention it briefly; do not output JSON blocks.\n" +
+            serializeToolExecutions(executions),
+          mode: "read-only",
+          timeoutMs: 60_000,
+          maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
+          shouldCancel,
+        });
+      } else {
+        final = first;
+      }
+      if (shouldCancel?.()) {
+        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+      }
+    } finally {
+      if (before && (first || final)) {
+        const after = await fingerprintRepository(cwd);
+        assertFingerprintUnchanged(before, after);
+      }
+    }
+    const result = final ?? first;
+    if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
+    const usage = this.combineUsage(first, final);
+    return this.store.transaction(() => {
+      const turn = this.store.appendConversationTurn({
+        conversationId: conversation.id,
+        role: "manager",
+        interfaceAgent: conversation.interfaceAgent,
+        content:
+          result.finalText.trim() ||
+          this.fallbackToolResponse(executions),
+        providerSessionId: result.sessionId,
+        usageJson: JSON.stringify({
+          ...usage,
+          providerModel: result.model,
+          toolRuntime: true,
+          toolCalls: executions.map((execution) => ({
+            name: execution.name,
+            ok: execution.ok,
+            elapsedMs: execution.elapsedMs,
+          })),
+        }),
+        operationId,
+      });
+      for (const execution of executions) {
+        if (!execution.proposal) continue;
+        this.store.createProposal({
+          id: randomUUID(),
+          conversationId: conversation.id,
+          turnId: turn.id,
+          runId: execution.proposal.runId,
+          taskId: execution.proposal.taskId,
+          action: execution.proposal.action,
+          summary: execution.proposal.summary,
+          commandCli: execution.proposal.commandCli,
+          commandJson: execution.proposal.commandJson,
+          tier: execution.proposal.tier,
+          expiresAt: execution.proposal.expiresAt,
+        });
+      }
+      return turn;
+    });
+  }
+
+  private async executeToolCalls(
+    toolCalls: ManagerToolCall[],
+    conversation: ConversationRecord,
+  ): Promise<ManagerToolExecution[]> {
+    const executions: ManagerToolExecution[] = [];
+    for (const call of toolCalls) {
+      executions.push(
+        await executeManagerTool({
+          name: call.name,
+          argumentsJson: call.argumentsJson,
+          store: this.store,
+          conversation,
+          configAliases: this.configAliases,
+        }),
+      );
+    }
+    return executions;
+  }
+
+  private combineUsage(
+    first: AgentResult | undefined,
+    final: AgentResult | undefined,
+  ): AgentResult["usage"] {
+    if (!first) {
+      return final?.usage ?? { inputTokens: 0, outputTokens: 0, costKnown: false };
+    }
+    if (!final || first === final) return first.usage;
+    return {
+      inputTokens: (first.usage.inputTokens ?? 0) + (final.usage.inputTokens ?? 0),
+      cachedInputTokens:
+        (first.usage.cachedInputTokens ?? 0) + (final.usage.cachedInputTokens ?? 0),
+      outputTokens: (first.usage.outputTokens ?? 0) + (final.usage.outputTokens ?? 0),
+      reasoningOutputTokens:
+        (first.usage.reasoningOutputTokens ?? 0) +
+        (final.usage.reasoningOutputTokens ?? 0),
+      costKnown: first.usage.costKnown && final.usage.costKnown,
+      costUsd:
+        first.usage.costUsd !== undefined || final.usage.costUsd !== undefined
+          ? (first.usage.costUsd ?? 0) + (final.usage.costUsd ?? 0)
+          : undefined,
+    };
+  }
+
+  private fallbackToolResponse(executions: ManagerToolExecution[]): string {
+    if (executions.length === 0) return "I checked the available Duet context.";
+    const proposal = executions.find((execution) => execution.proposal);
+    if (proposal?.proposal) {
+      return `I created a ${proposal.proposal.action} suggestion card.`;
+    }
+    const failed = executions.find((execution) => !execution.ok);
+    if (failed) {
+      return `I tried to use ${failed.name}, but it failed.`;
+    }
+    return "I checked the requested Duet context.";
   }
 
 }

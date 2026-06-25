@@ -7,9 +7,11 @@ import test from "node:test";
 
 import {
   parseProposalBlock,
+  stripMalformedProposalArtifacts,
   tryValidateAndSynthesize,
   userIntentAllowsCreatePlan,
 } from "../src/chat/proposals.js";
+import { executeManagerTool } from "../src/chat/tools.js";
 import type {
   ConversationRecord,
   ProposalAction,
@@ -118,6 +120,22 @@ test("parseProposalBlock rejects duplicate, nested, trailing, and malformed bloc
   assert.equal(parseProposalBlock("```duet-proposal\nnot-json\n```").kind, "invalid");
 });
 
+test("stripMalformedProposalArtifacts removes leaked proposal-shaped output", () => {
+  assert.equal(
+    stripMalformedProposalArtifacts(
+      'Good idea. I can discuss tweaks.\n```duet-proposal\n{"action":"create_plan"}',
+    ),
+    "Good idea. I can discuss tweaks.",
+  );
+  assert.equal(
+    stripMalformedProposalArtifacts(
+      'Good idea.\n{"action":"create_plan","goal":"x","repoPath":"C:\\\\repo"}',
+    ),
+    "Good idea.",
+  );
+  assert.equal(stripMalformedProposalArtifacts("plain answer"), "plain answer");
+});
+
 test("tryValidateAndSynthesize ignores model command fields and uses templates", async () => {
   await withStore((store) => {
     const conversation = seed(store);
@@ -214,6 +232,41 @@ test("create_plan proposals require explicit planning intent in the latest user 
   });
 });
 
+test("create_plan proposals are blocked while a planner operation is active", async () => {
+  await withStore((store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "openai",
+    });
+    store.createOperation({
+      id: "planning-op",
+      kind: "plan",
+      status: "running",
+      serviceInstanceId: "test",
+      inputHash: "hash",
+      createdAt: new Date().toISOString(),
+    });
+    const diagnostics: { reason?: string } = {};
+    const proposal = tryValidateAndSynthesize(
+      {
+        action: "create_plan",
+        goal: "Add docs",
+        repoPath: "/repo",
+        lead: "claude",
+        profile: "balanced",
+      },
+      conversation,
+      store,
+      "create a plan",
+      {},
+      diagnostics,
+    );
+
+    assert.equal(proposal, null);
+    assert.match(diagnostics.reason ?? "", /Planner operation planning-op is already running/);
+  });
+});
+
 test("userIntentAllowsCreatePlan distinguishes planning requests from ordinary questions", () => {
   assert.equal(userIntentAllowsCreatePlan("Can you see the time today?"), false);
   assert.equal(userIntentAllowsCreatePlan("What can you do?"), false);
@@ -239,9 +292,51 @@ test("userIntentAllowsCreatePlan accepts affirmations only after a manager plan 
   // Same affirmation IS intent once the manager has offered to propose a plan.
   assert.equal(userIntentAllowsCreatePlan("go ahead", true), true);
   assert.equal(userIntentAllowsCreatePlan("yes, go for it", true), true);
+  assert.equal(userIntentAllowsCreatePlan("yes that is the goal", true), true);
+  assert.equal(userIntentAllowsCreatePlan("that is the goal", true), true);
+  assert.equal(userIntentAllowsCreatePlan("exactly", true), true);
   assert.equal(userIntentAllowsCreatePlan("proceed", true), true);
   // An unrelated reply after an offer still does not count.
   assert.equal(userIntentAllowsCreatePlan("what time is it?", true), false);
+});
+
+test("agent_consultation parsed from a legacy fenced block synthesizes a consent card", () => {
+  const parsed = parseProposalBlock(
+    [
+      "I can ask both agents.",
+      "",
+      "```duet-proposal",
+      '{"action":"agent_consultation","question":"Is this feasible?","agents":["claude","codex"],"mode":"independent"}',
+      "```",
+    ].join("\n"),
+  );
+  assert.equal(parsed.kind, "parsed");
+  if (parsed.kind !== "parsed") return;
+  // The legacy parser must carry the consultation fields through, not drop them.
+  assert.equal(parsed.raw.question, "Is this feasible?");
+  assert.deepEqual(parsed.raw.agents, ["claude", "codex"]);
+});
+
+test("manager path tools normalize over-escaped/redundant path segments", async () => {
+  await withStore(async (store) => {
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
+    // Redundant ./ and ../ segments are collapsed cross-platform by path.normalize.
+    const messy = path.join("base", "child", "..", ".", "leaf");
+    const execution = await executeManagerTool({
+      name: "check_path",
+      argumentsJson: JSON.stringify({ path: messy }),
+      store,
+      conversation,
+      configAliases: {},
+    });
+    assert.equal(execution.ok, true);
+    const result = execution.result as { path: string };
+    assert.equal(result.path, path.normalize(messy));
+    assert.equal(result.path, path.join("base", "leaf"));
+  });
 });
 
 test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {

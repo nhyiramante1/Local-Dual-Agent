@@ -12,6 +12,7 @@ import {
   ChatEngine,
   defaultManagerBudget,
   type ChatProviders,
+  type ManagerToolRuntimeOptions,
 } from "../chat/engine.js";
 import type { AgentProfile, ManagerBudget, ManagerProviderName } from "../core/domain.js";
 import {
@@ -43,6 +44,7 @@ interface ServerOptions {
   onStop?: () => void;
   chatProviders?: ChatProviders;
   managerBudget?: ManagerBudget;
+  managerToolRuntime?: Partial<ManagerToolRuntimeOptions>;
   managerProvider?: ManagerProviderName;
   dashboardPublicHost?: string;
   dashboardAccessToken?: string;
@@ -191,6 +193,7 @@ export class DuetService {
         undefined,
         undefined,
         options.config?.aliases ?? {},
+        options.managerToolRuntime ?? options.config?.manager,
       ),
       options.instanceId,
     );
@@ -462,7 +465,7 @@ export class DuetService {
       if (request.method === "POST") {
         const bodyText = await readBody(request);
         const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
-        const validAgents = new Set<ManagerProviderName>(["claude", "codex", "openai"]);
+        const validAgents = new Set<ManagerProviderName>(["claude", "codex", "openai", "groq", "gemini"]);
         const defaultAgent: ManagerProviderName =
           this.options.managerProvider ?? "codex";
         const interfaceAgent: ManagerProviderName | undefined =
@@ -473,7 +476,7 @@ export class DuetService {
               : undefined;
         if (!interfaceAgent) {
           throw new DuetError(
-            "interfaceAgent must be 'claude', 'codex', or 'openai'.",
+            "interfaceAgent must be 'claude', 'codex', 'openai', 'groq', or 'gemini'.",
             "INVALID_ARGUMENT",
           );
         }

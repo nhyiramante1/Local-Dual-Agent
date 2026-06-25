@@ -46,6 +46,12 @@ export interface DuetConfig {
     codexMaxOutputTokensPerDay: number;
     codexMaxRuntimeSeconds: number;
     maxTurnsPerDay: number;
+    nativeToolCalling: boolean;
+    actionMode: ManagerActionMode;
+    supportsMultiStepToolLoop: boolean;
+    supportsAgentConsultation: boolean;
+    latencyTier: ManagerLatencyTier;
+    maxToolCallsPerTurn: number;
   };
   dashboard: {
     persistentAccess: boolean;
@@ -53,6 +59,13 @@ export interface DuetConfig {
   };
   aliases: Record<string, string>;
 }
+
+export type ManagerActionMode =
+  | "recommended"
+  | "available"
+  | "experimental"
+  | "disabled";
+export type ManagerLatencyTier = "fast" | "balanced" | "slow";
 
 export function recommendedTurnBudget(
   maxTasks: number,
@@ -62,7 +75,18 @@ export function recommendedTurnBudget(
 }
 
 const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", "max"]);
-const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex", "openai"]);
+const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex", "openai", "groq", "gemini"]);
+const VALID_MANAGER_ACTION_MODES = new Set<ManagerActionMode>([
+  "recommended",
+  "available",
+  "experimental",
+  "disabled",
+]);
+const VALID_MANAGER_LATENCY_TIERS = new Set<ManagerLatencyTier>([
+  "fast",
+  "balanced",
+  "slow",
+]);
 
 export const defaultConfig: DuetConfig = {
   service: {
@@ -92,7 +116,7 @@ export const defaultConfig: DuetConfig = {
     env: {},
   },
   manager: {
-    provider: "openai" as ManagerProviderName,
+    provider: "groq" as ManagerProviderName,
     openaiModel: "gpt-4o-mini",
     openaiBaseUrl: undefined,
     openaiMaxUsdPerTurn: 0.1,
@@ -103,6 +127,12 @@ export const defaultConfig: DuetConfig = {
     codexMaxOutputTokensPerDay: 100_000,
     codexMaxRuntimeSeconds: 120,
     maxTurnsPerDay: 200,
+    nativeToolCalling: true,
+    actionMode: "recommended",
+    supportsMultiStepToolLoop: true,
+    supportsAgentConsultation: true,
+    latencyTier: "balanced",
+    maxToolCallsPerTurn: 5,
   },
   dashboard: {
     persistentAccess: false,
@@ -503,6 +533,36 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
           1,
         ),
       ),
+      nativeToolCalling:
+        manager.native_tool_calling === undefined
+          ? defaultConfig.manager.nativeToolCalling
+          : manager.native_tool_calling === true,
+      actionMode:
+        typeof manager.action_mode === "string" &&
+        VALID_MANAGER_ACTION_MODES.has(manager.action_mode as ManagerActionMode)
+          ? (manager.action_mode as ManagerActionMode)
+          : defaultConfig.manager.actionMode,
+      supportsMultiStepToolLoop:
+        manager.supports_multi_step_tool_loop === undefined
+          ? defaultConfig.manager.supportsMultiStepToolLoop
+          : manager.supports_multi_step_tool_loop === true,
+      supportsAgentConsultation:
+        manager.supports_agent_consultation === undefined
+          ? defaultConfig.manager.supportsAgentConsultation
+          : manager.supports_agent_consultation === true,
+      latencyTier:
+        typeof manager.latency_tier === "string" &&
+        VALID_MANAGER_LATENCY_TIERS.has(manager.latency_tier as ManagerLatencyTier)
+          ? (manager.latency_tier as ManagerLatencyTier)
+          : defaultConfig.manager.latencyTier,
+      maxToolCallsPerTurn: Math.floor(
+        numberInRange(
+          manager.max_tool_calls_per_turn,
+          defaultConfig.manager.maxToolCallsPerTurn,
+          1,
+          10,
+        ),
+      ),
     },
     dashboard: {
       persistentAccess: dashboard.persistent_access === true,
@@ -517,6 +577,17 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
 }
 
 export function resolveManagerBudget(config: DuetConfig): ManagerBudget {
-  const { provider: _provider, openaiModel: _model, ...budget } = config.manager;
+  const {
+    provider: _provider,
+    openaiModel: _model,
+    openaiBaseUrl: _base,
+    nativeToolCalling: _native,
+    actionMode: _mode,
+    supportsMultiStepToolLoop: _loop,
+    supportsAgentConsultation: _consult,
+    latencyTier: _latency,
+    maxToolCallsPerTurn: _tools,
+    ...budget
+  } = config.manager;
   return budget;
 }

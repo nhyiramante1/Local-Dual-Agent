@@ -30,13 +30,17 @@ commands = [
 CI = "true"
 
 [manager]
-# Which provider voices the manager: openai | claude | codex.
-provider = "openai"
-# Groq-hosted model via OpenAI-compatible API.
-openai_model = "llama-3.3-70b-versatile"
-# Point to Groq's OpenAI-compatible endpoint. Remove this line to use real OpenAI.
-openai_base_url = "https://api.groq.com/openai/v1"
-# Per-turn and daily spend caps (USD). Groq free tier is generous so these are loose.
+# Default manager voice on startup: groq | gemini | openai | claude | codex.
+# groq and gemini are native OpenAI-compatible identities — each is enabled when
+# its API key is present (GROQ_API_KEY / GEMINI_API_KEY) and uses a baked-in
+# model + endpoint (override with GROQ_MODEL/GROQ_BASE_URL, GEMINI_MODEL/...).
+# The dashboard can switch between Codex / Claude / Groq / Gemini per conversation.
+provider = "groq"
+# The openai_* fields below configure ONLY the real-OpenAI identity (OPENAI_API_KEY).
+# Leave openai_base_url unset for api.openai.com; Groq/Gemini no longer route here.
+openai_model = "gpt-4o-mini"
+# openai_base_url = "https://api.openai.com/v1"
+# Per-turn and daily spend caps (USD) for OpenAI-compatible identities.
 openai_max_usd_per_turn = 0.10
 openai_max_usd_per_day = 2.0
 # Maximum USD a single manager turn may spend via Claude.
