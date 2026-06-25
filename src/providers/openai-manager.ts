@@ -69,7 +69,14 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
           model: this.model,
           // The whole bounded context is the system prompt so the rules and the
           // proposal format carry more weight than they would as a user turn.
-          messages: [{ role: "system", content: turn.prompt }],
+          // A trailing user turn is REQUIRED: Gemini's OpenAI-compat layer maps
+          // `system` -> systemInstruction, so a system-only request leaves
+          // `contents` empty and 400s ("contents is not specified"). The context
+          // already embeds the conversation; this nudges a reply to it.
+          messages: [
+            { role: "system", content: turn.prompt },
+            { role: "user", content: "Respond to the latest operator message in the conversation above." },
+          ],
           tools: hasTools ? serializeTools(turn.tools!) : undefined,
           tool_choice: hasTools ? "auto" : undefined,
           // Disable parallel tool calls: llama/Groq models generate malformed
