@@ -804,6 +804,7 @@ test("sending shows pending, disables input, then renders the reply after releas
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       h.arm();
       await page.locator("#chat-input").fill("status please");
@@ -831,10 +832,11 @@ test("input stays disabled while a turn is pending even when switching run/voice
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       h.arm();
       await page.locator("#chat-input").fill("hold please");
-      await page.locator("#chat-send").click();
+      await page.locator("#chat-input").press("Enter");
       await assertEventually(async () => {
         assert.equal(await page.locator("#chat-input").isDisabled(), true);
       });
@@ -900,10 +902,11 @@ test("action-like text stays chat and does not mutate the run", async () => {
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       const before = h.store.getRun("run-a").version;
       await page.locator("#chat-input").fill("/approve plan");
-      await page.locator("#chat-send").click();
+      await page.locator("#chat-input").press("Enter");
       await waitForText(page, "#chat-turns", "/approve plan");
       await waitForText(page, "#chat-turns", "manager reply from stub");
       assert.equal(h.store.isApproved("run-a", "plan"), false);
@@ -914,7 +917,7 @@ test("action-like text stays chat and does not mutate the run", async () => {
   }
 });
 
-test("budget exceeded renders a safe visible error", async () => {
+test("budget exceeded renders a safe visible limit message", async () => {
   const h = await startHarness({
     managerBudget: { ...defaultManagerBudget, maxTurnsPerDay: 0 },
   });
@@ -926,6 +929,7 @@ test("budget exceeded renders a safe visible error", async () => {
       await page.locator("#chat-input").fill("anything");
       await page.locator("#chat-send").click();
       await waitForText(page, "#chat-status", /BUDGET_EXCEEDED|budget|turn limit/i);
+      assert.match((await page.locator("#chat-status").getAttribute("class")) ?? "", /muted/);
       assert.equal(h.calls.n, 0);
     });
   } finally {

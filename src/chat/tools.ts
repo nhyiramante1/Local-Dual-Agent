@@ -232,27 +232,38 @@ const SEARCH_MAX_FILE_BYTES = 512_000;
 
 type SearchKind = "file" | "dir" | "any";
 
-// Build a case-insensitive matcher. Glob-ish (`*`/`?`) name patterns are honored;
-// otherwise the pattern is a substring. Content patterns are treated as a regex,
-// falling back to a literal substring when the regex is invalid.
-function buildMatcher(pattern: string, glob: boolean): (value: string) => boolean {
-  if (glob && /[*?]/.test(pattern)) {
+// Collapse to lowercase alphanumerics so colloquial names match real folder
+// names regardless of separators: "nhyiraos" matches "nhyira-os", "my repo"
+// matches "my-repo"/"My_Repo".
+function normalizeName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// Name matcher: honor glob wildcards (`*`/`?`) when present; otherwise match on
+// the separator/case-insensitive normalized form so near-spellings still hit.
+function buildNameMatcher(pattern: string): (value: string) => boolean {
+  if (/[*?]/.test(pattern)) {
     const re = new RegExp(
       "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
       "i",
     );
     return (value) => re.test(value);
   }
-  if (!glob) {
-    try {
-      const re = new RegExp(pattern, "i");
-      return (value) => re.test(value);
-    } catch {
-      // fall through to literal substring
-    }
+  const needle = normalizeName(pattern);
+  if (!needle) return () => false;
+  return (value) => normalizeName(value).includes(needle);
+}
+
+// Content matcher: treat the pattern as a regex, falling back to a literal
+// case-insensitive substring when the regex is invalid.
+function buildContentMatcher(pattern: string): (value: string) => boolean {
+  try {
+    const re = new RegExp(pattern, "i");
+    return (value) => re.test(value);
+  } catch {
+    const needle = pattern.toLowerCase();
+    return (value) => value.toLowerCase().includes(needle);
   }
-  const needle = pattern.toLowerCase();
-  return (value) => value.toLowerCase().includes(needle);
 }
 
 interface SearchHit {
@@ -272,10 +283,10 @@ function searchFiles(
   },
 ): { matches: SearchHit[]; entriesScanned: number; truncated: boolean } {
   const matchName = options.namePattern
-    ? buildMatcher(options.namePattern, true)
+    ? buildNameMatcher(options.namePattern)
     : undefined;
   const matchContent = options.contentPattern
-    ? buildMatcher(options.contentPattern, false)
+    ? buildContentMatcher(options.contentPattern)
     : undefined;
   const wantDirs = options.kind === "dir" || options.kind === "any";
   const wantFiles = options.kind === "file" || options.kind === "any";

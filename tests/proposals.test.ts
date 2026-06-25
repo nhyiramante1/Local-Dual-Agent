@@ -344,6 +344,7 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
   const root = await mkdtemp(path.join(os.tmpdir(), "duet-search-"));
   try {
     await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "nhyira-os"), { recursive: true });
     await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
     await writeFile(path.join(root, "src", "auth.ts"), "export function login() {\n  return TOKEN_SECRET;\n}\n");
     await writeFile(path.join(root, "src", "util.ts"), "export const noop = () => {};\n");
@@ -378,9 +379,23 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
       });
       assert.equal(byDir.ok, true);
       const dirResult = byDir.result as { matches: { path: string; type: string }[] };
-      assert.equal(dirResult.matches.length, 1);
-      assert.equal(dirResult.matches[0].type, "dir");
-      assert.equal(path.basename(dirResult.matches[0].path), "src");
+      assert.ok(dirResult.matches.some((m) => m.type === "dir" && path.basename(m.path) === "src"));
+
+      // Normalized matching: a separator-free colloquial name finds the real
+      // folder, e.g. "nhyiraos" -> "nhyira-os".
+      const fuzzy = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyiraos", kind: "dir" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(fuzzy.ok, true);
+      const fuzzyResult = fuzzy.result as { matches: { path: string }[] };
+      assert.ok(
+        fuzzyResult.matches.some((m) => path.basename(m.path) === "nhyira-os"),
+        `expected to find nhyira-os: ${JSON.stringify(fuzzyResult.matches)}`,
+      );
 
       // Content search returns the matching line and number, only in tracked src.
       const byContent = await executeManagerTool({

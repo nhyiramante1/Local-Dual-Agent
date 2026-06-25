@@ -2,9 +2,54 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import type { AgentResult, ManagerToolDefinition } from "../core/domain.js";
+import { DuetError } from "../core/errors.js";
 import type { AgentToolStep, AgentTurn, ProviderAdapter } from "./adapter.js";
 
 const DEFAULT_MODEL = "gpt-4o-mini";
+
+// Best-effort extraction of how long until the rate limit clears, from either a
+// retry-after header or a retryDelay hint Gemini embeds in the error body.
+function retryAfterSeconds(error: unknown): number | undefined {
+  const err = error as {
+    headers?: unknown;
+    response?: { headers?: unknown };
+    error?: unknown;
+    body?: unknown;
+    message?: string;
+  };
+  const headers = err?.headers ?? err?.response?.headers;
+  let raw: unknown;
+  if (headers && typeof headers === "object") {
+    raw =
+      typeof (headers as { get?: unknown }).get === "function"
+        ? (headers as { get(name: string): string | null }).get("retry-after")
+          ?? (headers as { get(name: string): string | null }).get("Retry-After")
+        : (headers as Record<string, unknown>)["retry-after"]
+          ?? (headers as Record<string, unknown>)["Retry-After"];
+  }
+  const headerSeconds = raw != null ? parseInt(String(raw), 10) : NaN;
+  if (Number.isFinite(headerSeconds) && headerSeconds > 0) return headerSeconds;
+  if (raw) {
+    const retryDateMs = Date.parse(String(raw));
+    if (Number.isFinite(retryDateMs)) {
+      const seconds = Math.ceil((retryDateMs - Date.now()) / 1000);
+      if (seconds > 0) return seconds;
+    }
+  }
+  const body = [err?.error, err?.body, err?.message]
+    .filter(Boolean)
+    .map((part) => typeof part === "string" ? part : JSON.stringify(part))
+    .join(" ");
+  const match = /retryDelay"?\s*[:=]\s*"?(\d+)\s*s/i.exec(body) ?? /try again in\s+(\d+)/i.exec(body);
+  return match ? parseInt(match[1], 10) : undefined;
+}
+
+function isRateLimit(error: unknown): boolean {
+  const status = (error as { status?: number })?.status;
+  if (status === 429) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b429\b|rate limit|resource_exhausted|quota/i.test(message);
+}
 
 // Gemini's OpenAI-compatible API rejects additionalProperties and several
 // draft-07 keywords (minLength, maxLength, minimum, maximum, minItems, maxItems).
@@ -119,6 +164,16 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
         },
         { signal: controller.signal },
       );
+    } catch (error) {
+      if (isRateLimit(error)) {
+        const seconds = retryAfterSeconds(error);
+        const when = seconds ? ` You can try again in about ${seconds}s.` : " Try again in a moment.";
+        throw new DuetError(
+          `The manager model is rate limited right now.${when}`,
+          "RATE_LIMITED",
+        );
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

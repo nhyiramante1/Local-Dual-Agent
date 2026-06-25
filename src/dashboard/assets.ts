@@ -313,6 +313,8 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .plan-dismiss{float:right;border:none;background:transparent;color:var(--muted,#888);cursor:pointer;font-size:14px;line-height:1;padding:0 2px;margin-left:8px}
 .plan-dismiss:hover{color:var(--text,#eee)}
 .chat-turn.working{opacity:.85}
+.chat-turn.soft .body{color:var(--text,#ddd)}
+.note.soft{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#999);background:var(--surface-2,#222);border:1px solid var(--line,#333);border-radius:6px;padding:1px 6px;margin-bottom:6px}
 .working-dots{display:inline-flex;gap:4px;align-items:center;height:14px}
 .working-dots span{width:6px;height:6px;border-radius:50%;background:var(--muted,#888);display:inline-block;animation:working-bounce 1.2s infinite ease-in-out both}
 .working-dots span:nth-child(2){animation-delay:.16s}
@@ -630,8 +632,14 @@ function managerActivityLabel(activity) {
   if (activity.phase === "summarizing") return "Writing the answer…";
   return "Thinking…";
 }
+function activeOperationMatchesCurrentView() {
+  const op = chat.activeOperation;
+  if (!op) return false;
+  const cid = currentConversationId();
+  return Boolean(cid && op.conversationId === cid);
+}
 function renderManagerWorking() {
-  if (!chat.activeOperation || !pendingMatchesCurrentView()) return "";
+  if (!activeOperationMatchesCurrentView()) return "";
   const label = managerActivityLabel(chat.activeActivity);
   return '<div class="chat-turn manager working" id="manager-working"><div class="manager-avatar"></div>'
     +'<div class="turn-content"><div class="meta"><b>Manager: '+esc(chat.agent)+'</b>'+badge("working")
@@ -798,10 +806,10 @@ async function refreshConversation(conversationId) {
   if (!isCurrentConversation(data.conversation)) return data;
   renderTurns(data.turns, data.proposals || [], data.proposalHistory || []);
   const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
-  const failure = failedTurnMessage(failed);
-  if (failure) setChatStatus(failure, true);
+  const failure = failedTurnStatus(failed);
+  if (failure) setChatStatus(failure.message, !failure.soft);
   else if (chat.statusError && chat.statusError.conversationId === data.conversation.id) {
-    setChatStatus(chat.statusError.message, true);
+    setChatStatus(chat.statusError.message, !chat.statusError.soft);
   }
   else setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
   setChatEnabled(!chatIsBusyForCurrentView());
@@ -898,13 +906,18 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
       ? "Manager: "+(turn.interfaceAgent || chat.agent)
       : (turn.role === "user" ? "You" : turn.role);
     const failed = turn.status === "failed";
+    // "Soft" failures (rate limit, budget) are expected throttling, not errors -
+    // render them as a calm informational bubble rather than a red error.
+    let soft = false;
     let note = "";
     let body;
     if (failed && turn.errorJson) {
       let code = "error", message = turn.errorJson;
       try { const parsed = JSON.parse(turn.errorJson); code = parsed.code || code; message = parsed.message || message; }
       catch { /* fall back to the raw, bounded error text */ }
-      note = '<div class="note">'+esc(code)+'</div>';
+      soft = isSoftFailureCode(code);
+      const noteLabel = soft ? (code === "RATE_LIMITED" ? "rate limited" : "limit reached") : code;
+      note = '<div class="note'+(soft?' soft':'')+'">'+esc(noteLabel)+'</div>';
       body = visibleText(message, 4000);
     } else {
       body = turn.role === "manager"
@@ -914,14 +927,16 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     const when = turn.createdAt ? new Date(turn.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
-    const meta = '<div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
+    const statusBadge = soft ? '' : badge(turn.status);
+    const meta = '<div class="meta"><b>'+esc(who)+'</b>'+statusBadge+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
     const copyIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
     const copyBtn = '<div class="turn-copy-row"><button class="turn-copy-btn" data-turn-copy="'+esc(turn.content||'')+'">'+copyIcon+'</button></div>';
-    const inner = meta+note+'<div class="body">'+body+'</div>'+(!failed ? copyBtn : '')+cards;
+    const stateClass = failed ? (soft ? " soft" : " failed") : "";
+    const inner = meta+note+'<div class="body">'+body+'</div>'+((!failed||soft) ? copyBtn : '')+cards;
     if (turn.role === "manager") {
-      return '<div class="chat-turn manager'+(failed?" failed":"")+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
+      return '<div class="chat-turn manager'+stateClass+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
     }
-    return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
+    return '<div class="chat-turn '+esc(turn.role)+stateClass+'">'+inner+'</div>';
   }).join("");
   q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderManagerWorking() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
@@ -1373,19 +1388,33 @@ q("chat-turns").addEventListener("input", (event) => {
   const button = card?.querySelector('[data-proposal-start="'+CSS.escape(input.dataset.proposalStartInput)+'"]');
   if (button) button.disabled = input.value.trim() !== "start";
 });
-function failedTurnMessage(turn) {
-  if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
+function isSoftFailureCode(code) {
+  return code === "RATE_LIMITED" || code === "BUDGET_EXCEEDED";
+}
+function parseFailureStatus(errorJson, fallback="Manager turn failed.") {
+  if (!errorJson) return null;
   try {
-    const parsed = JSON.parse(turn.errorJson);
-    return parsed.message || parsed.code || "Manager turn failed.";
+    const parsed = JSON.parse(errorJson);
+    const code = parsed.code || "error";
+    return {
+      message: parsed.message || code || fallback,
+      soft: isSoftFailureCode(code),
+    };
   } catch {
-    return turn.errorJson;
+    return { message: errorJson, soft: false };
   }
+}
+function failedTurnStatus(turn) {
+  if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
+  return parseFailureStatus(turn.errorJson);
 }
 async function pollOperation(operationId, conversationId, label="Manager turn") {
   chat.activeOperation = { id: operationId, conversationId };
+  chat.activeActivity = null;
   setChatEnabled(false);
   setChatStatus(label+" running...");
+  // Show the working indicator immediately so fast turns still signal liveness.
+  updateManagerWorking();
   try {
     while (true) {
       const operation = await api("/operations/"+encodeURIComponent(operationId));
@@ -1402,18 +1431,17 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
             setChatStatus("Ready. Manager voice: "+chat.agent+".");
           }
         } else {
-          let message = label+" "+operation.status+".";
-          if (operation.errorJson) {
-            try { message += " " + JSON.parse(operation.errorJson).message; }
-            catch { message += " " + operation.errorJson; }
-          }
-          chat.statusError = { conversationId, message };
+          const failure = parseFailureStatus(operation.errorJson, label+" "+operation.status+".");
+          const message = failure
+            ? (failure.soft ? failure.message : label+" "+operation.status+". "+failure.message)
+            : label+" "+operation.status+".";
+          chat.statusError = { conversationId, message, soft: Boolean(failure?.soft) };
           await refreshConversation(conversationId);
-          if (currentConversation()?.id === conversationId) setChatStatus(message, true);
+          if (currentConversation()?.id === conversationId) setChatStatus(message, !failure?.soft);
         }
         return;
       }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   } catch (error) {
     setChatStatus(error.message, true);
