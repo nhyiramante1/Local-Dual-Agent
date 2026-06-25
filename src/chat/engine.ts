@@ -120,7 +120,11 @@ export class ChatEngine {
               this.store,
               conversation,
               this.budget,
-              { ...(context ?? {}), toolRuntime: true },
+              {
+                ...(context ?? {}),
+                toolRuntime: true,
+                supportsAgentConsultation: this.toolRuntime.supportsAgentConsultation,
+              },
               this.configAliases,
             );
   }
@@ -369,13 +373,14 @@ export class ChatEngine {
       : managerToolDefinitions.filter(
           (tool) => tool.name !== "request_agent_consultation",
         );
+    const timeoutMs = this.toolRuntimeTimeoutMs();
     try {
       const prompt = this.toolContextBuilder(conversation).prompt;
       first = await adapter.run({
         cwd,
         prompt,
         mode: "read-only",
-        timeoutMs: 60_000,
+        timeoutMs,
         maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
         shouldCancel,
         tools,
@@ -399,7 +404,7 @@ export class ChatEngine {
           },
         });
       }
-      if (executions.length > 0) {
+      if (executions.length > 0 && this.toolRuntime.supportsMultiStepToolLoop) {
         final = await adapter.run({
           cwd,
           prompt:
@@ -408,7 +413,7 @@ export class ChatEngine {
             "These are trusted backend tool results. Explain them naturally. If a proposal was created, mention it briefly; do not output JSON blocks.\n" +
             serializeToolExecutions(executions),
           mode: "read-only",
-          timeoutMs: 60_000,
+          timeoutMs,
           maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
           shouldCancel,
         });
@@ -509,6 +514,18 @@ export class ChatEngine {
           ? (first.usage.costUsd ?? 0) + (final.usage.costUsd ?? 0)
           : undefined,
     };
+  }
+
+  private toolRuntimeTimeoutMs(): number {
+    switch (this.toolRuntime.latencyTier) {
+      case "fast":
+        return 30_000;
+      case "slow":
+        return 120_000;
+      case "balanced":
+      default:
+        return 60_000;
+    }
   }
 
   private fallbackToolResponse(executions: ManagerToolExecution[]): string {

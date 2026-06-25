@@ -618,17 +618,12 @@ export class DuetService {
                 orchestration: { ...baseConfig.orchestration, profile: parsed.profile as AgentProfile },
               }
             : baseConfig;
-          // Enrich goal with recent user turns so the planner has conversation context
-          const recentTurns = this.options.store
-            .listRecentConversationTurns(conversationId, 6)
-            .filter((t) => t.role === "user")
-            .slice(-3)
-            .map((t) => t.content.slice(0, 300).trim())
-            .filter(Boolean);
-          const enrichedGoal = recentTurns.length > 1
-            ? `${parsed.goal}\n\nConversation context:\n${recentTurns.map((m, i) => `[${i + 1}] ${m}`).join("\n")}`
-            : parsed.goal;
-          command = { kind: "plan", repoPath: parsed.repoPath, goal: enrichedGoal, lead: parsed.lead, config: cfg };
+          // The goal is exactly what the manager proposed — do NOT append
+          // conversation turns. Baking chat history into the persisted goal
+          // pollutes the run record and later resurfaces in the manager's
+          // "Available Runs" context, where old utterances read as a live
+          // instruction and re-trigger spurious create_plan proposals.
+          command = { kind: "plan", repoPath: parsed.repoPath, goal: parsed.goal, lead: parsed.lead, config: cfg };
         }
         if (command === null) {
           throw new DuetError("Unexpected null command for proposal action.", "INTERNAL_ERROR");

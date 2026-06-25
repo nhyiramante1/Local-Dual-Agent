@@ -2601,6 +2601,83 @@ test("openai native tool runtime stores text-only manager responses without prop
   }
 });
 
+test("openai tool runtime honors disabled consultation, single-step loop, and fast latency", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-openai-tools-single-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-tools-single-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      assert.equal(turn.timeoutMs, 30_000);
+      assert.ok(turn.tools?.some((tool) => tool.name === "create_plan_proposal"));
+      assert.equal(
+        turn.tools?.some((tool) => tool.name === "request_agent_consultation"),
+        false,
+      );
+      return {
+        provider: "openai",
+        sessionId: "single-step",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [{
+          id: "call-1",
+          name: "create_plan_proposal",
+          argumentsJson: JSON.stringify({
+            repoPath,
+            goal: "Add focused docs",
+            lead: "claude",
+          }),
+        }],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-tool-single-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: {
+      supportsAgentConsultation: false,
+      supportsMultiStepToolLoop: false,
+      latencyTier: "fast",
+    },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "create a plan", "openai-tool-single-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    assert.equal(calls, 1);
+    assert.equal(store.listProposals(conversationId).length, 1);
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, "I created a create_plan suggestion card.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
 test("openai action mode disabled stores conversational output without proposals", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-disabled-"));
   const store = new Store(path.join(directory, "state.sqlite"));

@@ -8,12 +8,18 @@ import { fileURLToPath } from "node:url";
 
 import { nodeVersionError } from "./bootstrap.js";
 
-// Load .env from project root before anything reads process.env
+// Load .env from project root before anything reads process.env.
+// Split on \r?\n so CRLF files don't leave a trailing \r that breaks the
+// regex (which rejects lines ending in \r) for every line but the last.
+// Strip a leading BOM so the first key still matches. Fill a var when it is
+// missing OR present-but-empty, so an empty shadow in the parent env can't
+// suppress a real value from .env.
 try {
   const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".env");
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+  const raw = readFileSync(envPath, "utf8").replace(/^﻿/, "");
+  for (const line of raw.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/);
-    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
   }
 } catch { /* no .env file — fine */ }
 import { loadConfig, resolveManagerBudget } from "./config.js";
