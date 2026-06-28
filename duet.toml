@@ -35,7 +35,7 @@ CI = "true"
 # its API key is present (GROQ_API_KEY / GEMINI_API_KEY). These defaults favor
 # low-cost structured tool calls; env vars still override them.
 # The dashboard can switch between configured manager providers per conversation.
-provider = "glm"
+provider = "groq"
 groq_model = "openai/gpt-oss-120b"
 groq_base_url = "https://api.groq.com/openai/v1"
 gemini_model = "gemini-3.1-flash-lite"
