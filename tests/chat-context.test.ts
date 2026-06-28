@@ -219,6 +219,15 @@ test("tool-runtime context includes evidence rubric and search-inference guidanc
     assert.match(context.prompt, /folderMatches/);
     assert.match(context.prompt, /Descend into a specific folder only when/i);
 
+    // Always answer in prose — never end a turn with only tool calls (the cause
+    // of the misleading backend fallback when the model returns empty text).
+    assert.match(context.prompt, /Always finish your turn with a short prose answer/i);
+    assert.match(context.prompt, /Never end a turn with only tool calls/i);
+
+    // Over-inference guard: do not describe folder contents/purpose from names.
+    assert.match(context.prompt, /Report only the exact names and paths the tools returned/i);
+    assert.match(context.prompt, /a directory listing is not evidence of what is inside/i);
+
     // Section cap is sufficient — the Manager Tools block must not be truncated.
     const toolsBody = context.prompt.match(/## Manager Tools\n([\s\S]*?)(?=\n## |$)/)?.[1] ?? "";
     assert.ok(
