@@ -889,12 +889,17 @@ export class ChatEngine {
     if (proposal?.proposal) {
       return `I created a ${proposal.proposal.action} suggestion card.`;
     }
+    // Lead with successful evidence. A later tool call may have failed (e.g. a
+    // malformed second search), but when the substantive read-only tools
+    // succeeded the answer must reflect that — and stay consistent with the
+    // trace, which hides a failed search when a successful one exists. Only
+    // report a failure when nothing substantive succeeded.
+    const synthesized = this.fallbackToolSummary(executions);
+    if (synthesized) return synthesized;
     const failed = executions.find((execution) => !execution.ok);
     if (failed) {
       return `I tried to use ${failed.name}, but it failed.`;
     }
-    const synthesized = this.fallbackToolSummary(executions);
-    if (synthesized) return synthesized;
     return "I looked into it and included the tool results below.";
   }
 

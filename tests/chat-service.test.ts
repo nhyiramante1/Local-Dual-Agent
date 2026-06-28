@@ -3728,3 +3728,66 @@ test("discard refuses a run that has worktrees or branches on disk", async () =>
     await h.cleanup();
   }
 });
+
+test("tool fallback leads with successful evidence when a sibling tool call failed", async () => {
+  const searchRoot = await mkdtemp(path.join(os.tmpdir(), "duet-fallback-mixed-root-"));
+  const targetFolder = path.join(searchRoot, "nhyira-os");
+  await mkdir(targetFolder, { recursive: true });
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-fallback-mixed-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run() {
+      // Empty final text (model emitted only tool calls) so the backend
+      // fallback runs. One search succeeds; a second, malformed search fails.
+      return {
+        provider: "openai",
+        sessionId: "fallback-mixed",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [
+          {
+            id: "call-ok",
+            name: "search_files",
+            argumentsJson: JSON.stringify({ path: searchRoot, namePattern: "nhyira", kind: "dir" }),
+          },
+          {
+            id: "call-bad",
+            name: "search_files",
+            argumentsJson: JSON.stringify({ path: searchRoot, kind: "dir" }),
+          },
+        ],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "fallback-mixed-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: false },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "report on nhyira-os", "fallback-mixed-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    await service.chat.wait(op.id);
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, `I found a matching folder at ${targetFolder}.`);
+    assert.doesNotMatch(managerTurn?.content ?? "", /failed/i);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(searchRoot, { recursive: true, force: true });
+  }
+});
