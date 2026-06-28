@@ -66,7 +66,12 @@ function windowsPowerShell(): string {
   );
 }
 
+function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && port <= 65_535;
+}
+
 async function probePort(port: number): Promise<boolean> {
+  if (!isValidPort(port)) return false;
   try {
     const response = await fetch(`http://127.0.0.1:${port}/healthz`, {
       signal: AbortSignal.timeout(750),
@@ -78,6 +83,9 @@ async function probePort(port: number): Promise<boolean> {
 }
 
 async function detectListeningPort(pid: number): Promise<number | undefined> {
+  // pid may originate from untrusted on-disk JSON (owner.json); reject anything
+  // non-numeric before it reaches a shell command string.
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
   if (!isProcessAlive(pid)) return undefined;
   if (process.platform === "win32") {
     const script = `$port = Get-NetTCPConnection -State Listen -OwningProcess ${pid} -ErrorAction SilentlyContinue | Sort-Object LocalPort | Select-Object -First 1 -ExpandProperty LocalPort; if ($port) { Write-Output $port }`;
@@ -99,6 +107,7 @@ async function detectListeningPort(pid: number): Promise<number | undefined> {
 }
 
 async function detectListeningPid(port: number): Promise<number | undefined> {
+  if (!isValidPort(port)) return undefined;
   if (process.platform === "win32") {
     const script = `$duetPid = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if ($duetPid) { Write-Output $duetPid }`;
     const result = await runCommand(
@@ -324,13 +333,16 @@ export async function acquireServiceLock(): Promise<void> {
 export async function reclaimStaleServiceLock(): Promise<void> {
   try {
     const owner = await readServiceLockOwner();
+    const ownerPid = Number(owner?.pid);
     if (
-      owner?.pid &&
+      owner &&
+      Number.isInteger(ownerPid) &&
+      ownerPid > 0 &&
       owner.startedAt &&
       owner.commandHash &&
       (await verifyServiceProcess({
         instanceId: "lock-owner",
-        pid: owner.pid,
+        pid: ownerPid,
         processStartedAt: owner.startedAt,
         commandHash: owner.commandHash,
         port: 0,
@@ -339,7 +351,7 @@ export async function reclaimStaleServiceLock(): Promise<void> {
       }))
     ) {
       throw new DuetError(
-        `A live process (${owner.pid}) owns the Duet service lock.`,
+        `A live process (${ownerPid}) owns the Duet service lock.`,
         "SERVICE_LOCKED",
       );
     }
@@ -375,8 +387,12 @@ export async function recoverServiceInfo(
 ): Promise<ServiceInfo | undefined> {
   const current = await readServiceInfo();
   if (current && (await probePort(current.port))) return current;
+  // A unique id so two concurrent recoveries never collide on a constant.
+  const recoveredInstanceId = `recovered-${randomBytes(8).toString("hex")}`;
   const owner = await readServiceLockOwner();
-  if (!owner?.pid || !owner.startedAt || !owner.commandHash) {
+  // owner.pid comes from on-disk JSON; coerce to a real pid before any use.
+  const ownerPid = Number(owner?.pid);
+  if (!owner || !Number.isInteger(ownerPid) || ownerPid <= 0 || !owner.startedAt || !owner.commandHash) {
     if (!preferredPort || preferredPort <= 0 || !(await probePort(preferredPort))) {
       return undefined;
     }
@@ -385,7 +401,7 @@ export async function recoverServiceInfo(
     const identity = await getProcessIdentity(pid);
     if (!identity) return undefined;
     const candidate: ServiceInfo = {
-      instanceId: "recovered-service",
+      instanceId: recoveredInstanceId,
       pid,
       processStartedAt: identity.startedAt,
       commandHash: identity.commandHash,
@@ -399,11 +415,11 @@ export async function recoverServiceInfo(
   }
   const port = preferredPort && preferredPort > 0
     ? preferredPort
-    : await detectListeningPort(owner.pid);
+    : await detectListeningPort(ownerPid);
   if (!port) return undefined;
   const candidate: ServiceInfo = {
-    instanceId: "recovered-service",
-    pid: owner.pid,
+    instanceId: recoveredInstanceId,
+    pid: ownerPid,
     processStartedAt: owner.startedAt,
     commandHash: owner.commandHash,
     port,

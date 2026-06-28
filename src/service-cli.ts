@@ -233,13 +233,18 @@ async function serviceCommand(args: string[]): Promise<void> {
       }
     } else {
       const owner = await readServiceLockOwner();
+      // owner.pid is read from on-disk JSON; coerce to a real pid before it can
+      // reach verifyServiceProcess (a shell call) or terminateProcessTree.
+      const ownerPid = Number(owner?.pid);
       if (
-        owner?.pid &&
+        owner &&
+        Number.isInteger(ownerPid) &&
+        ownerPid > 0 &&
         owner.startedAt &&
         owner.commandHash &&
         (await verifyServiceProcess({
           instanceId: "lock-owner",
-          pid: owner.pid,
+          pid: ownerPid,
           processStartedAt: owner.startedAt,
           commandHash: owner.commandHash,
           port: preferredPort ?? 0,
@@ -249,11 +254,11 @@ async function serviceCommand(args: string[]): Promise<void> {
       ) {
         if (!force) {
           throw new DuetError(
-            `A live Duet daemon (${owner.pid}) exists but service discovery is missing. Re-run with --force to terminate and recover.`,
+            `A live Duet daemon (${ownerPid}) exists but service discovery is missing. Re-run with --force to terminate and recover.`,
             "SERVICE_ORPHANED",
           );
         }
-        terminateProcessTree(owner.pid);
+        terminateProcessTree(ownerPid);
       }
     }
     await clearServiceInfo();
