@@ -3632,3 +3632,99 @@ test("global chat context shows stored strategy in System Defaults", () => {
     store.close();
   }
 });
+
+function seedPendingRun(
+  store: Store,
+  runId: string,
+  status: RunRecord["status"],
+  task?: Partial<TaskRecord>,
+): void {
+  const stamp = "2026-06-01T00:00:00.000Z";
+  const run: RunRecord = {
+    id: runId,
+    repoPath: "/repo",
+    repoRoot: "/repo",
+    goal: "pending run",
+    status,
+    leadProvider: "claude",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: `duet/${runId}/integration`,
+    configJson: "{}",
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
+  const taskRecord: TaskRecord = {
+    runId,
+    id: `${runId}-task-1`,
+    ordinal: 0,
+    plan: {
+      id: `${runId}-task-1`,
+      title: "Task",
+      objective: "Do it",
+      acceptanceCriteria: ["done"],
+      allowedPaths: ["src/**"],
+      dependencies: [],
+    },
+    status: "pending",
+    provider: "claude",
+    reviewerProvider: "codex",
+    revisionCount: 0,
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+    ...task,
+  };
+  store.createRun(run, [taskRecord]);
+}
+
+async function discardRun(
+  base: string,
+  runId: string,
+  headers: Record<string, string>,
+): Promise<Response> {
+  return await fetch(`${base}/api/v1/runs/${encodeURIComponent(runId)}/discard`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": `discard-${runId}` },
+    body: "{}",
+  });
+}
+
+test("dashboard session can discard a pending run (cancel + delete)", async () => {
+  const h = await startService();
+  try {
+    seedPendingRun(h.store, "pending-1", "awaiting_plan_approval");
+    const cookie = await sessionCookie(h.base);
+    const response = await discardRun(h.base, "pending-1", {
+      cookie,
+      "content-type": "application/json",
+    });
+    assert.equal(response.status, 200);
+    const data = ((await response.json()) as { data: { discarded: string } }).data;
+    assert.equal(data.discarded, "pending-1");
+    assert.throws(
+      () => h.store.getRun("pending-1"),
+      (error) => error instanceof Error && "code" in error,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("discard refuses a run that has worktrees or branches on disk", async () => {
+  const h = await startService();
+  try {
+    seedPendingRun(h.store, "pending-2", "needs_attention", {
+      branch: "duet/pending-2/task/pending-2-task-1",
+      worktreePath: "/tmp/duet/pending-2",
+    });
+    const response = await discardRun(h.base, "pending-2", bearer());
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "RUN_NOT_DISCARDABLE");
+    assert.equal(h.store.getRun("pending-2").id, "pending-2");
+  } finally {
+    await h.cleanup();
+  }
+});

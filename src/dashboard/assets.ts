@@ -567,8 +567,15 @@ async function authenticate() {
 async function loadRuns(options = {}) {
   const runs=await api("/runs");
   const deletable = new Set(["failed","cancelled","merged","cleaned_up"]);
+  // Pending runs (a plan was created but execution never started, so there are
+  // no worktrees) can be closed in one click: the backend cancels + deletes.
+  const discardable = new Set(["awaiting_plan_approval","approved"]);
   q("runs").innerHTML=runs.map(r=>{
-    const del=deletable.has(r.status)?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>':"";
+    const del=deletable.has(r.status)
+      ?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>'
+      :discardable.has(r.status)
+        ?'<button class="run-delete-btn" data-discard-run="'+esc(r.id)+'" title="Close run (cancel and remove)" aria-label="Close run">&#10005;</button>'
+        :"";
     return '<div class="run-row"><button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>'+del+'</div>';
   }).join("")||'<span class="empty">No runs yet.</span>';
   q("runs").querySelectorAll(".run-btn").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
@@ -578,6 +585,15 @@ async function loadRuns(options = {}) {
     try{
       await api("/runs/"+encodeURIComponent(b.dataset.deleteRun),{method:"DELETE"});
       if(selected===b.dataset.deleteRun){selected=null;}
+      await loadRuns();
+    }catch(err){showError(err.message);}
+  });
+  q("runs").querySelectorAll("[data-discard-run]").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    if(!confirm("Close this run? It will be cancelled and removed. This cannot be undone."))return;
+    try{
+      await api("/runs/"+encodeURIComponent(b.dataset.discardRun)+"/discard",{method:"POST",idempotencyKey:requestKey("dashboard-discard-run"),body:{}});
+      if(selected===b.dataset.discardRun){selected=null;}
       await loadRuns();
     }catch(err){showError(err.message);}
   });

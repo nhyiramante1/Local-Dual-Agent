@@ -404,6 +404,7 @@ export class DuetService {
       const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
       const deleteRunRoute = request.method === "DELETE" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname);
+      const discardRunRoute = request.method === "POST" && /^\/api\/v1\/runs\/[^/]+\/discard$/.test(url.pathname);
       const cancelActiveRoute = request.method === "POST" && url.pathname === "/api/v1/service/cancel-active";
       if (
         credential === "session" &&
@@ -411,6 +412,7 @@ export class DuetService {
         !chatRoute &&
         !approveRoute &&
         !deleteRunRoute &&
+        !discardRunRoute &&
         !cancelActiveRoute
       ) {
         this.send(
@@ -1040,6 +1042,7 @@ export class DuetService {
       const run = this.options.store.getRun(runId);
       const versionIndependentCancel =
         suffix === "/cancel" ||
+        suffix === "/discard" ||
         suffix === "/approve" ||
         /^\/tasks\/[^/]+\/cancel$/.test(suffix);
       if (
@@ -1047,6 +1050,38 @@ export class DuetService {
         Number(body.expectedVersion) !== (run.version ?? 1)
       ) {
         throw new DuetError("Run version changed.", "VERSION_CONFLICT");
+      }
+      if (suffix === "/discard") {
+        // Targeted "close" for a pending run: cancel + delete in one atomic
+        // step (mutate wraps this in a transaction). Only safe when the run has
+        // no active work and no on-disk worktrees/branches; otherwise the CLI
+        // cancel/cleanup path must run first so nothing is orphaned.
+        const active = this.options.store
+          .listActiveOperations()
+          .find((operation) => operation.runId === runId);
+        if (active) {
+          throw new DuetError(
+            `Run ${runId} has active operation ${active.id}; stop it before discarding.`,
+            "RUN_ACTIVITY_ACTIVE",
+          );
+        }
+        const hasOnDisk = this.options.store
+          .listTasks(runId)
+          .some((task) => task.worktreePath || task.branch);
+        if (hasOnDisk) {
+          throw new DuetError(
+            `Run ${runId} has worktrees or branches on disk. Use \`duet cleanup ${runId}\` first.`,
+            "RUN_NOT_DISCARDABLE",
+          );
+        }
+        if (!["failed", "cancelled", "merged", "cleaned_up"].includes(run.status)) {
+          this.options.store.updateRun(runId, {
+            status: "cancelled",
+            cancellationRequested: true,
+          });
+        }
+        this.options.store.deleteRun(runId);
+        return { status: 200, data: { discarded: runId } };
       }
       if (suffix === "/action-ticket") {
         const action =
