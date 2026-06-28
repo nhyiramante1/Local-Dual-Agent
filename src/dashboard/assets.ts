@@ -522,6 +522,7 @@ function reauth() {
   return reauthInFlight;
 }
 function esc(value){const d=document.createElement("div");d.textContent=String(value??"");return d.innerHTML.replaceAll('"',"&quot;").replaceAll("'","&#39;")}
+function titleCase(value){const s=String(value||"");return s.charAt(0).toUpperCase()+s.slice(1)}
 function statusClass(value){const s=String(value??"").toLowerCase();
   if(s.includes("conflict")||s.includes("blocked")||s.includes("attention"))return"s-conflict";
   if(s.includes("fail"))return"s-failed";
@@ -673,7 +674,7 @@ function renderPendingTurn() {
 }
 function managerActivityLabel(activity) {
   if (!activity) return "Working…";
-  if (activity.phase === "tool") {
+  if (activity.phase === "tool" || activity.phase === "tool-result") {
     const map = {
       list_runs: "Reviewing runs", inspect_run: "Inspecting a run",
       check_path: "Checking a path", check_git_repo: "Checking the git repo",
@@ -683,7 +684,10 @@ function managerActivityLabel(activity) {
       set_alias_proposal: "Preparing an alias suggestion",
       request_agent_consultation: "Preparing a consultation"
     };
-    return (map[activity.tool] || ("Using " + activity.tool)) + "…";
+    const base = map[activity.tool] || ("Using " + activity.tool);
+    const args = compactToolArgs(activity.arguments);
+    // A "tool-result" frame is the completed call, so no trailing ellipsis.
+    return base + args + (activity.phase === "tool" ? "…" : "");
   }
   if (activity.phase === "summarizing") return "Writing the answer…";
   return "Thinking…";
@@ -713,6 +717,16 @@ function renderManagerWorking() {
   const latestTool = latestToolActivity(rawActivity);
   const primaryActivity = latestTool || chat.activeActivity;
   const label = managerActivityLabel(primaryActivity);
+  // When the latest frame is a completed tool call, show its result live (the
+  // actual call/result timeline, not just a "working" hint).
+  const resultLine =
+    primaryActivity && primaryActivity.phase === "tool-result"
+      ? (function () {
+          const status = toolTraceStatus(primaryActivity);
+          const summary = compactToolResultSummary(primaryActivity);
+          return '<span class="activity-secondary"><span class="tool-trace-status '+esc(status.tone)+'">'+esc(status.label)+'</span>'+(summary ? ' '+summary : '')+'</span>';
+        })()
+      : "";
   const secondary =
     rawActivity &&
     latestTool &&
@@ -723,7 +737,7 @@ function renderManagerWorking() {
   return '<div class="chat-turn manager working" id="manager-working"><div class="manager-avatar"></div>'
     +'<div class="turn-content"><div class="meta"><b>Manager: '+esc(chat.agent)+'</b>'+badge("working")
     +'<span class="when">live</span></div>'
-    +'<div class="body"><span class="working-dots"><span></span><span></span><span></span></span><span class="activity-stack"><span class="activity-current">'+esc(label)+'</span>'+secondary+trail+'</span></div></div></div>';
+    +'<div class="body"><span class="working-dots"><span></span><span></span><span></span></span><span class="activity-stack"><span class="activity-current">'+esc(label)+'</span>'+resultLine+secondary+trail+'</span></div></div></div>';
 }
 function updateManagerWorking() {
   const host = q("chat-turns");
@@ -734,13 +748,15 @@ function updateManagerWorking() {
   if (existing) { existing.outerHTML = html; }
   else { host.insertAdjacentHTML("beforeend", html); host.scrollTop = host.scrollHeight; }
 }
+function isToolActivity(item) {
+  return Boolean(item && (item.phase === "tool" || item.phase === "tool-result") && item.tool);
+}
 function latestToolActivity(activity) {
   const history = Array.isArray(activity?.history) ? activity.history : [];
   for (let i = history.length - 1; i >= 0; i--) {
-    const item = history[i];
-    if (item && item.phase === "tool" && item.tool) return item;
+    if (isToolActivity(history[i])) return history[i];
   }
-  return activity?.phase === "tool" ? activity : null;
+  return isToolActivity(activity) ? activity : null;
 }
 function chooseVisibleActivity(activity) {
   if (!activity) return null;
@@ -938,7 +954,16 @@ async function loadChat() {
     }
     const conversation = currentConversation();
     if (!conversation) {
-      chat.sharedContext = [];
+      // No conversation yet, but provider-health/cooldown notes still matter —
+      // this is exactly when the operator needs to know a provider is rate
+      // limited or misconfigured. Fetch shared context independently.
+      try {
+        const params = selected ? "?runId="+encodeURIComponent(selected) : "";
+        const data = await api("/chat/shared-context"+params);
+        chat.sharedContext = data.sharedContext || [];
+      } catch {
+        chat.sharedContext = [];
+      }
       renderSharedContext(chat.sharedContext);
       const scope = selected ? esc(chat.agent)+" manager" : "global";
       q("chat-turns").innerHTML=(renderPendingTurn() || renderRunProgressEmptyState() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
@@ -1060,22 +1085,27 @@ function setChatEnabled(enabled) {
   updateComposerAction();
 }
 async function stopActiveWork() {
-  const result = await api("/service/cancel-active", {
+  // The composer Stop button is scoped to the current manager turn — it cancels
+  // only that operation, never background runs. (Global stop lives elsewhere.)
+  const op = chat.activeOperation;
+  if (!op) {
+    setChatStatus("Nothing is running right now.");
+    setChatEnabled(!chatIsBusyForCurrentView());
+    return;
+  }
+  const result = await api("/operations/"+encodeURIComponent(op.id)+"/cancel", {
     method: "POST",
-    idempotencyKey: requestKey("dashboard-cancel-active"),
+    idempotencyKey: requestKey("dashboard-cancel-operation"),
     body: {}
   });
   if (result.cancellationRequested) {
-    setChatStatus("Stop requested. Active work is being cancelled.");
-    if (chat.activeOperation) {
-      chat.pendingTurn = null;
-      setChatEnabled(false);
-    }
+    setChatStatus("Stop requested. The manager turn is being cancelled.");
+    chat.pendingTurn = null;
+    setChatEnabled(false);
   } else {
     setChatStatus("Nothing is running right now.");
     setChatEnabled(!chatIsBusyForCurrentView());
   }
-  refreshRuns({ preserveSelection: true }).catch(() => {});
   const conv = currentConversation();
   if (conv) refreshConversation(conv.id).catch(() => {});
 }
@@ -1253,8 +1283,13 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     proposalsByTurn.set(proposal.turnId, list);
   }
   const turnsHtml = turns.map(turn => {
+    // Consultation replies are stored as manager turns with a usage marker; show
+    // them as "Consultation · Claude" rather than as the manager voice.
+    const isConsult = turn.role === "manager" && Boolean(parseUsageJson(turn)?.consultation);
     const who = turn.role === "manager"
-      ? "Manager: "+(turn.interfaceAgent || chat.agent)
+      ? (isConsult
+          ? "Consultation · "+titleCase(turn.interfaceAgent || "agent")
+          : "Manager: "+(turn.interfaceAgent || chat.agent))
       : (turn.role === "user" ? "You" : turn.role);
     const failed = turn.status === "failed";
     // "Soft" failures (rate limit, budget) are expected throttling, not errors -
@@ -1327,13 +1362,19 @@ function renderProposalCard(proposal) {
   if (proposal.action === "agent_consultation") {
     let meta = {};
     try { meta = JSON.parse(proposal.commandJson); } catch {}
+    const agentList = Array.isArray(meta.agents) ? meta.agents.join(", ") : "";
+    const repoRow = meta.repoPath
+      ? '<div class="proposal-kv"><b>Repo:</b> <span class="tool-path">'+esc(meta.repoPath)+'</span></div>'
+      : '';
     return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
-      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("consent")+'</div>'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("read-only")+'</div>'
       +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
-      +'<div class="proposal-kv"><b>Agents:</b> '+visibleText((meta.agents||[]).join ? meta.agents.join(", ") : "", 200)+'</div>'
+      +'<div class="proposal-kv"><b>Agents:</b> '+esc(agentList)+'</div>'
+      +repoRow
       +'<div class="proposal-kv"><b>Profile:</b> '+esc(meta.profile||"balanced")+'&nbsp;&nbsp;<b>Mode:</b> '+esc(meta.mode||"independent")+'</div>'
-      +'<div class="proposal-copy">This records consent intent only. Asking Claude/Codex is deferred until the consultation executor is added.</div>'
-      +'<div class="proposal-actions"><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'<div class="proposal-copy">Approve to ask the selected agent(s) read-only — their replies appear here in the chat. This spends Claude/Codex budget.</div>'
+      +'<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(proposal.id)+'"><button type="button" disabled data-proposal-start="'+esc(proposal.id)+'" data-proposal-action="agent_consultation" data-run-version="" data-task-version="">Start consultation</button></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
       +'</div>';
   }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");

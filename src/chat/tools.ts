@@ -151,7 +151,7 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
   },
   {
     name: "request_agent_consultation",
-    description: "Create a consent card to ask Claude, Codex, or both for a paid read-only consultation. Phase 7A does not execute it.",
+    description: "Create a consent card to ask Claude, Codex, or both for a paid read-only consultation. The operator approves the card, then each agent answers read-only and its reply appears in the chat. Use it when a question needs deeper repo reasoning than your read-only tools reveal, or you are genuinely unsure of the right approach. Pass repoPath to ground the consultation in a real repository (read-only).",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -166,6 +166,7 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
         },
         mode: { type: "string", enum: ["independent"] },
         reason: { type: "string", minLength: 1, maxLength: 2_000 },
+        repoPath: { type: "string", minLength: 1, maxLength: 1_000 },
         profile: { type: "string", enum: ["cheap", "balanced", "reasoning", "max"] },
         maxTurns: { type: "integer", minimum: 1, maximum: 5 },
         maxRuntimeSeconds: { type: "integer", minimum: 10, maximum: 300 },
@@ -668,6 +669,9 @@ async function executeKnownTool(
       question: stringArg(args, "question"),
       agents: Array.isArray(args.agents) ? args.agents : [],
       mode: "independent",
+      repoPath: typeof args.repoPath === "string" && args.repoPath.trim() !== ""
+        ? pathArg(args, "repoPath")
+        : undefined,
       profile: optionalProfile(args),
       maxTurns: args.maxTurns,
       maxRuntimeSeconds: args.maxRuntimeSeconds,

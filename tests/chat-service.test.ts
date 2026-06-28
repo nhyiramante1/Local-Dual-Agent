@@ -2084,7 +2084,10 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /\/approve/);
   assert.match(dashboardJs, /approval-preview/);
   assert.match(dashboardJs, /data-proposal-approve/);
-  assert.match(dashboardJs, /\/service\/cancel-active/);
+  // The composer Stop button is scoped to the current manager turn — it cancels
+  // a single operation, never all active work, so it no longer hits cancel-active.
+  assert.match(dashboardJs, /\/operations\/"\+encodeURIComponent\(op\.id\)\+"\/cancel/);
+  assert.doesNotMatch(dashboardJs, /\/service\/cancel-active/);
   // direct run-mutation routes remain absent from the dashboard
   assert.doesNotMatch(dashboardJs, /\/merge/);
   assert.doesNotMatch(dashboardJs, /\/runs\/[^"]+\/cancel/);
@@ -3825,6 +3828,72 @@ test("provider billing-exhausted failures are stored as soft, no-cooldown provid
       )),
       true,
     );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("approved consultation runs the agent read-only and appends a reply turn + note", async () => {
+  const h = await startService({ text: "Here is my read-only take on the repo." });
+  try {
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+    const turn = h.store.appendConversationTurn({
+      conversationId,
+      role: "manager",
+      interfaceAgent: "codex",
+      content: "I can ask an agent for help.",
+    });
+    const proposalId = randomUUID();
+    h.store.createProposal({
+      id: proposalId,
+      conversationId,
+      turnId: turn.id,
+      runId: undefined,
+      taskId: undefined,
+      action: "agent_consultation",
+      summary: "Ask Claude read-only.",
+      commandCli: "Read-only agent consultation.",
+      commandJson: JSON.stringify({
+        action: "agent_consultation",
+        question: "What should I focus on?",
+        agents: ["claude"],
+        mode: "independent",
+        profile: "balanced",
+        maxRuntimeSeconds: 30,
+      }),
+      tier: "ordinary",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+
+    const res = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": "consult-start-1" },
+        body: JSON.stringify({ confirm: "start" }),
+      },
+    );
+    assert.equal(res.status, 202);
+    const op = ((await res.json()) as { data: OperationRecord }).data;
+    assert.equal(op.kind, "consultation");
+    await h.service.consultation.wait(op.id);
+
+    const turns = h.store.listConversationTurns(conversationId);
+    const consult = turns.find((t) => t.role === "manager" && t.interfaceAgent === "claude");
+    assert.ok(consult, "expected a Claude consultation turn");
+    assert.match(consult!.content, /read-only take/i);
+    const usage = JSON.parse(consult!.usageJson ?? "{}") as { consultation?: boolean; agent?: string };
+    assert.equal(usage.consultation, true);
+    assert.equal(usage.agent, "claude");
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(
+      notes.some((n) => n.kind === "handoff" && n.provider === "claude" && /Consulted claude/.test(n.content)),
+      true,
+    );
+
+    assert.equal(h.store.getOperation(op.id).status, "succeeded");
+    assert.equal(h.store.getProposal(proposalId).status, "started");
   } finally {
     await h.cleanup();
   }

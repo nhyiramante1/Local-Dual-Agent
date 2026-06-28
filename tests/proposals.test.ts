@@ -323,6 +323,35 @@ test("agent_consultation parsed from a legacy fenced block synthesizes a consent
   assert.deepEqual(parsed.raw.agents, ["claude", "codex"]);
 });
 
+test("agent_consultation grounds on a valid repoPath and rejects an invalid one", async () => {
+  const { mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "duet-consult-repo-"));
+  await mkdir(path.join(root, ".git"), { recursive: true });
+  try {
+    await withStore((store) => {
+      const conversation = store.createConversation({ id: randomUUID(), interfaceAgent: "groq" });
+      const ok = tryValidateAndSynthesize(
+        { action: "agent_consultation", question: "What next?", agents: ["claude"], mode: "independent", repoPath: root },
+        conversation, store, undefined, {}, {}, false, true,
+      );
+      assert.ok(ok, "valid repo should synthesize");
+      const cmd = JSON.parse(ok!.commandJson) as { repoPath?: string; agents: string[] };
+      assert.equal(cmd.repoPath, root);
+      assert.deepEqual(cmd.agents, ["claude"]);
+
+      const diag: { reason?: string } = {};
+      const rejected = tryValidateAndSynthesize(
+        { action: "agent_consultation", question: "What next?", agents: ["claude"], mode: "independent", repoPath: path.join(root, "nope") },
+        conversation, store, undefined, {}, diag, false, true,
+      );
+      assert.equal(rejected, null);
+      assert.match(diag.reason ?? "", /not a valid git repository/i);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("manager path tools normalize over-escaped/redundant path segments", async () => {
   await withStore(async (store) => {
     const conversation = store.createConversation({

@@ -30,7 +30,7 @@ commands = [
 CI = "true"
 
 [manager]
-# Default manager voice on startup: groq | gemini | openai | claude | codex.
+# Default manager voice on startup: groq | gemini | glm | openai | claude | codex.
 # groq and gemini are native OpenAI-compatible identities — each is enabled when
 # its API key is present (GROQ_API_KEY / GEMINI_API_KEY). These defaults favor
 # low-cost structured tool calls; env vars still override them.

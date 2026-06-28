@@ -106,10 +106,10 @@ profile = "turbo-mode"
   );
 });
 
-test("loadConfig returns glm as default manager provider when [manager] is absent", async () => {
+test("loadConfig returns groq as default manager provider when [manager] is absent", async () => {
   await withToml("", async (tomlPath) => {
     const config = await loadConfig(tomlPath);
-    assert.equal(config.manager.provider, "glm");
+    assert.equal(config.manager.provider, "groq");
     assert.equal(config.manager.groqModel, "openai/gpt-oss-120b");
     assert.equal(config.manager.geminiModel, "gemini-3.1-flash-lite");
     assert.equal(config.manager.providers.glm.label, "GLM");
@@ -192,7 +192,7 @@ base_url = "https://api.z.ai/api/paas/v4"
   );
 });
 
-test("loadConfig falls back to glm for unrecognised manager provider", async () => {
+test("loadConfig falls back to the default for unrecognised manager provider", async () => {
   await withToml(
     `
 [manager]
@@ -200,7 +200,7 @@ provider = "gpt-wizard"
 `,
     async (tomlPath) => {
       const config = await loadConfig(tomlPath);
-      assert.equal(config.manager.provider, "glm");
+      assert.equal(config.manager.provider, "groq");
     },
   );
 });

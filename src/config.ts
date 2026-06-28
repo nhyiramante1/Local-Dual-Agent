@@ -132,7 +132,9 @@ export const defaultConfig: DuetConfig = {
     env: {},
   },
   manager: {
-    provider: "glm" as ManagerProviderName,
+    // Matches the checked-in duet.toml default. duetd applies an availability
+    // fallback if groq has no key, so this only sets the preferred startup voice.
+    provider: "groq" as ManagerProviderName,
     openaiModel: "gpt-4o-mini",
     openaiBaseUrl: undefined,
     groqModel: "openai/gpt-oss-120b",

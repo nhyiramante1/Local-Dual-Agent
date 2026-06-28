@@ -204,6 +204,16 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
     const timeoutMs = turn.timeoutMs ?? 60_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Abort the in-flight HTTP request when the operator clicks Stop, not only on
+    // timeout. Without this, cancelling marks the operation cancelled while the
+    // provider request keeps running and spending quota, and the provider stays
+    // locked in activeProviders until it returns. Mirrors the claude/codex path.
+    const cancelPoll = turn.shouldCancel
+      ? setInterval(() => {
+          if (turn.shouldCancel?.()) controller.abort();
+        }, 200)
+      : undefined;
+    cancelPoll?.unref?.();
     let completion: Awaited<ReturnType<typeof this.client.chat.completions.create>>;
     const hasTools = !!turn.tools?.length;
     try {
@@ -236,6 +246,12 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
         { signal: controller.signal },
       );
     } catch (error) {
+      // A cancel-driven abort surfaces as CANCELLED so the engine treats it as a
+      // stop, not a provider failure. A timeout abort falls through to the
+      // generic handling below.
+      if (controller.signal.aborted && turn.shouldCancel?.()) {
+        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+      }
       if (isContextLimit(error)) {
         throw new DuetError(
           contextLimitMessage(error),
@@ -271,6 +287,7 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
       throw error;
     } finally {
       clearTimeout(timer);
+      if (cancelPoll) clearInterval(cancelPoll);
     }
     const choice = completion.choices[0];
     const usage = completion.usage;

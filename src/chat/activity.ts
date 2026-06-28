@@ -143,25 +143,27 @@ export class ChatActivityManager {
     await this.activities.get(operationId)?.promise;
   }
 
+  // Requests cancellation by aborting the live turn ONLY. It deliberately does
+  // not write a terminal operation status here: the run() promise owns the
+  // terminal write and appends the cancellation turn first, atomically. Writing
+  // "cancelled" eagerly let the poller re-enable input before the cancellation
+  // turn existed, then the still-running promise appended a turn afterwards —
+  // a race between UI state and real backend state.
   cancelActive(operationId?: string): number {
     let cancelled = 0;
     for (const [id, activity] of this.activities) {
       if (operationId && operationId !== id) continue;
-      const operation = this.store.getOperation(id);
-      if (operation.status === "queued" || operation.status === "running") {
-        this.store.updateOperation(id, {
-          status: "cancelled",
-          errorJson: JSON.stringify({
-            code: "CANCELLED",
-            message: "Cancellation requested.",
-          }),
-          finishedAt: new Date().toISOString(),
-        });
-      }
       activity.controller.abort();
       cancelled += 1;
     }
     return cancelled;
+  }
+
+  // Whether a turn is still live in-process (has a run() promise that will write
+  // its own terminal status). The global emergency stop uses this to finalize
+  // only genuinely orphaned operations directly.
+  isActive(operationId: string): boolean {
+    return this.activities.has(operationId);
   }
 
   private clearActivity(operationId: string): void {
@@ -310,7 +312,9 @@ export class ChatActivityManager {
             this.activityExpiryTimers.delete(operationId);
           }
           const previous = this.activityByOperation.get(operationId);
-          const history = [...(previous?.history ?? []), activity].slice(-8);
+          // Each tool call now emits two frames (start + result), so keep a
+          // deeper window to preserve roughly the same tool coverage in the trail.
+          const history = [...(previous?.history ?? []), activity].slice(-16);
           this.activityByOperation.set(operationId, { ...activity, history });
         },
       );

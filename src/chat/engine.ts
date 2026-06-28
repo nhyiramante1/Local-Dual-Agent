@@ -69,10 +69,20 @@ export type ManagerToolRuntimeOptions = Pick<
 
 // Live progress for a manager turn, surfaced to the dashboard while the turn
 // runs so the operator can see it is working and what it is doing.
+//
+// A tool call emits twice: once at `phase: "tool"` (the call is starting, with
+// arguments) and once at `phase: "tool-result"` (it finished, with ok/elapsed
+// and a compact result). That lets the dashboard render a true live tool
+// timeline — the actual call and its result as they happen — rather than only a
+// "Searching files…" liveness hint.
 export interface ManagerActivity {
-  phase: "thinking" | "tool" | "summarizing";
+  phase: "thinking" | "tool" | "tool-result" | "summarizing";
   tool?: string;
   step: number;
+  ok?: boolean;
+  elapsedMs?: number;
+  arguments?: Record<string, unknown>;
+  result?: Record<string, unknown>;
 }
 
 export type ManagerActivityListener = (activity: ManagerActivity) => void;
@@ -728,7 +738,11 @@ export class ChatEngine {
   ): Promise<ManagerToolExecution[]> {
     const executions: ManagerToolExecution[] = [];
     for (const call of toolCalls) {
-      emit?.({ phase: "tool", tool: call.name });
+      emit?.({
+        phase: "tool",
+        tool: call.name,
+        arguments: summarizeToolArguments(call.name, call.argumentsJson),
+      });
       const execution = await executeManagerTool({
         name: call.name,
         argumentsJson: call.argumentsJson,
@@ -737,6 +751,16 @@ export class ChatEngine {
         configAliases: this.configAliases,
       });
       executions.push({ ...execution, argumentsJson: call.argumentsJson });
+      // Post-completion frame: the actual result, live, with the same compact
+      // shape the completed turn persists in usageJson.toolTrace.
+      emit?.({
+        phase: "tool-result",
+        tool: execution.name,
+        ok: execution.ok,
+        elapsedMs: execution.elapsedMs,
+        arguments: summarizeToolArguments(call.name, call.argumentsJson),
+        result: summarizeToolResult(execution.name, execution.result),
+      });
     }
     return executions;
   }
@@ -871,8 +895,31 @@ export class ChatEngine {
     return undefined;
   }
 
+  // Among successful search_files executions, pick the strongest evidence rather
+  // than the first attempt: a model often runs a broad/empty search before a
+  // narrower one that actually matches. Score by match strength; ties break to
+  // the later execution so the freshest strong result wins.
+  private strongestSearchExecution(
+    executions: ManagerToolExecution[],
+  ): ManagerToolExecution | undefined {
+    let best: { execution: ManagerToolExecution; score: number } | undefined;
+    for (const execution of executions) {
+      if (execution.name !== "search_files" || !execution.ok) continue;
+      const result = asRecord(execution.result);
+      const matchCount = asNumber(result?.matchCount) ?? 0;
+      const folderMatches = Array.isArray(result?.folderMatches)
+        ? result!.folderMatches.length
+        : 0;
+      const matched = result?.matched === true || matchCount > 0 || folderMatches > 0;
+      const score = matched ? Math.max(matchCount, folderMatches, 1) : 0;
+      // `>=` lets a later execution of equal strength supersede an earlier one.
+      if (!best || score >= best.score) best = { execution, score };
+    }
+    return best?.execution;
+  }
+
   private fallbackToolSummary(executions: ManagerToolExecution[]): string | undefined {
-    const search = executions.find((execution) => execution.name === "search_files" && execution.ok);
+    const search = this.strongestSearchExecution(executions);
     if (search) return this.fallbackSearchResponse(search);
     const repo = executions.find((execution) => execution.name === "check_git_repo" && execution.ok);
     if (repo) return this.fallbackCheckGitRepoResponse(repo);

@@ -696,9 +696,11 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
 
       const consultation = '[data-proposal-id="proposal-consultation"]';
       await waitForText(page, consultation, "agent consultation");
-      await waitForText(page, consultation, "consent");
-      await waitForText(page, consultation, "deferred until the consultation executor is added");
-      assert.equal(await page.locator(`${consultation} [data-proposal-start]`).count(), 0);
+      await waitForText(page, consultation, "read-only");
+      await waitForText(page, consultation, "their replies appear here in the chat");
+      // Executable now: the consent card has a one-click Start affordance and no
+      // fingerprint readiness step.
+      assert.equal(await page.locator(`${consultation} [data-proposal-start]`).count(), 1);
       assert.equal(await page.locator(`${consultation} [data-proposal-prepare]`).count(), 0);
       assert.deepEqual(errors, []);
     });
@@ -1027,8 +1029,10 @@ test("stop button cancels an active manager turn", async () => {
       await assertEventually(async () => {
         assert.equal(h.store.listActiveOperations().length > 0, true);
       });
+      // The composer Stop is scoped to the current manager turn: it hits the
+      // per-operation cancel route, not the global cancel-active.
       const cancelResponse = page.waitForResponse((response) =>
-        response.url().includes("/service/cancel-active") && response.request().method() === "POST",
+        /\/operations\/[^/]+\/cancel$/.test(response.url()) && response.request().method() === "POST",
       );
       await page.locator("#chat-send").click();
       await cancelResponse;
