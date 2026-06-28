@@ -312,6 +312,11 @@ export function parseProposalBlock(text: string): ParseResult {
 }
 
 export function stripMalformedProposalArtifacts(text: string): string {
+  const toolCallIndex = text.search(/<tool_?call\b/i);
+  if (toolCallIndex >= 0) {
+    return text.slice(0, toolCallIndex).trimEnd();
+  }
+
   const fenceIndex = text.indexOf(FENCE_OPEN);
   if (fenceIndex >= 0) {
     return text.slice(0, fenceIndex).trimEnd();

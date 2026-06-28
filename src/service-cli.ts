@@ -13,7 +13,9 @@ import { DuetError } from "./core/errors.js";
 import {
   clearServiceInfo,
   loadOrCreateDashboardAccessToken,
+  recoverServiceInfo,
   readServiceInfo,
+  readServiceLockOwner,
   releaseServiceLock,
   verifyServiceProcess,
 } from "./service/discovery.js";
@@ -175,13 +177,17 @@ async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   const force = takeFlag(args, "--force");
   if (args.length) throw new DuetError("Invalid service command.", "INVALID_ARGUMENT");
+  const config = await loadConfig();
+  const preferredPort = Number(
+    process.env.DUET_PORT ?? config.service.port ?? 0,
+  ) || undefined;
   if (action === "start") {
     const info = await ensureService();
     console.log(`Duet service running: PID ${info.pid}, port ${info.port}`);
     return;
   }
   if (action === "status") {
-    const info = await readServiceInfo();
+    const info = (await recoverServiceInfo(preferredPort)) ?? await readServiceInfo();
     if (!info || !(await probeService(info))) {
       console.log("Duet service is stopped.");
       return;
@@ -190,7 +196,7 @@ async function serviceCommand(args: string[]): Promise<void> {
     return;
   }
   if (action === "stop" || action === "restart") {
-    const info = await readServiceInfo();
+    const info = (await recoverServiceInfo(preferredPort)) ?? await readServiceInfo();
     if (info && (await probeService(info))) {
       try {
         const client = await DuetClient.connect(false);
@@ -224,6 +230,30 @@ async function serviceCommand(args: string[]): Promise<void> {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline && (await probeService(info))) {
         await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } else {
+      const owner = await readServiceLockOwner();
+      if (
+        owner?.pid &&
+        owner.startedAt &&
+        owner.commandHash &&
+        (await verifyServiceProcess({
+          instanceId: "lock-owner",
+          pid: owner.pid,
+          processStartedAt: owner.startedAt,
+          commandHash: owner.commandHash,
+          port: preferredPort ?? 0,
+          apiVersion: "v1",
+          startedAt: owner.startedAt,
+        }))
+      ) {
+        if (!force) {
+          throw new DuetError(
+            `A live Duet daemon (${owner.pid}) exists but service discovery is missing. Re-run with --force to terminate and recover.`,
+            "SERVICE_ORPHANED",
+          );
+        }
+        terminateProcessTree(owner.pid);
       }
     }
     await clearServiceInfo();

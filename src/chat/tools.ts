@@ -22,6 +22,7 @@ export interface ManagerToolExecution {
   name: string;
   ok: boolean;
   elapsedMs: number;
+  argumentsJson?: string;
   result: unknown;
   proposal?: SynthesizedProposal;
 }
@@ -222,6 +223,7 @@ function boundedRuns(store: Store, limit: number): unknown[] {
 
 const SEARCH_SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".duet", ".next", "coverage", ".cache",
+  "AppData", "Application Data", "Local Settings",
 ]);
 // Name/dir searches only stat entries (cheap), so they get a larger budget than
 // content searches, which read file bodies.
@@ -273,6 +275,35 @@ interface SearchHit {
   snippet?: string;
 }
 
+interface FolderHit {
+  path: string;
+  matchCount: number;
+}
+
+type SearchEvidenceKind = "none" | "folder_name" | "file_name" | "content" | "installer_artifact";
+
+function isInstallerArtifact(hit: SearchHit | undefined): boolean {
+  if (!hit || hit.type !== "file") return false;
+  const basename = path.basename(hit.path).toLowerCase();
+  return (
+    /\.(msi|zip|7z|rar|exe)$/.test(basename) &&
+    /setup|install|installer|launcher|redistributable|redist|update|patch/.test(basename)
+  );
+}
+
+function searchEvidenceKind(
+  options: { contentPattern?: string },
+  bestMatch: SearchHit | undefined,
+  bestFolderMatch: FolderHit | undefined,
+): SearchEvidenceKind {
+  if (!bestMatch) return "none";
+  if (options.contentPattern) return "content";
+  if (bestMatch.type === "dir") return "folder_name";
+  if (isInstallerArtifact(bestMatch)) return "installer_artifact";
+  if (bestFolderMatch) return "folder_name";
+  return "file_name";
+}
+
 function searchFiles(
   root: string,
   options: {
@@ -281,7 +312,16 @@ function searchFiles(
     kind: SearchKind;
     maxResults: number;
   },
-): { matches: SearchHit[]; entriesScanned: number; truncated: boolean } {
+): {
+  matches: SearchHit[];
+  folderMatches: FolderHit[];
+  entriesScanned: number;
+  truncated: boolean;
+  matched: boolean;
+  bestMatch?: SearchHit;
+  bestFolderMatch?: FolderHit;
+  evidenceKind: SearchEvidenceKind;
+} {
   const matchName = options.namePattern
     ? buildNameMatcher(options.namePattern)
     : undefined;
@@ -308,6 +348,7 @@ function searchFiles(
     } catch {
       return; // unreadable directory — skip quietly
     }
+    const dirsToVisit: string[] = [];
     for (const entry of entries) {
       if (truncated) return;
       if (++entriesScanned > scanBudget) {
@@ -324,7 +365,7 @@ function searchFiles(
           // Don't descend into a matched project folder — repos rarely nest.
           continue;
         }
-        walk(full, depth + 1);
+        dirsToVisit.push(full);
         continue;
       }
       if (!entry.isFile() || !wantFiles) continue;
@@ -350,10 +391,47 @@ function searchFiles(
         }
       }
     }
+    for (const full of dirsToVisit) {
+      if (truncated) return;
+      walk(full, depth + 1);
+    }
   };
 
   walk(root, 0);
-  return { matches, entriesScanned, truncated };
+  const folderCounts = new Map<string, number>();
+  const addFolder = (folderPath: string): void => {
+    if (folderPath === root) return;
+    folderCounts.set(folderPath, (folderCounts.get(folderPath) ?? 0) + 1);
+  };
+  for (const match of matches) {
+    if (match.type === "dir") {
+      addFolder(match.path);
+      continue;
+    }
+    let parent = path.dirname(match.path);
+    while (parent !== root && parent.startsWith(root)) {
+      addFolder(parent);
+      const next = path.dirname(parent);
+      if (next === parent) break;
+      parent = next;
+    }
+  }
+  const folderMatches = [...folderCounts.entries()]
+    .map(([folderPath, matchCount]) => ({ path: folderPath, matchCount }))
+    .sort((a, b) => b.matchCount - a.matchCount || a.path.length - b.path.length)
+    .slice(0, options.maxResults);
+  const bestMatch = matches[0];
+  const bestFolderMatch = folderMatches[0];
+  return {
+    matches,
+    folderMatches,
+    entriesScanned,
+    truncated,
+    matched: matches.length > 0,
+    bestMatch,
+    bestFolderMatch,
+    evidenceKind: searchEvidenceKind(options, bestMatch, bestFolderMatch),
+  };
 }
 
 function proposalResult(proposal: SynthesizedProposal): unknown {
@@ -513,11 +591,24 @@ async function executeKnownTool(
       );
     }
     const kind: SearchKind =
-      args.kind === "dir" || args.kind === "any" ? args.kind : "file";
+      args.kind === "file" || args.kind === "dir" || args.kind === "any"
+        ? args.kind
+        : contentPattern && !namePattern
+          ? "file"
+          : "any";
     const maxResults = typeof args.maxResults === "number"
       ? Math.max(1, Math.min(100, Math.floor(args.maxResults)))
       : 20;
-    const { matches, entriesScanned, truncated } = searchFiles(root, {
+    const {
+      matches,
+      folderMatches,
+      entriesScanned,
+      truncated,
+      matched,
+      bestMatch,
+      bestFolderMatch,
+      evidenceKind,
+    } = searchFiles(root, {
       namePattern,
       contentPattern,
       kind,
@@ -531,7 +622,12 @@ async function executeKnownTool(
         kind,
         entriesScanned,
         truncated,
+        matched,
+        evidenceKind,
+        bestMatch,
+        bestFolderMatch,
         matchCount: matches.length,
+        folderMatches,
         matches,
       },
     };

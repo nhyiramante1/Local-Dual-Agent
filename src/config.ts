@@ -7,6 +7,17 @@ import type { AgentProfile, ManagerBudget, ManagerProviderName, ProviderName } f
 import { DuetError } from "./core/errors.js";
 import { appRoot } from "./paths.js";
 
+export interface ManagerProviderProfile {
+  label: string;
+  apiKeyEnv: string;
+  apiKeyEnvs: string[];
+  model: string;
+  baseUrl?: string;
+  modelEnv?: string;
+  baseUrlEnv?: string;
+  nativeToolCalling: boolean;
+}
+
 export interface DuetConfig {
   service: {
     host: string;
@@ -38,6 +49,11 @@ export interface DuetConfig {
     provider: ManagerProviderName;
     openaiModel: string;
     openaiBaseUrl: string | undefined;
+    groqModel: string;
+    groqBaseUrl: string;
+    geminiModel: string;
+    geminiBaseUrl: string;
+    providers: Record<string, ManagerProviderProfile>;
     openaiMaxUsdPerTurn: number;
     openaiMaxUsdPerDay: number;
     claudeMaxUsdPerTurn: number;
@@ -75,7 +91,7 @@ export function recommendedTurnBudget(
 }
 
 const VALID_PROFILES = new Set<AgentProfile>(["cheap", "balanced", "reasoning", "max"]);
-const VALID_MANAGER_PROVIDERS = new Set<ManagerProviderName>(["claude", "codex", "openai", "groq", "gemini"]);
+const BUILT_IN_MANAGER_PROVIDERS = new Set(["claude", "codex", "openai", "groq", "gemini"]);
 const VALID_MANAGER_ACTION_MODES = new Set<ManagerActionMode>([
   "recommended",
   "available",
@@ -116,9 +132,25 @@ export const defaultConfig: DuetConfig = {
     env: {},
   },
   manager: {
-    provider: "groq" as ManagerProviderName,
+    provider: "glm" as ManagerProviderName,
     openaiModel: "gpt-4o-mini",
     openaiBaseUrl: undefined,
+    groqModel: "openai/gpt-oss-120b",
+    groqBaseUrl: "https://api.groq.com/openai/v1",
+    geminiModel: "gemini-3.1-flash-lite",
+    geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    providers: {
+      glm: {
+        label: "GLM",
+        apiKeyEnv: "ZAI_API_KEY",
+        apiKeyEnvs: ["ZAI_API_KEY", "ZAP_API_KEY", "ZHIPU_API_KEY"],
+        modelEnv: "GLM_MODEL",
+        baseUrlEnv: "GLM_BASE_URL",
+        model: "glm-4.5-flash",
+        baseUrl: "https://api.z.ai/api/paas/v4",
+        nativeToolCalling: true,
+      },
+    },
     openaiMaxUsdPerTurn: 0.1,
     openaiMaxUsdPerDay: 2,
     claudeMaxUsdPerTurn: 0.5,
@@ -328,6 +360,78 @@ function parseEnvironment(value: unknown): Record<string, string> {
   return value as Record<string, string>;
 }
 
+function isValidManagerProviderId(value: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,31}$/i.test(value);
+}
+
+function parseManagerProviderProfiles(value: unknown): Record<string, ManagerProviderProfile> {
+  const profiles: Record<string, ManagerProviderProfile> = {
+    ...defaultConfig.manager.providers,
+  };
+  if (value === undefined) return profiles;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DuetError("manager.providers must be a table.", "INVALID_CONFIG");
+  }
+  for (const [rawName, rawProfile] of Object.entries(value as Record<string, unknown>)) {
+    const name = rawName.toLowerCase();
+    if (!isValidManagerProviderId(name) || BUILT_IN_MANAGER_PROVIDERS.has(name)) {
+      throw new DuetError(
+        `Invalid manager provider profile name: ${rawName}.`,
+        "INVALID_CONFIG",
+      );
+    }
+    if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) {
+      throw new DuetError(
+        `manager.providers.${rawName} must be a table.`,
+        "INVALID_CONFIG",
+      );
+    }
+    const profile = rawProfile as Record<string, unknown>;
+    const label = typeof profile.label === "string" && profile.label.trim()
+      ? profile.label.trim()
+      : rawName;
+    const primaryApiKeyEnv = typeof profile.api_key_env === "string" && profile.api_key_env.trim()
+      ? profile.api_key_env.trim()
+      : undefined;
+    const apiKeyEnvs = Array.isArray(profile.api_key_envs)
+      ? profile.api_key_envs.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+      : [];
+    const allApiKeyEnvs = [
+      ...(primaryApiKeyEnv ? [primaryApiKeyEnv] : []),
+      ...apiKeyEnvs.filter((item) => item !== primaryApiKeyEnv),
+    ];
+    const apiKeyEnv = allApiKeyEnvs[0];
+    const model = typeof profile.model === "string" && profile.model.trim()
+      ? profile.model.trim()
+      : undefined;
+    if (!apiKeyEnv || !model) {
+      throw new DuetError(
+        `manager.providers.${rawName} requires api_key_env and model.`,
+        "INVALID_CONFIG",
+      );
+    }
+    profiles[name] = {
+      label,
+      apiKeyEnv,
+      apiKeyEnvs: allApiKeyEnvs,
+      model,
+      baseUrl: typeof profile.base_url === "string" && profile.base_url.trim()
+        ? profile.base_url.trim()
+        : undefined,
+      modelEnv: typeof profile.model_env === "string" && profile.model_env.trim()
+        ? profile.model_env.trim()
+        : undefined,
+      baseUrlEnv: typeof profile.base_url_env === "string" && profile.base_url_env.trim()
+        ? profile.base_url_env.trim()
+        : undefined,
+      nativeToolCalling: profile.native_tool_calling === undefined
+        ? true
+        : profile.native_tool_calling === true,
+    };
+  }
+  return profiles;
+}
+
 function isValidListenHost(value: string): boolean {
   return (
     value === "127.0.0.1" ||
@@ -361,6 +465,7 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
   const budgets = raw.budgets ?? {};
   const verification = raw.verification ?? {};
   const manager = raw.manager ?? {};
+  const managerProviderProfiles = parseManagerProviderProfiles(manager.providers);
   const service = raw.service ?? {};
   const dashboard = raw.dashboard ?? {};
   const rawAliases = raw.aliases ?? {};
@@ -476,8 +581,11 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
       env: parseEnvironment(verification.env),
     },
     manager: {
-      provider: VALID_MANAGER_PROVIDERS.has(manager.provider as ManagerProviderName)
-        ? (manager.provider as ManagerProviderName)
+      provider:
+        typeof manager.provider === "string" &&
+        (BUILT_IN_MANAGER_PROVIDERS.has(manager.provider) ||
+          managerProviderProfiles[manager.provider.toLowerCase()])
+        ? (manager.provider.toLowerCase() as ManagerProviderName)
         : defaultConfig.manager.provider,
       openaiModel:
         typeof manager.openai_model === "string"
@@ -487,6 +595,23 @@ export async function loadConfig(configPath?: string): Promise<DuetConfig> {
         typeof manager.openai_base_url === "string"
           ? manager.openai_base_url
           : undefined,
+      groqModel:
+        typeof manager.groq_model === "string"
+          ? manager.groq_model
+          : defaultConfig.manager.groqModel,
+      groqBaseUrl:
+        typeof manager.groq_base_url === "string"
+          ? manager.groq_base_url
+          : defaultConfig.manager.groqBaseUrl,
+      geminiModel:
+        typeof manager.gemini_model === "string"
+          ? manager.gemini_model
+          : defaultConfig.manager.geminiModel,
+      geminiBaseUrl:
+        typeof manager.gemini_base_url === "string"
+          ? manager.gemini_base_url
+          : defaultConfig.manager.geminiBaseUrl,
+      providers: managerProviderProfiles,
       openaiMaxUsdPerTurn: numberInRange(
         manager.openai_max_usd_per_turn,
         defaultConfig.manager.openaiMaxUsdPerTurn,
@@ -581,6 +706,11 @@ export function resolveManagerBudget(config: DuetConfig): ManagerBudget {
     provider: _provider,
     openaiModel: _model,
     openaiBaseUrl: _base,
+    groqModel: _groqModel,
+    groqBaseUrl: _groqBase,
+    geminiModel: _geminiModel,
+    geminiBaseUrl: _geminiBase,
+    providers: _providers,
     nativeToolCalling: _native,
     actionMode: _mode,
     supportsMultiStepToolLoop: _loop,

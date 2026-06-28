@@ -37,8 +37,8 @@ import {
   type ManagerToolExecution,
 } from "./tools.js";
 
-// Phrases a weaker manager model uses when it narrates an intent to propose but
-// forgets to emit the duet-proposal block. Used to trigger a single backstop retry.
+// Detects whether the previous legacy manager turn offered a plan so a follow-up
+// user affirmation can synthesize the proposal the model omitted.
 const INTENT_TO_PROPOSE_RE =
   /\b(?:I (?:will |can |'ll |would )?propose|propose (?:the|a|this|an)\b|here is (?:the |a |my )?(?:proposal|plan)|a proposal can be|propose the following)/i;
 
@@ -54,9 +54,7 @@ export const defaultManagerBudget: ManagerBudget = {
 };
 
 export type ChatProviders = Record<ProviderName, ProviderAdapter> & {
-  openai?: ProviderAdapter;
-  groq?: ProviderAdapter;
-  gemini?: ProviderAdapter;
+  [provider: string]: ProviderAdapter | undefined;
 };
 
 export type ManagerToolRuntimeOptions = Pick<
@@ -88,8 +86,145 @@ const defaultToolRuntimeOptions: ManagerToolRuntimeOptions = {
   maxToolCallsPerTurn: 5,
 };
 
+interface StoredToolTrace {
+  name: string;
+  ok: boolean;
+  elapsedMs: number;
+  arguments?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function quoted(value: string | undefined): string | undefined {
+  return value ? `"${value}"` : undefined;
+}
+
+function safeJsonObject(json: string | undefined): Record<string, unknown> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedText(value: unknown, limit = 240): unknown {
+  return typeof value === "string" && value.length > limit
+    ? `${value.slice(0, limit)}...`
+    : value;
+}
+
+function summarizeSearchHit(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  return {
+    path: boundedText(item.path, 500),
+    type: item.type,
+    line: item.line,
+    snippet: boundedText(item.snippet),
+  };
+}
+
+function summarizeFolderHit(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  return {
+    path: boundedText(item.path, 500),
+    matchCount: item.matchCount,
+  };
+}
+
+function summarizeToolArguments(name: string, argumentsJson?: string): Record<string, unknown> | undefined {
+  const args = safeJsonObject(argumentsJson);
+  if (!args) return undefined;
+  if (name === "search_files") {
+    return {
+      path: boundedText(args.path),
+      namePattern: boundedText(args.namePattern),
+      contentPattern: args.contentPattern ? "[content search]" : undefined,
+      kind: args.kind,
+      maxResults: args.maxResults,
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(args)
+      .slice(0, 8)
+      .map(([key, value]) => [key, boundedText(value)]),
+  );
+}
+
+function summarizeToolResult(name: string, result: unknown): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const record = result as Record<string, unknown>;
+  if (name === "search_files") {
+    const matches = Array.isArray(record.matches)
+      ? record.matches.slice(0, 5).map((match) => {
+          return summarizeSearchHit(match);
+        })
+      : undefined;
+    const folderMatches = Array.isArray(record.folderMatches)
+      ? record.folderMatches.slice(0, 5).map((match) => {
+          return summarizeFolderHit(match);
+        })
+      : undefined;
+    return {
+      root: boundedText(record.root, 500),
+      namePattern: boundedText(record.namePattern),
+      contentPattern: record.contentPattern ? "[content search]" : undefined,
+      kind: record.kind,
+      entriesScanned: record.entriesScanned,
+      truncated: record.truncated,
+      matched: record.matched,
+      evidenceKind: record.evidenceKind,
+      bestMatch: summarizeSearchHit(record.bestMatch),
+      bestFolderMatch: summarizeFolderHit(record.bestFolderMatch),
+      matchCount: record.matchCount,
+      folderMatches,
+      matches,
+    };
+  }
+  if (name === "check_path" || name === "check_git_repo" || name === "resolve_alias") {
+    return Object.fromEntries(
+      Object.entries(record)
+        .slice(0, 10)
+        .map(([key, value]) => [key, boundedText(value, 500)]),
+    );
+  }
+  return undefined;
+}
+
+function storedToolTrace(executions: ManagerToolExecution[]): StoredToolTrace[] {
+  return executions.map((execution) => ({
+    name: execution.name,
+    ok: execution.ok,
+    elapsedMs: execution.elapsedMs,
+    arguments: summarizeToolArguments(execution.name, execution.argumentsJson),
+    result: summarizeToolResult(execution.name, execution.result),
+  }));
+}
+
 function oneDayAgo(): string {
   return new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
+}
+
+function daysFromNow(days: number): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString();
 }
 
 /**
@@ -236,6 +371,7 @@ export class ChatEngine {
             : isOpenAiCompatibleManager(provider)
               ? this.budget.openaiMaxUsdPerTurn
               : undefined,
+        profile: provider === "claude" || provider === "codex" ? "cheap" : undefined,
         shouldCancel,
       });
       if (shouldCancel?.()) {
@@ -348,6 +484,20 @@ export class ChatEngine {
           commandCli: synthesized.commandCli,
           commandJson: synthesized.commandJson,
           tier: synthesized.tier,
+          expiresAt: synthesized.expiresAt,
+        });
+        this.store.addManagerSharedContext({
+          runId: synthesized.runId ?? conversation.runId,
+          kind: "handoff",
+          provider,
+          conversationId,
+          turnId: turn.id,
+          content: `Created ${synthesized.action} suggestion card: ${synthesized.summary}`,
+          metadataJson: JSON.stringify({
+            action: synthesized.action,
+            runId: synthesized.runId,
+            taskId: synthesized.taskId,
+          }),
           expiresAt: synthesized.expiresAt,
         });
       }
@@ -494,7 +644,7 @@ export class ChatEngine {
         role: "manager",
         interfaceAgent: conversation.interfaceAgent,
         content:
-          result.finalText.trim() ||
+          stripMalformedProposalArtifacts(result.finalText.trim()) ||
           this.fallbackToolResponse(executions),
         providerSessionId: result.sessionId,
         usageJson: JSON.stringify({
@@ -506,10 +656,20 @@ export class ChatEngine {
             ok: execution.ok,
             elapsedMs: execution.elapsedMs,
           })),
+          toolTrace: storedToolTrace(executions),
         }),
         operationId,
       });
       for (const execution of executions) {
+        if (
+          execution.ok &&
+          execution.name === "check_git_repo" &&
+          typeof (execution.result as { path?: unknown }).path === "string" &&
+          (execution.result as { isGitRepo?: unknown }).isGitRepo === true
+        ) {
+          const repoPath = (execution.result as { path: string }).path;
+          this.addConfirmedRepoNote(conversation, turn, repoPath);
+        }
         if (!execution.proposal) continue;
         this.store.createProposal({
           id: randomUUID(),
@@ -524,8 +684,52 @@ export class ChatEngine {
           tier: execution.proposal.tier,
           expiresAt: execution.proposal.expiresAt,
         });
+        this.store.addManagerSharedContext({
+          runId: execution.proposal.runId ?? conversation.runId,
+          kind: "handoff",
+          provider: conversation.interfaceAgent,
+          conversationId: conversation.id,
+          turnId: turn.id,
+          content: `Created ${execution.proposal.action} suggestion card: ${execution.proposal.summary}`,
+          metadataJson: JSON.stringify({
+            action: execution.proposal.action,
+            runId: execution.proposal.runId,
+            taskId: execution.proposal.taskId,
+          }),
+          expiresAt: execution.proposal.expiresAt,
+        });
       }
       return turn;
+    });
+  }
+
+  private addConfirmedRepoNote(
+    conversation: ConversationRecord,
+    turn: ConversationTurnRecord,
+    repoPath: string,
+  ): void {
+    const metadata = { tool: "check_git_repo", path: repoPath };
+    const alreadyKnown = this.store
+      .listManagerSharedContext({ runId: conversation.runId, limit: 50 })
+      .some((note) => {
+        if (note.kind !== "note" || note.provider !== conversation.interfaceAgent) return false;
+        try {
+          const parsed = note.metadataJson ? JSON.parse(note.metadataJson) as Record<string, unknown> : {};
+          return parsed.tool === metadata.tool && parsed.path === metadata.path;
+        } catch {
+          return false;
+        }
+      });
+    if (alreadyKnown) return;
+    this.store.addManagerSharedContext({
+      runId: conversation.runId,
+      kind: "note",
+      provider: conversation.interfaceAgent,
+      conversationId: conversation.id,
+      turnId: turn.id,
+      content: `Found git repository at ${repoPath}.`,
+      metadataJson: JSON.stringify(metadata),
+      expiresAt: daysFromNow(30),
     });
   }
 
@@ -537,15 +741,14 @@ export class ChatEngine {
     const executions: ManagerToolExecution[] = [];
     for (const call of toolCalls) {
       emit?.({ phase: "tool", tool: call.name });
-      executions.push(
-        await executeManagerTool({
-          name: call.name,
-          argumentsJson: call.argumentsJson,
-          store: this.store,
-          conversation,
-          configAliases: this.configAliases,
-        }),
-      );
+      const execution = await executeManagerTool({
+        name: call.name,
+        argumentsJson: call.argumentsJson,
+        store: this.store,
+        conversation,
+        configAliases: this.configAliases,
+      });
+      executions.push({ ...execution, argumentsJson: call.argumentsJson });
     }
     return executions;
   }
@@ -604,8 +807,96 @@ export class ChatEngine {
     }
   }
 
+  private fallbackSearchResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const root = asString(result.root);
+    const namePattern = asString(result.namePattern);
+    const contentPattern = asString(result.contentPattern);
+    const target = quoted(namePattern ?? contentPattern);
+    const matchCount = asNumber(result.matchCount) ?? 0;
+    const matched = result.matched === true;
+    const matches = Array.isArray(result.matches)
+      ? result.matches
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    const folderMatches = Array.isArray(result.folderMatches)
+      ? result.folderMatches
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    const bestFolderMatch = asRecord(result.bestFolderMatch);
+    const bestMatch = asRecord(result.bestMatch);
+    const strongestFolder = asString(bestFolderMatch?.path) ?? asString(folderMatches[0]?.path);
+    const strongestMatch = bestMatch && asString(bestMatch.path)
+      ? bestMatch
+      : matches.find((item) => asString(item.path));
+    const strongestMatchPath = asString(strongestMatch?.path);
+    const strongestType = strongestMatch?.type === "dir" ? "folder" : "file";
+    if (!matched && folderMatches.length === 0) {
+      if (target && root) return `I didn't find any matches for ${target} under ${root}.`;
+      if (target) return `I didn't find any matches for ${target}.`;
+      return "I didn't find a matching file or folder in the searched location.";
+    }
+    if (strongestFolder) {
+      if (matchCount <= 1) return `I found a matching folder at ${strongestFolder}.`;
+      return `I found ${matchCount} matching items. The strongest folder match is ${strongestFolder}.`;
+    }
+    if (strongestMatchPath) {
+      if (matchCount <= 1) return `I found a matching ${strongestType} at ${strongestMatchPath}.`;
+      return `I found ${matchCount} matching ${strongestType}s. The strongest match is ${strongestMatchPath}.`;
+    }
+    return "I searched and included the strongest matches below.";
+  }
+
+  private fallbackCheckGitRepoResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const repoPath = asString(result.path);
+    const exists = result.exists === true;
+    const isGitRepo = result.isGitRepo === true;
+    if (repoPath && isGitRepo) return `I confirmed ${repoPath} is a Git repository.`;
+    if (repoPath && !exists) return `I couldn't find ${repoPath}.`;
+    if (repoPath) return `${repoPath} exists, but it doesn't look like a Git repository.`;
+    return undefined;
+  }
+
+  private fallbackCheckPathResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const candidate = asString(result.path);
+    if (!candidate) return undefined;
+    if (result.exists !== true) return `I couldn't find ${candidate}.`;
+    if (result.isDirectory === true) return `I confirmed ${candidate} exists and is a folder.`;
+    if (result.isFile === true) return `I confirmed ${candidate} exists and is a file.`;
+    return `I confirmed ${candidate} exists.`;
+  }
+
+  private fallbackResolveAliasResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const name = asString(result.name);
+    const repoPath = asString(result.repoPath);
+    if (name && repoPath) return `I resolved alias ${quoted(name)} to ${repoPath}.`;
+    if (name) return `I couldn't resolve alias ${quoted(name)}.`;
+    return undefined;
+  }
+
+  private fallbackToolSummary(executions: ManagerToolExecution[]): string | undefined {
+    const search = executions.find((execution) => execution.name === "search_files" && execution.ok);
+    if (search) return this.fallbackSearchResponse(search);
+    const repo = executions.find((execution) => execution.name === "check_git_repo" && execution.ok);
+    if (repo) return this.fallbackCheckGitRepoResponse(repo);
+    const path = executions.find((execution) => execution.name === "check_path" && execution.ok);
+    if (path) return this.fallbackCheckPathResponse(path);
+    const alias = executions.find((execution) => execution.name === "resolve_alias" && execution.ok);
+    if (alias) return this.fallbackResolveAliasResponse(alias);
+    return undefined;
+  }
+
   private fallbackToolResponse(executions: ManagerToolExecution[]): string {
-    if (executions.length === 0) return "I checked the available Duet context.";
+    if (executions.length === 0) return "I looked into it.";
     const proposal = executions.find((execution) => execution.proposal);
     if (proposal?.proposal) {
       return `I created a ${proposal.proposal.action} suggestion card.`;
@@ -614,7 +905,9 @@ export class ChatEngine {
     if (failed) {
       return `I tried to use ${failed.name}, but it failed.`;
     }
-    return "I checked the requested Duet context.";
+    const synthesized = this.fallbackToolSummary(executions);
+    if (synthesized) return synthesized;
+    return "I looked into it and included the tool results below.";
   }
 
 }

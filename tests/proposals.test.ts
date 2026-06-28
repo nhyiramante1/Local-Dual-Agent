@@ -133,6 +133,12 @@ test("stripMalformedProposalArtifacts removes leaked proposal-shaped output", ()
     ),
     "Good idea.",
   );
+  assert.equal(
+    stripMalformedProposalArtifacts(
+      "Here is what I found.\n<tool_call>search_files\n<arg_key>path</arg_key>\n</tool_call>",
+    ),
+    "Here is what I found.",
+  );
   assert.equal(stripMalformedProposalArtifacts("plain answer"), "plain answer");
 });
 
@@ -397,6 +403,93 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
         `expected to find nhyira-os: ${JSON.stringify(fuzzyResult.matches)}`,
       );
 
+      // Omitting kind defaults to a folder-aware search, so project/repo names
+      // are still discoverable when the model leaves kind unspecified.
+      const defaultKind = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyiraos" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(defaultKind.ok, true);
+      const defaultKindResult = defaultKind.result as {
+        kind: string;
+        matched: boolean;
+        evidenceKind: string;
+        bestMatch?: { path: string; type: string };
+        bestFolderMatch?: { path: string; matchCount: number };
+        matches: { path: string; type: string }[];
+      };
+      assert.equal(defaultKindResult.kind, "any");
+      assert.equal(defaultKindResult.matched, true);
+      assert.equal(defaultKindResult.evidenceKind, "folder_name");
+      assert.equal(path.basename(defaultKindResult.bestMatch?.path ?? ""), "nhyira-os");
+      assert.equal(path.basename(defaultKindResult.bestFolderMatch?.path ?? ""), "nhyira-os");
+      assert.ok(
+        defaultKindResult.matches.some((m) => m.type === "dir" && path.basename(m.path) === "nhyira-os"),
+        `expected default-kind search to find nhyira-os: ${JSON.stringify(defaultKindResult.matches)}`,
+      );
+
+      // Top-level project folders win over deep cache/sidebar matches even
+      // when maxResults is tiny. This keeps home searches from disappearing
+      // into AppData-like trees before checking sibling project folders.
+      await mkdir(path.join(root, "aaa-cache", "nested", "nhyira-cache"), { recursive: true });
+      await mkdir(path.join(root, "AppData", "Local", "nhyira-cache"), { recursive: true });
+      const topLevelFirst = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyira", kind: "dir", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(topLevelFirst.ok, true);
+      const topLevelResult = topLevelFirst.result as { matches: { path: string }[] };
+      assert.equal(path.basename(topLevelResult.matches[0]?.path ?? ""), "nhyira-os");
+      assert.ok(!topLevelResult.matches.some((m) => path.relative(root, m.path).split(path.sep)[0] === "AppData"));
+
+      await mkdir(path.join(root, "Grand Theft Auto V Enhanced", "Redistributables"), { recursive: true });
+      await writeFile(path.join(root, "Grand Theft Auto V Enhanced", "Redistributables", "Rockstar-Games-Launcher.exe"), "");
+      const gameFiles = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*game*.exe", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(gameFiles.ok, true);
+      const gameResult = gameFiles.result as {
+        matched: boolean;
+        evidenceKind: string;
+        bestFolderMatch?: { path: string; matchCount: number };
+        folderMatches: { path: string; matchCount: number }[];
+        matches: { path: string; type: string }[];
+      };
+      assert.equal(gameResult.matched, true);
+      assert.equal(gameResult.evidenceKind, "installer_artifact");
+      assert.equal(path.basename(gameResult.bestFolderMatch?.path ?? ""), "Grand Theft Auto V Enhanced");
+      assert.ok(
+        gameResult.folderMatches.some((m) => path.basename(m.path) === "Grand Theft Auto V Enhanced"),
+        `expected containing folder summary: ${JSON.stringify(gameResult)}`,
+      );
+
+      await mkdir(path.join(root, "Reports App"), { recursive: true });
+      await writeFile(path.join(root, "Reports App", "reports-data.json"), "{}");
+      const folderBackedFile = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*reports*.json", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(folderBackedFile.ok, true);
+      const folderBackedResult = folderBackedFile.result as {
+        evidenceKind: string;
+        bestFolderMatch?: { path: string; matchCount: number };
+      };
+      assert.equal(folderBackedResult.evidenceKind, "folder_name");
+      assert.equal(path.basename(folderBackedResult.bestFolderMatch?.path ?? ""), "Reports App");
+
       // Content search returns the matching line and number, only in tracked src.
       const byContent = await executeManagerTool({
         name: "search_files",
@@ -406,7 +499,17 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
         configAliases: {},
       });
       assert.equal(byContent.ok, true);
-      const contentResult = byContent.result as { matches: { path: string; line: number; snippet: string }[] };
+      const contentResult = byContent.result as {
+        kind: string;
+        matched: boolean;
+        evidenceKind: string;
+        bestMatch?: { path: string; type: string };
+        matches: { path: string; line: number; snippet: string }[];
+      };
+      assert.equal(contentResult.kind, "file");
+      assert.equal(contentResult.matched, true);
+      assert.equal(contentResult.evidenceKind, "content");
+      assert.equal(path.basename(contentResult.bestMatch?.path ?? ""), "auth.ts");
       assert.equal(contentResult.matches.length, 1);
       assert.equal(path.basename(contentResult.matches[0].path), "auth.ts");
       assert.equal(contentResult.matches[0].line, 2);

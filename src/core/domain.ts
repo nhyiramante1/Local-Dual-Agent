@@ -1,17 +1,15 @@
 export type ProviderName = "claude" | "codex";
 
-// "openai", "groq", and "gemini" are all OpenAI-compatible manager identities
-// served through OpenAIManagerAdapter (different model/baseURL per identity).
-export type ManagerProviderName = ProviderName | "openai" | "groq" | "gemini";
+// Claude/Codex are fixed worker-backed managers. Other manager identities are
+// OpenAI-compatible profiles served through OpenAIManagerAdapter.
+export type ManagerProviderName = ProviderName | (string & {});
 
 // OpenAI-compatible manager identities share the native tool-call runtime and
 // the same budget bucket; the only difference is the configured model/baseURL.
 export function isOpenAiCompatibleManager(
   provider: ManagerProviderName,
-): provider is "openai" | "groq" | "gemini" {
-  return (
-    provider === "openai" || provider === "groq" || provider === "gemini"
-  );
+): boolean {
+  return provider !== "claude" && provider !== "codex";
 }
 
 export type AgentProfile = "cheap" | "balanced" | "reasoning" | "max";
@@ -211,6 +209,21 @@ export interface ConversationTurnRecord {
   operationId?: string;
   truncated: boolean;
   originalLength?: number;
+  createdAt: string;
+}
+
+export type ManagerSharedContextKind = "note" | "provider_health" | "handoff";
+
+export interface ManagerSharedContextRecord {
+  id: string;
+  runId?: string;
+  kind: ManagerSharedContextKind;
+  provider?: ManagerProviderName;
+  conversationId?: string;
+  turnId?: string;
+  content: string;
+  metadataJson?: string;
+  expiresAt?: string;
   createdAt: string;
 }
 

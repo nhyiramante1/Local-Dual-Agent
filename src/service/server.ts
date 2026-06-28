@@ -46,8 +46,17 @@ interface ServerOptions {
   managerBudget?: ManagerBudget;
   managerToolRuntime?: Partial<ManagerToolRuntimeOptions>;
   managerProvider?: ManagerProviderName;
+  managerProviders?: ManagerProviderInfo[];
   dashboardPublicHost?: string;
   dashboardAccessToken?: string;
+}
+
+export interface ManagerProviderInfo {
+  id: ManagerProviderName;
+  label: string;
+  available: boolean;
+  nativeToolCalling: boolean;
+  latency: "fast" | "balanced" | "slow";
 }
 
 interface JsonBody {
@@ -60,6 +69,15 @@ const terminalOperations = new Set([
   "cancelled",
   "interrupted",
 ]);
+
+const defaultManagerProviderInfos: ManagerProviderInfo[] = [
+  { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+  { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+  { id: "glm", label: "GLM", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "groq", label: "Groq", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "gemini", label: "Gemini", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "openai", label: "OpenAI", available: false, nativeToolCalling: true, latency: "balanced" },
+];
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -386,12 +404,14 @@ export class DuetService {
       const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
       const deleteRunRoute = request.method === "DELETE" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname);
+      const cancelActiveRoute = request.method === "POST" && url.pathname === "/api/v1/service/cancel-active";
       if (
         credential === "session" &&
         request.method !== "GET" &&
         !chatRoute &&
         !approveRoute &&
-        !deleteRunRoute
+        !deleteRunRoute &&
+        !cancelActiveRoute
       ) {
         this.send(
           response,
@@ -465,7 +485,10 @@ export class DuetService {
       if (request.method === "POST") {
         const bodyText = await readBody(request);
         const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
-        const validAgents = new Set<ManagerProviderName>(["claude", "codex", "openai", "groq", "gemini"]);
+        const validAgents = new Set<ManagerProviderName>(
+          (this.options.managerProviders ?? defaultManagerProviderInfos)
+            .map((provider) => provider.id),
+        );
         const defaultAgent: ManagerProviderName =
           this.options.managerProvider ?? "codex";
         const interfaceAgent: ManagerProviderName | undefined =
@@ -476,7 +499,7 @@ export class DuetService {
               : undefined;
         if (!interfaceAgent) {
           throw new DuetError(
-            "interfaceAgent must be 'claude', 'codex', 'openai', 'groq', or 'gemini'.",
+            `interfaceAgent must be one of: ${Array.from(validAgents).join(", ")}.`,
             "INVALID_ARGUMENT",
           );
         }
@@ -681,16 +704,21 @@ export class DuetService {
         if (request.method !== "GET") {
           throw new DuetError("Not found.", "NOT_FOUND");
         }
+        const conversation = this.options.store.getConversation(conversationId);
         this.send(
           response,
           200,
           apiSuccess(requestId, {
-            conversation: this.options.store.getConversation(conversationId),
+            conversation,
             turns: this.options.store.listConversationTurns(conversationId, {
               limit: 200,
             }),
             proposals: this.options.store.listProposals(conversationId),
             proposalHistory: this.options.store.listProposalsHistory(conversationId),
+            sharedContext: this.options.store.listManagerSharedContext({
+              runId: conversation.runId,
+              limit: 10,
+            }),
           }),
         );
         return;
@@ -730,6 +758,7 @@ export class DuetService {
         status: "ok",
         instanceId: this.options.instanceId,
         activeOperations: this.options.store.listActiveOperations().length,
+        managerProviders: this.options.managerProviders ?? defaultManagerProviderInfos,
       }));
       return;
     }
@@ -748,6 +777,37 @@ export class DuetService {
       const ticket = randomBytes(24).toString("base64url");
       this.tickets.set(ticket, Date.now() + 60_000);
       this.send(response, 200, apiSuccess(requestId, { ticket }));
+      return;
+    }
+    if (request.method === "POST" && route === "/service/cancel-active") {
+      const active = this.options.store.listActiveOperations();
+      const activeChatOps = active.filter((operation) => operation.kind === "manager_turn");
+      for (const operation of activeChatOps) {
+        this.options.store.updateOperation(operation.id, {
+          status: "cancelled",
+          errorJson: JSON.stringify({
+            code: "CANCELLED",
+            message: "Cancellation requested.",
+          }),
+          finishedAt: new Date().toISOString(),
+        });
+      }
+      const chatCancelled = Math.max(activeChatOps.length, this.chat.cancelActive());
+      let runCancelRequested = 0;
+      for (const runId of new Set(
+        active
+          .filter((operation) => operation.kind !== "manager_turn")
+          .map((operation) => operation.runId)
+          .filter(Boolean),
+      )) {
+        runCancelRequested += 1;
+        await this.app.cancel(runId!);
+      }
+      this.send(response, 202, apiSuccess(requestId, {
+        cancellationRequested: chatCancelled > 0 || runCancelRequested > 0,
+        chatCancellationRequested: chatCancelled,
+        runCancellationRequested: runCancelRequested,
+      }));
       return;
     }
     if (request.method === "POST" && route === "/service/stop") {

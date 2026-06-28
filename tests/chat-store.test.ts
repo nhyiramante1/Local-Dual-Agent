@@ -135,6 +135,67 @@ test("failed manager turns are stored with status and bounded error_json", async
   });
 });
 
+test("manager shared context round-trips and omits expired notes", async () => {
+  await withStore((store) => {
+    assert.throws(
+      () => store.getManagerSharedContext("missing"),
+      (error) => error instanceof Error && "code" in error && error.code === "MANAGER_SHARED_CONTEXT_NOT_FOUND",
+    );
+    const stamp = new Date().toISOString();
+    store.createRun({
+      id: "run-memory",
+      repoPath: "/repo",
+      repoRoot: "/repo",
+      goal: "memory",
+      status: "running",
+      leadProvider: "claude",
+      baseBranch: "main",
+      baseCommit: "abc123",
+      integrationBranch: "duet/run-memory/integration",
+      configJson: "{}",
+      cancellationRequested: false,
+      createdAt: stamp,
+      updatedAt: stamp,
+    });
+    const conversation = store.createConversation({
+      id: randomUUID(),
+      runId: "run-memory",
+      interfaceAgent: "groq",
+    });
+    const turn = store.appendConversationTurn({
+      conversationId: conversation.id,
+      role: "manager",
+      interfaceAgent: "groq",
+      content: "found it",
+    });
+
+    const global = store.addManagerSharedContext({
+      kind: "provider_health",
+      provider: "groq",
+      conversationId: conversation.id,
+      turnId: turn.id,
+      content: "Groq is rate limited.",
+    });
+    const scoped = store.addManagerSharedContext({
+      runId: "run-memory",
+      kind: "note",
+      provider: "gemini",
+      content: "Found git repository at /repo.",
+    });
+    store.addManagerSharedContext({
+      kind: "note",
+      content: "Expired note.",
+      expiresAt: "2000-01-01T00:00:00.000Z",
+    });
+
+    const notes = store.listManagerSharedContext({ runId: "run-memory", limit: 10 });
+    assert.equal(notes.some((note) => note.id === global.id), true);
+    assert.equal(notes.some((note) => note.id === scoped.id), true);
+    assert.equal(notes.some((note) => note.content === "Expired note."), false);
+    assert.equal(store.expireManagerSharedContext("2100-01-01T00:00:00.000Z"), 1);
+  });
+});
+
 test("chat events carry a snippet only, never the full body", async () => {
   await withStore((store) => {
     const conversation = store.createConversation({

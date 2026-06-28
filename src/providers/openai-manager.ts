@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import type { AgentResult, ManagerToolDefinition } from "../core/domain.js";
+import type { ManagerProviderName } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import type { AgentToolStep, AgentTurn, ProviderAdapter } from "./adapter.js";
 
@@ -44,11 +45,47 @@ function retryAfterSeconds(error: unknown): number | undefined {
   return match ? parseInt(match[1], 10) : undefined;
 }
 
-function isRateLimit(error: unknown): boolean {
+function errorBody(error: unknown): string {
+  const err = error as { error?: unknown; body?: unknown; message?: string };
+  return [err?.error, err?.body, err?.message]
+    .filter(Boolean)
+    .map((part) => typeof part === "string" ? part : JSON.stringify(part))
+    .join(" ");
+}
+
+function errorStatus(error: unknown): number | undefined {
   const status = (error as { status?: number })?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+function isRateLimit(error: unknown): boolean {
+  const status = errorStatus(error);
   if (status === 429) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b429\b|rate limit|resource_exhausted|quota/i.test(message);
+  const body = errorBody(error);
+  if (/\b429\b|rate limit|too many requests|resource_exhausted|tokens per minute|requests per minute|\bTPM\b|\bRPM\b/i.test(body)) {
+    return true;
+  }
+  return (
+    (status === 403 || status === 413 || status === 429 || status === undefined) &&
+    /(?:quota|tokens?|requests?)\s+(?:exceeded|exhausted)|exceeded\s+(?:your\s+)?(?:current\s+)?quota|limit[:\s]|request too large/i.test(body)
+  );
+}
+
+function isToolCallGenerationFailure(error: unknown): boolean {
+  const status = errorStatus(error);
+  const body = errorBody(error);
+  return (
+    status === 400 &&
+    /failed_generation|failed to call a function|tool call|function call/i.test(body)
+  );
+}
+
+function isProviderConfigurationError(error: unknown): boolean {
+  const status = errorStatus(error);
+  const body = errorBody(error);
+  return (
+    status === 400 || status === 401 || status === 403 || status === 404
+  ) && /api key|unauthorized|permission|forbidden|billing|model.*(?:not found|unsupported|unavailable|does not exist)|base url|invalid.*model|not supported/i.test(body);
 }
 
 // Gemini's OpenAI-compatible API rejects additionalProperties and several
@@ -118,12 +155,13 @@ function serializeTools(tools: ManagerToolDefinition[]) {
 }
 
 export class OpenAIManagerAdapter implements ProviderAdapter {
-  readonly name = "openai" as const;
+  readonly name: ManagerProviderName;
   readonly supportsNativeToolCalling = true;
   private readonly client: OpenAI;
   private readonly model: string;
 
-  constructor(apiKey: string, model = DEFAULT_MODEL, baseURL?: string) {
+  constructor(apiKey: string, model = DEFAULT_MODEL, baseURL?: string, name: ManagerProviderName = "openai") {
+    this.name = name;
     this.client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     this.model = model;
   }
@@ -173,6 +211,18 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
           "RATE_LIMITED",
         );
       }
+      if (isToolCallGenerationFailure(error)) {
+        throw new DuetError(
+          "The manager provider could not form a valid tool call. Try again or switch managers.",
+          "PROVIDER_TOOL_CALL_FAILED",
+        );
+      }
+      if (isProviderConfigurationError(error)) {
+        throw new DuetError(
+          "The manager provider is not configured for this model or API key. Check the model, base URL, billing, or key, or switch managers.",
+          "PROVIDER_CONFIGURATION_ERROR",
+        );
+      }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -181,7 +231,7 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
     const usage = completion.usage;
     const message = choice?.message;
     return {
-      provider: "openai",
+      provider: this.name,
       sessionId: completion.id,
       finalText:
         typeof message?.content === "string" ? message.content : "",

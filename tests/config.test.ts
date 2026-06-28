@@ -106,10 +106,16 @@ profile = "turbo-mode"
   );
 });
 
-test("loadConfig returns groq as default manager provider when [manager] is absent", async () => {
+test("loadConfig returns glm as default manager provider when [manager] is absent", async () => {
   await withToml("", async (tomlPath) => {
     const config = await loadConfig(tomlPath);
-    assert.equal(config.manager.provider, "groq");
+    assert.equal(config.manager.provider, "glm");
+    assert.equal(config.manager.groqModel, "openai/gpt-oss-120b");
+    assert.equal(config.manager.geminiModel, "gemini-3.1-flash-lite");
+    assert.equal(config.manager.providers.glm.label, "GLM");
+    assert.equal(config.manager.providers.glm.apiKeyEnv, "ZAI_API_KEY");
+    assert.deepEqual(config.manager.providers.glm.apiKeyEnvs, ["ZAI_API_KEY", "ZAP_API_KEY", "ZHIPU_API_KEY"]);
+    assert.equal(config.manager.providers.glm.model, "glm-4.5-flash");
   });
 });
 
@@ -139,7 +145,54 @@ provider = "openai"
   );
 });
 
-test("loadConfig falls back to groq for unrecognised manager provider", async () => {
+test("loadConfig reads dynamic manager provider profiles from TOML", async () => {
+  await withToml(
+    `
+[manager]
+provider = "glm"
+
+[manager.providers.kimi]
+label = "Kimi"
+api_key_env = "KIMI_API_KEY"
+api_key_envs = ["KIMI_API_KEY", "MOONSHOT_API_KEY"]
+model_env = "KIMI_MODEL"
+base_url_env = "KIMI_BASE_URL"
+model = "kimi-k2"
+base_url = "https://api.moonshot.ai/v1"
+native_tool_calling = true
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.provider, "glm");
+      assert.equal(config.manager.providers.kimi.label, "Kimi");
+      assert.equal(config.manager.providers.kimi.apiKeyEnv, "KIMI_API_KEY");
+      assert.deepEqual(config.manager.providers.kimi.apiKeyEnvs, ["KIMI_API_KEY", "MOONSHOT_API_KEY"]);
+      assert.equal(config.manager.providers.kimi.modelEnv, "KIMI_MODEL");
+      assert.equal(config.manager.providers.kimi.baseUrlEnv, "KIMI_BASE_URL");
+      assert.equal(config.manager.providers.kimi.model, "kimi-k2");
+      assert.equal(config.manager.providers.kimi.baseUrl, "https://api.moonshot.ai/v1");
+    },
+  );
+});
+
+test("loadConfig accepts dynamic provider api_key_envs without api_key_env", async () => {
+  await withToml(
+    `
+[manager.providers.altglm]
+label = "Alt GLM"
+api_key_envs = ["ZAP_API_KEY", "ZAI_API_KEY"]
+model = "glm-4.5-flash"
+base_url = "https://api.z.ai/api/paas/v4"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.providers.altglm.apiKeyEnv, "ZAP_API_KEY");
+      assert.deepEqual(config.manager.providers.altglm.apiKeyEnvs, ["ZAP_API_KEY", "ZAI_API_KEY"]);
+    },
+  );
+});
+
+test("loadConfig falls back to glm for unrecognised manager provider", async () => {
   await withToml(
     `
 [manager]
@@ -147,7 +200,7 @@ provider = "gpt-wizard"
 `,
     async (tomlPath) => {
       const config = await loadConfig(tomlPath);
-      assert.equal(config.manager.provider, "groq");
+      assert.equal(config.manager.provider, "glm");
     },
   );
 });
@@ -167,6 +220,25 @@ openai_max_usd_per_day = 5.0
       const budget = resolveManagerBudget(config);
       assert.equal(budget.openaiMaxUsdPerTurn, 0.20);
       assert.equal(budget.openaiMaxUsdPerDay, 5.0);
+    },
+  );
+});
+
+test("loadConfig reads groq and gemini manager model presets", async () => {
+  await withToml(
+    `
+[manager]
+groq_model = "qwen/qwen3-32b"
+groq_base_url = "https://api.groq.com/openai/v1"
+gemini_model = "gemini-3.5-flash"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+`,
+    async (tomlPath) => {
+      const config = await loadConfig(tomlPath);
+      assert.equal(config.manager.groqModel, "qwen/qwen3-32b");
+      assert.equal(config.manager.groqBaseUrl, "https://api.groq.com/openai/v1");
+      assert.equal(config.manager.geminiModel, "gemini-3.5-flash");
+      assert.equal(config.manager.geminiBaseUrl, "https://generativelanguage.googleapis.com/v1beta/openai/");
     },
   );
 });

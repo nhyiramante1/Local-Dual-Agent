@@ -16,6 +16,8 @@ import type {
   LeaseRecord,
   ManagerActionProposal,
   ManagerProviderName,
+  ManagerSharedContextKind,
+  ManagerSharedContextRecord,
   OperationRecord,
   OperationStatus,
   ProposalAction,
@@ -514,6 +516,33 @@ export class Store {
       if (version < 6) {
         this.addColumn("manager_action_proposals", "operation_id TEXT");
         this.db.exec("PRAGMA user_version = 6");
+      }
+    });
+
+    this.transaction(() => {
+      const version = (
+        this.db.prepare("PRAGMA user_version").get() as { user_version: number }
+      ).user_version;
+      if (version < 7) {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS manager_shared_context (
+            id TEXT PRIMARY KEY,
+            run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            provider TEXT,
+            conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+            turn_id TEXT REFERENCES conversation_turns(id) ON DELETE SET NULL,
+            content TEXT NOT NULL,
+            metadata_json TEXT,
+            expires_at TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_manager_shared_context_scope
+            ON manager_shared_context(run_id, created_at);
+          CREATE INDEX IF NOT EXISTS idx_manager_shared_context_expiry
+            ON manager_shared_context(expires_at);
+        `);
+        this.db.exec("PRAGMA user_version = 7");
       }
     });
   }
@@ -2030,6 +2059,100 @@ export class Store {
       .reverse();
   }
 
+  addManagerSharedContext(input: {
+    runId?: string;
+    kind: ManagerSharedContextKind;
+    provider?: ManagerProviderName;
+    conversationId?: string;
+    turnId?: string;
+    content: string;
+    metadataJson?: string;
+    expiresAt?: string;
+  }): ManagerSharedContextRecord {
+    return this.transaction(() => {
+      const stamp = now();
+      const id = randomUUID();
+      if (input.runId) this.getRun(input.runId);
+      if (input.conversationId) this.getConversation(input.conversationId);
+      if (input.turnId) this.getConversationTurn(input.turnId);
+      this.db
+        .prepare(`
+          INSERT INTO manager_shared_context (
+            id, run_id, kind, provider, conversation_id, turn_id,
+            content, metadata_json, expires_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          id,
+          input.runId ?? null,
+          input.kind,
+          input.provider ?? null,
+          input.conversationId ?? null,
+          input.turnId ?? null,
+          capText(input.content, 2_000),
+          input.metadataJson ? capText(input.metadataJson, 4_000) : null,
+          input.expiresAt ?? null,
+          stamp,
+        );
+      this.appendEvent({
+        type: "manager.shared_context.created",
+        severity: "debug",
+        runId: input.runId,
+        payload: {
+          id,
+          kind: input.kind,
+          provider: input.provider,
+          conversationId: input.conversationId,
+        },
+      });
+      return this.getManagerSharedContext(id);
+    });
+  }
+
+  getManagerSharedContext(id: string): ManagerSharedContextRecord {
+    const row = this.db
+      .prepare("SELECT * FROM manager_shared_context WHERE id = ?")
+      .get(id) as unknown as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new DuetError(
+        `Unknown manager shared context: ${id}`,
+        "MANAGER_SHARED_CONTEXT_NOT_FOUND",
+      );
+    }
+    return this.mapManagerSharedContext(row);
+  }
+
+  listManagerSharedContext(options: {
+    runId?: string;
+    limit?: number;
+    nowIso?: string;
+  } = {}): ManagerSharedContextRecord[] {
+    const limit = Math.min(Math.max(options.limit ?? 10, 1), 50);
+    const nowIso = options.nowIso ?? now();
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM manager_shared_context
+        WHERE (expires_at IS NULL OR expires_at > ?)
+          AND (run_id IS NULL OR run_id = ?)
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+      `)
+      .all(nowIso, options.runId ?? null, limit) as unknown as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => this.mapManagerSharedContext(row));
+  }
+
+  expireManagerSharedContext(nowIso = now()): number {
+    const result = this.db
+      .prepare(`
+        DELETE FROM manager_shared_context
+        WHERE expires_at IS NOT NULL AND expires_at <= ?
+      `)
+      .run(nowIso);
+    return Number(result.changes ?? 0);
+  }
+
   countManagerTurns(sinceIso?: string): number {
     const row = this.db
       .prepare(`
@@ -2457,6 +2580,27 @@ export class Store {
         row.original_length === null || row.original_length === undefined
           ? undefined
           : Number(row.original_length),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private mapManagerSharedContext(
+    row: Record<string, unknown>,
+  ): ManagerSharedContextRecord {
+    return {
+      id: String(row.id),
+      runId: row.run_id ? String(row.run_id) : undefined,
+      kind: row.kind as ManagerSharedContextKind,
+      provider: row.provider
+        ? (row.provider as ManagerProviderName)
+        : undefined,
+      conversationId: row.conversation_id
+        ? String(row.conversation_id)
+        : undefined,
+      turnId: row.turn_id ? String(row.turn_id) : undefined,
+      content: String(row.content),
+      metadataJson: row.metadata_json ? String(row.metadata_json) : undefined,
+      expiresAt: row.expires_at ? String(row.expires_at) : undefined,
       createdAt: String(row.created_at),
     };
   }
