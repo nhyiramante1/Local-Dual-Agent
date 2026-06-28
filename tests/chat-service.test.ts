@@ -3791,3 +3791,41 @@ test("tool fallback leads with successful evidence when a sibling tool call fail
     await rm(searchRoot, { recursive: true, force: true });
   }
 });
+
+test("provider billing-exhausted failures are stored as soft, no-cooldown provider health", async () => {
+  const h = await startService({
+    fail: true,
+    failError: new DuetError(
+      "The manager provider is out of API credits or its billing is not set up. Add credits/billing for this provider, or switch managers.",
+      "PROVIDER_BILLING_EXHAUSTED",
+    ),
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "check again", "chatkey-billing");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager?.errorJson);
+    assert.equal(manager.status, "failed");
+    assert.match(manager.errorJson, /PROVIDER_BILLING_EXHAUSTED/);
+    assert.match(manager.errorJson, /out of API credits/);
+    // Not a transient rate limit — never tell the operator to retry shortly.
+    assert.doesNotMatch(manager.errorJson, /try again in a moment/i);
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(
+      notes.some((note) => (
+        note.kind === "provider_health" &&
+        /out of API credits/.test(note.content) &&
+        !note.expiresAt // billing has no time-based recovery; must not set a cooldown
+      )),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});

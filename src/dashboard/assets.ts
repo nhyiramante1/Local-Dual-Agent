@@ -1695,7 +1695,7 @@ q("chat-turns").addEventListener("input", (event) => {
 function isSoftFailureCode(code) {
   return code === "RATE_LIMITED" || code === "BUDGET_EXCEEDED"
     || code === "PROVIDER_AUTH_REQUIRED" || code === "PROVIDER_TOOL_CALL_FAILED"
-    || code === "PROVIDER_CONFIGURATION_ERROR";
+    || code === "PROVIDER_CONFIGURATION_ERROR" || code === "PROVIDER_BILLING_EXHAUSTED";
 }
 function failureNoteLabel(code) {
   if (code === "RATE_LIMITED") return "rate limited";
@@ -1703,6 +1703,7 @@ function failureNoteLabel(code) {
   if (code === "PROVIDER_AUTH_REQUIRED") return "auth required";
   if (code === "PROVIDER_TOOL_CALL_FAILED") return "tool call failed";
   if (code === "PROVIDER_CONFIGURATION_ERROR") return "provider setup";
+  if (code === "PROVIDER_BILLING_EXHAUSTED") return "out of credits";
   return code;
 }
 function providerSwitchAdvice(code, provider) {

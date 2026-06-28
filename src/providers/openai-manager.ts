@@ -92,6 +92,18 @@ function contextLimitMessage(error: unknown): string {
     : "The manager provider hit a context limit. Reduce the manager context or switch managers.";
 }
 
+// A 429/402/403 whose body is about money, not pace: depleted credits or
+// unconfigured billing. Distinct from a transient rate limit — retrying "in a
+// moment" will not help, so it must not be messaged as one.
+function isBillingExhausted(error: unknown): boolean {
+  const status = errorStatus(error);
+  const body = errorBody(error);
+  return (
+    (status === 429 || status === 402 || status === 403 || status === undefined) &&
+    /\bcredits?\b|\bbilling\b|\bprepay(?:ment)?\b|depleted|\bpayment\b|insufficient\s+(?:funds|balance|credits?)|top\s*up/i.test(body)
+  );
+}
+
 function isToolCallGenerationFailure(error: unknown): boolean {
   const status = errorStatus(error);
   const body = errorBody(error);
@@ -228,6 +240,12 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
         throw new DuetError(
           contextLimitMessage(error),
           "RATE_LIMITED",
+        );
+      }
+      if (isBillingExhausted(error)) {
+        throw new DuetError(
+          "The manager provider is out of API credits or its billing is not set up. Add credits/billing for this provider, or switch managers.",
+          "PROVIDER_BILLING_EXHAUSTED",
         );
       }
       if (isRateLimit(error)) {

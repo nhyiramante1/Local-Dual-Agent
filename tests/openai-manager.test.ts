@@ -53,3 +53,42 @@ test("OpenAI-compatible adapter preserves 413 TPM context-limit details", async 
     },
   );
 });
+
+test("OpenAI-compatible adapter reports depleted credits as a billing failure, not a rate limit", async () => {
+  const adapter = new OpenAIManagerAdapter("test-key", "gemini-2.5-flash", undefined, "gemini");
+  const providerError = new Error("Resource exhausted") as Error & {
+    status: number;
+    error: unknown;
+  };
+  providerError.status = 429;
+  providerError.error = {
+    error: {
+      code: 429,
+      status: "RESOURCE_EXHAUSTED",
+      message:
+        "Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.",
+    },
+  };
+
+  (adapter as unknown as {
+    client: { chat: { completions: { create: () => Promise<never> } } };
+  }).client = {
+    chat: { completions: { async create() { throw providerError; } } },
+  };
+
+  await assert.rejects(
+    () => adapter.run({
+      cwd: process.cwd(),
+      prompt: "context",
+      mode: "read-only",
+      timeoutMs: 1_000,
+    }),
+    (error) => {
+      assert.ok(error instanceof DuetError);
+      assert.equal(error.code, "PROVIDER_BILLING_EXHAUSTED");
+      assert.match(error.message, /credits|billing/i);
+      assert.doesNotMatch(error.message, /try again in a moment/i);
+      return true;
+    },
+  );
+});

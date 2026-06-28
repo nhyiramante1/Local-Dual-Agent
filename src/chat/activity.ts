@@ -80,6 +80,9 @@ function classifyManagerFailure(
   if (code === "BUDGET_EXCEEDED") {
     return { code, message, soft: true, sharedContext: false };
   }
+  if (code === "PROVIDER_BILLING_EXHAUSTED") {
+    return { code, message, soft: true, sharedContext: true };
+  }
   if (code === "PROVIDER_TOOL_CALL_FAILED") {
     return { code, message, soft: true, sharedContext: true };
   }
