@@ -709,18 +709,6 @@ export class ChatEngine {
     repoPath: string,
   ): void {
     const metadata = { tool: "check_git_repo", path: repoPath };
-    const alreadyKnown = this.store
-      .listManagerSharedContext({ runId: conversation.runId, limit: 50 })
-      .some((note) => {
-        if (note.kind !== "note" || note.provider !== conversation.interfaceAgent) return false;
-        try {
-          const parsed = note.metadataJson ? JSON.parse(note.metadataJson) as Record<string, unknown> : {};
-          return parsed.tool === metadata.tool && parsed.path === metadata.path;
-        } catch {
-          return false;
-        }
-      });
-    if (alreadyKnown) return;
     this.store.addManagerSharedContext({
       runId: conversation.runId,
       kind: "note",

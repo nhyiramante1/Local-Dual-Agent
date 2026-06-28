@@ -346,7 +346,6 @@ export class ChatActivityManager {
       });
       if (!cancelled && classified.soft && classified.sharedContext) {
         this.store.addManagerSharedContext({
-          runId: conversation.runId,
           kind: "provider_health",
           provider: conversation.interfaceAgent,
           conversationId,

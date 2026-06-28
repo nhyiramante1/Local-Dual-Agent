@@ -358,11 +358,10 @@ function searchFiles(
       if (entry.isDirectory()) {
         if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
         const full = path.join(dir, entry.name);
-        // A directory match (e.g. finding a repo folder) is recorded but we still
-        // descend, unless content search would be pointless on a pure dir match.
+        // A direct directory match is enough for folder-finding questions; avoid
+        // burying it behind deep children from the same tree.
         if (wantDirs && matchName && matchName(entry.name) && !matchContent) {
           record({ path: full, type: "dir" });
-          // Don't descend into a matched project folder — repos rarely nest.
           continue;
         }
         dirsToVisit.push(full);
@@ -593,7 +592,7 @@ async function executeKnownTool(
     const kind: SearchKind =
       args.kind === "file" || args.kind === "dir" || args.kind === "any"
         ? args.kind
-        : contentPattern && !namePattern
+        : contentPattern
           ? "file"
           : "any";
     const maxResults = typeof args.maxResults === "number"

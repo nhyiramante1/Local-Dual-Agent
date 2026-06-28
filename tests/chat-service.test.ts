@@ -1669,8 +1669,8 @@ test("provider context limit failures are stored as soft rate-limit guidance", a
   const h = await startService({
     fail: true,
     failError: new DuetError(
-      "413 Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 9750, please reduce your message size and try again.",
-      "GROQ_FAILED",
+      "The manager provider hit a context limit: 413 Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 9750, please reduce your message size and try again.",
+      "RATE_LIMITED",
     ),
   });
   try {

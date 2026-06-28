@@ -71,6 +71,27 @@ function isRateLimit(error: unknown): boolean {
   );
 }
 
+function isContextLimit(error: unknown): boolean {
+  const status = errorStatus(error);
+  const body = errorBody(error);
+  return (
+    status === 413 ||
+    /request too large|reduce your message size/i.test(body) ||
+    (
+      /tokens per minute|\bTPM\b/i.test(body) &&
+      /limit\s+[\d,]+/i.test(body) &&
+      /requested\s+[\d,]+/i.test(body)
+    )
+  );
+}
+
+function contextLimitMessage(error: unknown): string {
+  const detail = errorBody(error).replace(/\s+/g, " ").trim().slice(0, 700);
+  return detail
+    ? `The manager provider hit a context limit: ${detail}`
+    : "The manager provider hit a context limit. Reduce the manager context or switch managers.";
+}
+
 function isToolCallGenerationFailure(error: unknown): boolean {
   const status = errorStatus(error);
   const body = errorBody(error);
@@ -203,6 +224,12 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
         { signal: controller.signal },
       );
     } catch (error) {
+      if (isContextLimit(error)) {
+        throw new DuetError(
+          contextLimitMessage(error),
+          "RATE_LIMITED",
+        );
+      }
       if (isRateLimit(error)) {
         const seconds = retryAfterSeconds(error);
         const when = seconds ? ` You can try again in about ${seconds}s.` : " Try again in a moment.";

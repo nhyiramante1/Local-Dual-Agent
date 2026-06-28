@@ -157,13 +157,17 @@ test("manager shared context round-trips and omits expired notes", async () => {
       createdAt: stamp,
       updatedAt: stamp,
     });
-    const conversation = store.createConversation({
+    const scopedConversation = store.createConversation({
       id: randomUUID(),
       runId: "run-memory",
       interfaceAgent: "groq",
     });
+    const globalConversation = store.createConversation({
+      id: randomUUID(),
+      interfaceAgent: "groq",
+    });
     const turn = store.appendConversationTurn({
-      conversationId: conversation.id,
+      conversationId: globalConversation.id,
       role: "manager",
       interfaceAgent: "groq",
       content: "found it",
@@ -172,11 +176,17 @@ test("manager shared context round-trips and omits expired notes", async () => {
     const global = store.addManagerSharedContext({
       kind: "provider_health",
       provider: "groq",
-      conversationId: conversation.id,
+      conversationId: globalConversation.id,
       turnId: turn.id,
       content: "Groq is rate limited.",
     });
     const scoped = store.addManagerSharedContext({
+      runId: "run-memory",
+      kind: "note",
+      provider: "gemini",
+      content: "Found git repository at /repo.",
+    });
+    const scopedAgain = store.addManagerSharedContext({
       runId: "run-memory",
       kind: "note",
       provider: "gemini",
@@ -191,8 +201,33 @@ test("manager shared context round-trips and omits expired notes", async () => {
     const notes = store.listManagerSharedContext({ runId: "run-memory", limit: 10 });
     assert.equal(notes.some((note) => note.id === global.id), true);
     assert.equal(notes.some((note) => note.id === scoped.id), true);
+    assert.equal(scopedAgain.id, scoped.id);
     assert.equal(notes.some((note) => note.content === "Expired note."), false);
     assert.equal(store.expireManagerSharedContext("2100-01-01T00:00:00.000Z"), 1);
+    const scopedProviderHealth = store.addManagerSharedContext({
+      kind: "provider_health",
+      provider: "groq",
+      conversationId: scopedConversation.id,
+      content: "Groq is unavailable globally.",
+    });
+    assert.equal(scopedProviderHealth.runId, undefined);
+    assert.throws(
+      () => store.addManagerSharedContext({
+        kind: "note",
+        conversationId: scopedConversation.id,
+        content: "Run-scoped conversation cannot write a global note.",
+      }),
+      /runId must match/,
+    );
+    assert.throws(
+      () => store.addManagerSharedContext({
+        runId: "run-memory",
+        kind: "note",
+        expiresAt: "not-a-date",
+        content: "Bad expiry.",
+      }),
+      /expiresAt must be a valid ISO date/,
+    );
   });
 });
 

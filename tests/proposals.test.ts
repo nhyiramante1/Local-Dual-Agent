@@ -515,6 +515,18 @@ test("search_files finds files by name and by content, skipping ignored dirs", a
       assert.equal(contentResult.matches[0].line, 2);
       assert.match(contentResult.matches[0].snippet, /TOKEN_SECRET/);
 
+      const byNameAndContent = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*.ts", contentPattern: "TOKEN_SECRET" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byNameAndContent.ok, true);
+      const nameAndContentResult = byNameAndContent.result as { kind: string; matches: { path: string }[] };
+      assert.equal(nameAndContentResult.kind, "file");
+      assert.equal(path.basename(nameAndContentResult.matches[0]?.path ?? ""), "auth.ts");
+
       // Missing both patterns is a usage error.
       const noPattern = await executeManagerTool({
         name: "search_files",

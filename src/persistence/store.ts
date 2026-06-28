@@ -2071,10 +2071,67 @@ export class Store {
   }): ManagerSharedContextRecord {
     return this.transaction(() => {
       const stamp = now();
+      this.expireManagerSharedContext(stamp);
+      if (input.expiresAt && Number.isNaN(Date.parse(input.expiresAt))) {
+        throw new DuetError(
+          "Manager shared context expiresAt must be a valid ISO date.",
+          "INVALID_ARGUMENT",
+        );
+      }
+      const conversation = input.conversationId
+        ? this.getConversation(input.conversationId)
+        : undefined;
+      const turn = input.turnId
+        ? this.getConversationTurn(input.turnId)
+        : undefined;
+      const turnConversation = turn && turn.conversationId !== conversation?.id
+        ? this.getConversation(turn.conversationId)
+        : conversation;
+      if (turn && conversation && turn.conversationId !== conversation.id) {
+        throw new DuetError(
+          "Manager shared context turn must belong to the provided conversation.",
+          "INVALID_ARGUMENT",
+        );
+      }
+      const linkedRunId = conversation?.runId ?? turnConversation?.runId;
+      if (
+        linkedRunId &&
+        input.runId !== linkedRunId &&
+        !(input.kind === "provider_health" && !input.runId)
+      ) {
+        throw new DuetError(
+          "Manager shared context runId must match the linked conversation run.",
+          "INVALID_ARGUMENT",
+        );
+      }
       const id = randomUUID();
       if (input.runId) this.getRun(input.runId);
-      if (input.conversationId) this.getConversation(input.conversationId);
-      if (input.turnId) this.getConversationTurn(input.turnId);
+      const content = capText(input.content, 2_000);
+      const metadataJson = input.metadataJson ? capText(input.metadataJson, 4_000) : null;
+      const existing = this.db
+        .prepare(`
+          SELECT * FROM manager_shared_context
+          WHERE ((run_id IS NULL AND ? IS NULL) OR run_id = ?)
+            AND kind = ?
+            AND ((provider IS NULL AND ? IS NULL) OR provider = ?)
+            AND content = ?
+            AND ((metadata_json IS NULL AND ? IS NULL) OR metadata_json = ?)
+            AND (expires_at IS NULL OR expires_at > ?)
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        `)
+        .get(
+          input.runId ?? null,
+          input.runId ?? null,
+          input.kind,
+          input.provider ?? null,
+          input.provider ?? null,
+          content,
+          metadataJson,
+          metadataJson,
+          stamp,
+        ) as unknown as Record<string, unknown> | undefined;
+      if (existing) return this.mapManagerSharedContext(existing);
       this.db
         .prepare(`
           INSERT INTO manager_shared_context (
@@ -2089,8 +2146,8 @@ export class Store {
           input.provider ?? null,
           input.conversationId ?? null,
           input.turnId ?? null,
-          capText(input.content, 2_000),
-          input.metadataJson ? capText(input.metadataJson, 4_000) : null,
+          content,
+          metadataJson,
           input.expiresAt ?? null,
           stamp,
         );
