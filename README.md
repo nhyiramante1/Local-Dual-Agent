@@ -27,6 +27,12 @@ considered, but Windows is the main development target right now.
   ordinary proposal actions.
 - Provide a restricted MCP bridge so Claude Code or Codex can inspect Duet
   runs and start bounded planning operations.
+- Run manager chat through several voices (GLM by default, plus Groq, Gemini,
+  OpenAI, Claude, or Codex), switchable per conversation.
+- Request operator-approved, read-only consultations from Claude or Codex whose
+  replies appear inline in the manager chat.
+- Show a live working indicator (current tool call and its result) while a
+  manager turn runs, with a Stop button scoped to that turn.
 - Store local durable history so runs can survive service restarts.
 
 Manager chat is available now. The dashboard can run global or run-scoped
@@ -43,13 +49,26 @@ global chat. You can say something like "create a plan to add dark mode, repo
 is at C:\path\to\project" and the manager will synthesize a ready-to-start
 proposal card with the correct CLI command pre-filled.
 
-The manager voice is configurable. By default it uses OpenAI. You can switch to
-Claude or Codex, or point it at any OpenAI-compatible API such as Groq to avoid
-consuming Claude or Codex worker quota for ordinary conversation.
+The manager voice is configurable. By default it uses GLM, a low-cost
+OpenAI-compatible model with reliable native tool calling. You can switch per
+conversation to Claude, Codex, Groq, Gemini, or real OpenAI. Using an
+OpenAI-compatible identity (GLM/Groq/Gemini) lets you run ordinary conversation
+without consuming Claude or Codex worker quota.
 
 When you create a plan through chat, the manager carries the full conversation
 thread forward — your last few messages are included as context so the planner
 agent understands the discussion, not just the final instruction.
+
+The manager can also request a read-only consultation from Claude or Codex: it
+creates a consent card, and after you approve it each agent inspects the
+repository read-only and its reply appears inline in the chat. Consultations
+cannot run shell commands or modify files — they are read-only repository
+reasoning only, so they answer "is this approach sound?", not "is this service
+running?".
+
+While a manager turn runs, the dashboard shows a live working indicator with the
+actual tool calls and their results as they happen, plus a Stop button that
+cancels the current manager turn without affecting any background runs.
 
 ## What It Does Not Do Yet
 
@@ -393,9 +412,14 @@ stream events live. Terminal runs can be deleted with the × button on their
 card; only finished runs are eligible.
 
 The manager voice is selected per conversation and defaults to the provider set
-in `duet.toml`. Options are `codex`, `claude`, or `openai`. Setting provider
-to `openai` and pointing `openai_base_url` at a compatible endpoint such as
-Groq lets you run manager chat without touching Claude or Codex worker quota.
+in `duet.toml` (GLM by default). Options include `glm`, `groq`, `gemini`,
+`openai`, `claude`, and `codex`. Using an OpenAI-compatible identity
+(`glm`/`groq`/`gemini`) lets you run manager chat without touching Claude or
+Codex worker quota.
+
+Note: groq/llama models often fail to form valid tool calls ("could not form a
+valid tool call"). GLM and Gemini are more reliable for tool-using manager chat
+— consultations, plan proposals, and file search.
 
 For a stable phone + Termius workflow during development, you can pin the local
 service to one port and reuse the same dashboard access link. For direct phone
@@ -415,7 +439,12 @@ Then either:
 - open the printed `http://<your-lan-ip>:58208/#access=...` URL directly from
   your phone browser, or
 - keep one Termius forward such as `8080 -> 127.0.0.1:58208` and reuse the
-  same `#access=...` URL through the tunnel.
+  same `#access=...` URL through the tunnel, or
+- for access from anywhere (cellular, other networks), put this PC and your
+  phone on a Tailscale tailnet and open
+  `http://<this-PC-tailnet-ip>:58208/#access=...` from the phone.
+  `setup-tailscale.ps1` automates the one-time PC install and sign-in; you may
+  need a Windows Firewall inbound rule for the port.
 
 Manager chat may use provider quota when you send a message. If you are using
 Claude or Codex as the manager voice, treat it like a real provider turn. Using
@@ -442,30 +471,37 @@ local run and confirm:
 
 ## Manager Provider Setup
 
-The manager voice defaults to OpenAI. To switch it, edit `duet.toml` in the
-Duet project root:
+The manager voice defaults to GLM. Native OpenAI-compatible identities (`glm`,
+`groq`, `gemini`) each enable automatically when their API key is present. Set
+the default in `duet.toml` in the Duet project root:
 
 ```toml
 [manager]
-provider = "openai"
-openai_model = "llama-3.3-70b-versatile"
-openai_base_url = "https://api.groq.com/openai/v1"
+provider = "glm"   # glm | groq | gemini | openai | claude | codex
 ```
 
-Then create a `.env` file in the same directory with your key:
+Then create a `.env` file in the same directory with the keys for whichever
+identities you want enabled:
 
 ```
-GROQ_API_KEY=your_key_here
+ZAI_API_KEY=your_glm_key_here
+GROQ_API_KEY=your_groq_key_here
+GEMINI_API_KEY=your_gemini_key_here
 ```
 
 The service loads `.env` automatically on startup. The file is gitignored and
-never committed. If `OPENAI_API_KEY` is also set in the environment it takes
-priority over `GROQ_API_KEY`.
+never committed. If the configured default provider has no key, Duet falls back
+to an available one.
 
-To use real OpenAI instead, remove `openai_base_url` and set `OPENAI_API_KEY`.
+To use real OpenAI, set `provider = "openai"` and `OPENAI_API_KEY` (leave
+`openai_base_url` unset for api.openai.com).
 
-To keep using Codex or Claude as the manager, set `provider = "codex"` or
-`provider = "claude"` and no API key is needed beyond your existing installs.
+To use Codex or Claude as the manager, set `provider = "codex"` or
+`provider = "claude"`. These use your local CLI logins, but Duet keeps an
+isolated Codex credential store — authenticate it once with
+`node dist/cli.js auth codex`. A 401 from Claude usually means the Claude CLI's
+headless token is stale; re-login with `claude` then `/login`. Run
+`node dist/cli.js doctor --live` to confirm both providers actually answer.
 
 ## Practical Tips
 
