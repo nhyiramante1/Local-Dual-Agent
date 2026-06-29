@@ -30,12 +30,18 @@ commands = [
 CI = "true"
 
 [manager]
-# Default manager voice on startup: groq | gemini | openai | claude | codex.
+# Default manager voice on startup: groq | gemini | glm | openai | claude | codex.
 # groq and gemini are native OpenAI-compatible identities — each is enabled when
-# its API key is present (GROQ_API_KEY / GEMINI_API_KEY) and uses a baked-in
-# model + endpoint (override with GROQ_MODEL/GROQ_BASE_URL, GEMINI_MODEL/...).
-# The dashboard can switch between Codex / Claude / Groq / Gemini per conversation.
-provider = "groq"
+# its API key is present (GROQ_API_KEY / GEMINI_API_KEY). These defaults favor
+# low-cost structured tool calls; env vars still override them.
+# The dashboard can switch between configured manager providers per conversation.
+# GLM is the default: it reliably forms native tool calls, whereas groq/llama
+# models often emit malformed tool-call payloads ("could not form a valid tool call").
+provider = "glm"
+groq_model = "openai/gpt-oss-120b"
+groq_base_url = "https://api.groq.com/openai/v1"
+gemini_model = "gemini-3.1-flash-lite"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # The openai_* fields below configure ONLY the real-OpenAI identity (OPENAI_API_KEY).
 # Leave openai_base_url unset for api.openai.com; Groq/Gemini no longer route here.
 openai_model = "gpt-4o-mini"
@@ -56,6 +62,19 @@ codex_runtime_seconds = 120
 # Maximum manager turns per day (all interface agents combined).
 max_turns_per_day = 200
 
+# Dynamic OpenAI-compatible manager profiles. GLM is a cheap/free candidate for
+# native tool-calling manager turns. Set ZAI_API_KEY (or existing ZAP_API_KEY)
+# to enable this dashboard tab.
+[manager.providers.glm]
+label = "GLM"
+api_key_env = "ZAI_API_KEY"
+api_key_envs = ["ZAI_API_KEY", "ZAP_API_KEY", "ZHIPU_API_KEY"]
+model_env = "GLM_MODEL"
+base_url_env = "GLM_BASE_URL"
+model = "glm-4.5-flash"
+base_url = "https://api.z.ai/api/paas/v4"
+native_tool_calling = true
+
 
 # Static repo aliases — use the alias name instead of the full path in manager chat.
 # Dynamic aliases created via manager proposals are stored in the database and take
@@ -71,4 +90,4 @@ port = 58208
 [dashboard]
 persistent_access = true
 # Set this only if you want a fixed LAN/public host for phone access.
-public_host = "153.106.86.65"
+public_host = "100.117.137.4"

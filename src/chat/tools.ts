@@ -1,4 +1,5 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -21,6 +22,7 @@ export interface ManagerToolExecution {
   name: string;
   ok: boolean;
   elapsedMs: number;
+  argumentsJson?: string;
   result: unknown;
   proposal?: SynthesizedProposal;
 }
@@ -86,6 +88,22 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
     },
   },
   {
+    name: "search_files",
+    description:
+      "Read-only search of a local directory tree. Find files OR folders by name (kind:'dir' locates a project/repo folder), and/or search file contents. If path is omitted it searches the user's home directory, so you can locate a project the operator names without being given a path. Skips node_modules/.git/dist/build/.duet. Chain with check_git_repo + create_plan_proposal.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", minLength: 1, maxLength: 1_000 },
+        namePattern: { type: "string", minLength: 1, maxLength: 200 },
+        contentPattern: { type: "string", minLength: 1, maxLength: 200 },
+        kind: { type: "string", enum: ["file", "dir", "any"] },
+        maxResults: { type: "integer", minimum: 1, maximum: 100 },
+      },
+    },
+  },
+  {
     name: "create_plan_proposal",
     description: "Create a durable dashboard proposal card for a Duet planning operation. Does not execute the operation.",
     parameters: {
@@ -133,7 +151,7 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
   },
   {
     name: "request_agent_consultation",
-    description: "Create a consent card to ask Claude, Codex, or both for a paid read-only consultation. Phase 7A does not execute it.",
+    description: "Create a consent card to ask Claude, Codex, or both for a paid read-only consultation. The operator approves the card, then each agent answers read-only and its reply appears in the chat. Use it when a question needs deeper repo reasoning than your read-only tools reveal, or you are genuinely unsure of the right approach. Pass repoPath to ground the consultation in a real repository (read-only).",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -148,6 +166,7 @@ export const managerToolDefinitions: ManagerToolDefinition[] = [
         },
         mode: { type: "string", enum: ["independent"] },
         reason: { type: "string", minLength: 1, maxLength: 2_000 },
+        repoPath: { type: "string", minLength: 1, maxLength: 1_000 },
         profile: { type: "string", enum: ["cheap", "balanced", "reasoning", "max"] },
         maxTurns: { type: "integer", minimum: 1, maximum: 5 },
         maxRuntimeSeconds: { type: "integer", minimum: 10, maximum: 300 },
@@ -201,6 +220,218 @@ function boundedRuns(store: Store, limit: number): unknown[] {
     version: run.version,
     updatedAt: run.updatedAt,
   }));
+}
+
+const SEARCH_SKIP_DIRS = new Set([
+  "node_modules", ".git", "dist", "build", ".duet", ".next", "coverage", ".cache",
+  "AppData", "Application Data", "Local Settings",
+]);
+// Name/dir searches only stat entries (cheap), so they get a larger budget than
+// content searches, which read file bodies.
+const SEARCH_MAX_ENTRIES_NAME = 40_000;
+const SEARCH_MAX_ENTRIES_CONTENT = 8_000;
+const SEARCH_MAX_DEPTH = 12;
+const SEARCH_MAX_FILE_BYTES = 512_000;
+
+type SearchKind = "file" | "dir" | "any";
+
+// Collapse to lowercase alphanumerics so colloquial names match real folder
+// names regardless of separators: "nhyiraos" matches "nhyira-os", "my repo"
+// matches "my-repo"/"My_Repo".
+function normalizeName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// Name matcher: honor glob wildcards (`*`/`?`) when present; otherwise match on
+// the separator/case-insensitive normalized form so near-spellings still hit.
+function buildNameMatcher(pattern: string): (value: string) => boolean {
+  if (/[*?]/.test(pattern)) {
+    const re = new RegExp(
+      "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$",
+      "i",
+    );
+    return (value) => re.test(value);
+  }
+  const needle = normalizeName(pattern);
+  if (!needle) return () => false;
+  return (value) => normalizeName(value).includes(needle);
+}
+
+// Content matcher: treat the pattern as a regex, falling back to a literal
+// case-insensitive substring when the regex is invalid.
+function buildContentMatcher(pattern: string): (value: string) => boolean {
+  try {
+    const re = new RegExp(pattern, "i");
+    return (value) => re.test(value);
+  } catch {
+    const needle = pattern.toLowerCase();
+    return (value) => value.toLowerCase().includes(needle);
+  }
+}
+
+interface SearchHit {
+  path: string;
+  type: "file" | "dir";
+  line?: number;
+  snippet?: string;
+}
+
+interface FolderHit {
+  path: string;
+  matchCount: number;
+}
+
+type SearchEvidenceKind = "none" | "folder_name" | "file_name" | "content" | "installer_artifact";
+
+function isInstallerArtifact(hit: SearchHit | undefined): boolean {
+  if (!hit || hit.type !== "file") return false;
+  const basename = path.basename(hit.path).toLowerCase();
+  return (
+    /\.(msi|zip|7z|rar|exe)$/.test(basename) &&
+    /setup|install|installer|launcher|redistributable|redist|update|patch/.test(basename)
+  );
+}
+
+function searchEvidenceKind(
+  options: { contentPattern?: string },
+  bestMatch: SearchHit | undefined,
+  bestFolderMatch: FolderHit | undefined,
+): SearchEvidenceKind {
+  if (!bestMatch) return "none";
+  if (options.contentPattern) return "content";
+  if (bestMatch.type === "dir") return "folder_name";
+  if (isInstallerArtifact(bestMatch)) return "installer_artifact";
+  if (bestFolderMatch) return "folder_name";
+  return "file_name";
+}
+
+function searchFiles(
+  root: string,
+  options: {
+    namePattern?: string;
+    contentPattern?: string;
+    kind: SearchKind;
+    maxResults: number;
+  },
+): {
+  matches: SearchHit[];
+  folderMatches: FolderHit[];
+  entriesScanned: number;
+  truncated: boolean;
+  matched: boolean;
+  bestMatch?: SearchHit;
+  bestFolderMatch?: FolderHit;
+  evidenceKind: SearchEvidenceKind;
+} {
+  const matchName = options.namePattern
+    ? buildNameMatcher(options.namePattern)
+    : undefined;
+  const matchContent = options.contentPattern
+    ? buildContentMatcher(options.contentPattern)
+    : undefined;
+  const wantDirs = options.kind === "dir" || options.kind === "any";
+  const wantFiles = options.kind === "file" || options.kind === "any";
+  const scanBudget = matchContent ? SEARCH_MAX_ENTRIES_CONTENT : SEARCH_MAX_ENTRIES_NAME;
+  const matches: SearchHit[] = [];
+  let entriesScanned = 0;
+  let truncated = false;
+
+  const record = (hit: SearchHit): void => {
+    matches.push(hit);
+    if (matches.length >= options.maxResults) truncated = true;
+  };
+
+  const walk = (dir: string, depth: number): void => {
+    if (truncated || depth > SEARCH_MAX_DEPTH) return;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory — skip quietly
+    }
+    const dirsToVisit: string[] = [];
+    for (const entry of entries) {
+      if (truncated) return;
+      if (++entriesScanned > scanBudget) {
+        truncated = true;
+        return;
+      }
+      if (entry.isDirectory()) {
+        if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        const full = path.join(dir, entry.name);
+        // A direct directory match is enough for folder-finding questions; avoid
+        // burying it behind deep children from the same tree.
+        if (wantDirs && matchName && matchName(entry.name) && !matchContent) {
+          record({ path: full, type: "dir" });
+          continue;
+        }
+        dirsToVisit.push(full);
+        continue;
+      }
+      if (!entry.isFile() || !wantFiles) continue;
+      const full = path.join(dir, entry.name);
+      const nameOk = !matchName || matchName(entry.name);
+      if (!nameOk) continue;
+      if (!matchContent) {
+        record({ path: full, type: "file" });
+      } else {
+        let text: string;
+        try {
+          if (statSync(full).size > SEARCH_MAX_FILE_BYTES) continue;
+          text = readFileSync(full, "utf8");
+        } catch {
+          continue; // binary/unreadable — skip
+        }
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          if (matchContent(lines[i])) {
+            record({ path: full, type: "file", line: i + 1, snippet: lines[i].trim().slice(0, 200) });
+            break; // first hit per file is enough
+          }
+        }
+      }
+    }
+    for (const full of dirsToVisit) {
+      if (truncated) return;
+      walk(full, depth + 1);
+    }
+  };
+
+  walk(root, 0);
+  const folderCounts = new Map<string, number>();
+  const addFolder = (folderPath: string): void => {
+    if (folderPath === root) return;
+    folderCounts.set(folderPath, (folderCounts.get(folderPath) ?? 0) + 1);
+  };
+  for (const match of matches) {
+    if (match.type === "dir") {
+      addFolder(match.path);
+      continue;
+    }
+    let parent = path.dirname(match.path);
+    while (parent !== root && parent.startsWith(root)) {
+      addFolder(parent);
+      const next = path.dirname(parent);
+      if (next === parent) break;
+      parent = next;
+    }
+  }
+  const folderMatches = [...folderCounts.entries()]
+    .map(([folderPath, matchCount]) => ({ path: folderPath, matchCount }))
+    .sort((a, b) => b.matchCount - a.matchCount || a.path.length - b.path.length)
+    .slice(0, options.maxResults);
+  const bestMatch = matches[0];
+  const bestFolderMatch = folderMatches[0];
+  return {
+    matches,
+    folderMatches,
+    entriesScanned,
+    truncated,
+    matched: matches.length > 0,
+    bestMatch,
+    bestFolderMatch,
+    evidenceKind: searchEvidenceKind(options, bestMatch, bestFolderMatch),
+  };
 }
 
 function proposalResult(proposal: SynthesizedProposal): unknown {
@@ -335,6 +566,72 @@ async function executeKnownTool(
         : { found: false, name: alias },
     };
   }
+  if (name === "search_files") {
+    // Path is optional: default to the user's home directory so the manager can
+    // locate a project the operator names without being handed an exact path.
+    const root = typeof args.path === "string" && args.path.trim() !== ""
+      ? pathArg(args, "path")
+      : os.homedir();
+    if (!existsSync(root)) {
+      return { result: { code: "PATH_NOT_FOUND", path: root, matches: [] } };
+    }
+    if (!statSync(root).isDirectory()) {
+      return { result: { code: "NOT_A_DIRECTORY", path: root, matches: [] } };
+    }
+    const namePattern = typeof args.namePattern === "string" && args.namePattern.trim() !== ""
+      ? args.namePattern.trim()
+      : undefined;
+    const contentPattern = typeof args.contentPattern === "string" && args.contentPattern.trim() !== ""
+      ? args.contentPattern.trim()
+      : undefined;
+    if (!namePattern && !contentPattern) {
+      throw new DuetError(
+        "search_files needs at least one of namePattern or contentPattern.",
+        "INVALID_ARGUMENT",
+      );
+    }
+    const kind: SearchKind =
+      args.kind === "file" || args.kind === "dir" || args.kind === "any"
+        ? args.kind
+        : contentPattern
+          ? "file"
+          : "any";
+    const maxResults = typeof args.maxResults === "number"
+      ? Math.max(1, Math.min(100, Math.floor(args.maxResults)))
+      : 20;
+    const {
+      matches,
+      folderMatches,
+      entriesScanned,
+      truncated,
+      matched,
+      bestMatch,
+      bestFolderMatch,
+      evidenceKind,
+    } = searchFiles(root, {
+      namePattern,
+      contentPattern,
+      kind,
+      maxResults,
+    });
+    return {
+      result: {
+        root,
+        namePattern,
+        contentPattern,
+        kind,
+        entriesScanned,
+        truncated,
+        matched,
+        evidenceKind,
+        bestMatch,
+        bestFolderMatch,
+        matchCount: matches.length,
+        folderMatches,
+        matches,
+      },
+    };
+  }
   if (name === "create_plan_proposal") {
     const raw: RawProposal = {
       action: "create_plan",
@@ -372,6 +669,9 @@ async function executeKnownTool(
       question: stringArg(args, "question"),
       agents: Array.isArray(args.agents) ? args.agents : [],
       mode: "independent",
+      repoPath: typeof args.repoPath === "string" && args.repoPath.trim() !== ""
+        ? pathArg(args, "repoPath")
+        : undefined,
       profile: optionalProfile(args),
       maxTurns: args.maxTurns,
       maxRuntimeSeconds: args.maxRuntimeSeconds,

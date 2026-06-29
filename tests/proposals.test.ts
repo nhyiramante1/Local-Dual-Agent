@@ -133,6 +133,12 @@ test("stripMalformedProposalArtifacts removes leaked proposal-shaped output", ()
     ),
     "Good idea.",
   );
+  assert.equal(
+    stripMalformedProposalArtifacts(
+      "Here is what I found.\n<tool_call>search_files\n<arg_key>path</arg_key>\n</tool_call>",
+    ),
+    "Here is what I found.",
+  );
   assert.equal(stripMalformedProposalArtifacts("plain answer"), "plain answer");
 });
 
@@ -317,6 +323,35 @@ test("agent_consultation parsed from a legacy fenced block synthesizes a consent
   assert.deepEqual(parsed.raw.agents, ["claude", "codex"]);
 });
 
+test("agent_consultation grounds on a valid repoPath and rejects an invalid one", async () => {
+  const { mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "duet-consult-repo-"));
+  await mkdir(path.join(root, ".git"), { recursive: true });
+  try {
+    await withStore((store) => {
+      const conversation = store.createConversation({ id: randomUUID(), interfaceAgent: "groq" });
+      const ok = tryValidateAndSynthesize(
+        { action: "agent_consultation", question: "What next?", agents: ["claude"], mode: "independent", repoPath: root },
+        conversation, store, undefined, {}, {}, false, true,
+      );
+      assert.ok(ok, "valid repo should synthesize");
+      const cmd = JSON.parse(ok!.commandJson) as { repoPath?: string; agents: string[] };
+      assert.equal(cmd.repoPath, root);
+      assert.deepEqual(cmd.agents, ["claude"]);
+
+      const diag: { reason?: string } = {};
+      const rejected = tryValidateAndSynthesize(
+        { action: "agent_consultation", question: "What next?", agents: ["claude"], mode: "independent", repoPath: path.join(root, "nope") },
+        conversation, store, undefined, {}, diag, false, true,
+      );
+      assert.equal(rejected, null);
+      assert.match(diag.reason ?? "", /not a valid git repository/i);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("manager path tools normalize over-escaped/redundant path segments", async () => {
   await withStore(async (store) => {
     const conversation = store.createConversation({
@@ -337,6 +372,203 @@ test("manager path tools normalize over-escaped/redundant path segments", async 
     assert.equal(result.path, path.normalize(messy));
     assert.equal(result.path, path.join("base", "leaf"));
   });
+});
+
+test("search_files finds files by name and by content, skipping ignored dirs", async () => {
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(path.join(os.tmpdir(), "duet-search-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "nhyira-os"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await writeFile(path.join(root, "src", "auth.ts"), "export function login() {\n  return TOKEN_SECRET;\n}\n");
+    await writeFile(path.join(root, "src", "util.ts"), "export const noop = () => {};\n");
+    await writeFile(path.join(root, "node_modules", "pkg", "auth.ts"), "TOKEN_SECRET in deps\n");
+
+    await withStore(async (store) => {
+      const conversation = store.createConversation({ id: randomUUID(), interfaceAgent: "groq" });
+
+      // Name search matches the glob and excludes node_modules.
+      const byName = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*.ts" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byName.ok, true);
+      const nameResult = byName.result as { matches: { path: string; type: string }[] };
+      const names = nameResult.matches.map((m) => path.basename(m.path)).sort();
+      assert.deepEqual(names, ["auth.ts", "util.ts"]);
+      assert.ok(nameResult.matches.every((m) => m.type === "file"));
+      assert.ok(!nameResult.matches.some((m) => m.path.includes("node_modules")));
+
+      // Directory search (kind:"dir") locates a folder by name and does not
+      // descend into node_modules.
+      const byDir = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "src", kind: "dir" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byDir.ok, true);
+      const dirResult = byDir.result as { matches: { path: string; type: string }[] };
+      assert.ok(dirResult.matches.some((m) => m.type === "dir" && path.basename(m.path) === "src"));
+
+      // Normalized matching: a separator-free colloquial name finds the real
+      // folder, e.g. "nhyiraos" -> "nhyira-os".
+      const fuzzy = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyiraos", kind: "dir" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(fuzzy.ok, true);
+      const fuzzyResult = fuzzy.result as { matches: { path: string }[] };
+      assert.ok(
+        fuzzyResult.matches.some((m) => path.basename(m.path) === "nhyira-os"),
+        `expected to find nhyira-os: ${JSON.stringify(fuzzyResult.matches)}`,
+      );
+
+      // Omitting kind defaults to a folder-aware search, so project/repo names
+      // are still discoverable when the model leaves kind unspecified.
+      const defaultKind = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyiraos" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(defaultKind.ok, true);
+      const defaultKindResult = defaultKind.result as {
+        kind: string;
+        matched: boolean;
+        evidenceKind: string;
+        bestMatch?: { path: string; type: string };
+        bestFolderMatch?: { path: string; matchCount: number };
+        matches: { path: string; type: string }[];
+      };
+      assert.equal(defaultKindResult.kind, "any");
+      assert.equal(defaultKindResult.matched, true);
+      assert.equal(defaultKindResult.evidenceKind, "folder_name");
+      assert.equal(path.basename(defaultKindResult.bestMatch?.path ?? ""), "nhyira-os");
+      assert.equal(path.basename(defaultKindResult.bestFolderMatch?.path ?? ""), "nhyira-os");
+      assert.ok(
+        defaultKindResult.matches.some((m) => m.type === "dir" && path.basename(m.path) === "nhyira-os"),
+        `expected default-kind search to find nhyira-os: ${JSON.stringify(defaultKindResult.matches)}`,
+      );
+
+      // Top-level project folders win over deep cache/sidebar matches even
+      // when maxResults is tiny. This keeps home searches from disappearing
+      // into AppData-like trees before checking sibling project folders.
+      await mkdir(path.join(root, "aaa-cache", "nested", "nhyira-cache"), { recursive: true });
+      await mkdir(path.join(root, "AppData", "Local", "nhyira-cache"), { recursive: true });
+      const topLevelFirst = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "nhyira", kind: "dir", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(topLevelFirst.ok, true);
+      const topLevelResult = topLevelFirst.result as { matches: { path: string }[] };
+      assert.equal(path.basename(topLevelResult.matches[0]?.path ?? ""), "nhyira-os");
+      assert.ok(!topLevelResult.matches.some((m) => path.relative(root, m.path).split(path.sep)[0] === "AppData"));
+
+      await mkdir(path.join(root, "Grand Theft Auto V Enhanced", "Redistributables"), { recursive: true });
+      await writeFile(path.join(root, "Grand Theft Auto V Enhanced", "Redistributables", "Rockstar-Games-Launcher.exe"), "");
+      const gameFiles = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*game*.exe", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(gameFiles.ok, true);
+      const gameResult = gameFiles.result as {
+        matched: boolean;
+        evidenceKind: string;
+        bestFolderMatch?: { path: string; matchCount: number };
+        folderMatches: { path: string; matchCount: number }[];
+        matches: { path: string; type: string }[];
+      };
+      assert.equal(gameResult.matched, true);
+      assert.equal(gameResult.evidenceKind, "installer_artifact");
+      assert.equal(path.basename(gameResult.bestFolderMatch?.path ?? ""), "Grand Theft Auto V Enhanced");
+      assert.ok(
+        gameResult.folderMatches.some((m) => path.basename(m.path) === "Grand Theft Auto V Enhanced"),
+        `expected containing folder summary: ${JSON.stringify(gameResult)}`,
+      );
+
+      await mkdir(path.join(root, "Reports App"), { recursive: true });
+      await writeFile(path.join(root, "Reports App", "reports-data.json"), "{}");
+      const folderBackedFile = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*reports*.json", maxResults: 10 }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(folderBackedFile.ok, true);
+      const folderBackedResult = folderBackedFile.result as {
+        evidenceKind: string;
+        bestFolderMatch?: { path: string; matchCount: number };
+      };
+      assert.equal(folderBackedResult.evidenceKind, "folder_name");
+      assert.equal(path.basename(folderBackedResult.bestFolderMatch?.path ?? ""), "Reports App");
+
+      // Content search returns the matching line and number, only in tracked src.
+      const byContent = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, contentPattern: "TOKEN_SECRET" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byContent.ok, true);
+      const contentResult = byContent.result as {
+        kind: string;
+        matched: boolean;
+        evidenceKind: string;
+        bestMatch?: { path: string; type: string };
+        matches: { path: string; line: number; snippet: string }[];
+      };
+      assert.equal(contentResult.kind, "file");
+      assert.equal(contentResult.matched, true);
+      assert.equal(contentResult.evidenceKind, "content");
+      assert.equal(path.basename(contentResult.bestMatch?.path ?? ""), "auth.ts");
+      assert.equal(contentResult.matches.length, 1);
+      assert.equal(path.basename(contentResult.matches[0].path), "auth.ts");
+      assert.equal(contentResult.matches[0].line, 2);
+      assert.match(contentResult.matches[0].snippet, /TOKEN_SECRET/);
+
+      const byNameAndContent = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root, namePattern: "*.ts", contentPattern: "TOKEN_SECRET" }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(byNameAndContent.ok, true);
+      const nameAndContentResult = byNameAndContent.result as { kind: string; matches: { path: string }[] };
+      assert.equal(nameAndContentResult.kind, "file");
+      assert.equal(path.basename(nameAndContentResult.matches[0]?.path ?? ""), "auth.ts");
+
+      // Missing both patterns is a usage error.
+      const noPattern = await executeManagerTool({
+        name: "search_files",
+        argumentsJson: JSON.stringify({ path: root }),
+        store,
+        conversation,
+        configAliases: {},
+      });
+      assert.equal(noPattern.ok, false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("listProposalsHistory returns all statuses while listProposals shows only active", async () => {

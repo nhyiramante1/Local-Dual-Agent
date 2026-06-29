@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { randomUUID } from "node:crypto";
+import net from "node:net";
 import os from "node:os";
 
 import { loadConfig } from "./config.js";
@@ -13,13 +14,48 @@ import { DuetError } from "./core/errors.js";
 import {
   clearServiceInfo,
   loadOrCreateDashboardAccessToken,
+  recoverServiceInfo,
   readServiceInfo,
+  readServiceLockOwner,
   releaseServiceLock,
   verifyServiceProcess,
 } from "./service/discovery.js";
 import { DuetClient, ensureService, probeService } from "./service/client.js";
-import { terminateProcessTree } from "./process/run-command.js";
+import { isProcessAlive, terminateProcessTree } from "./process/run-command.js";
 import { mcpCli } from "./mcp/cli.js";
+
+// True when nothing is listening on the loopback port (connection refused).
+async function isPortFree(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = net.createConnection({ port, host: "127.0.0.1" });
+    const settle = (free: boolean) => {
+      socket.destroy();
+      resolve(free);
+    };
+    socket.once("connect", () => settle(false));
+    socket.once("error", () => settle(true));
+    socket.setTimeout(1_000, () => settle(true));
+  });
+}
+
+// terminateProcessTree is fire-and-forget (taskkill.exe is spawned and unref'd
+// on Windows), so a restart can race the dying process for the port. Wait until
+// the PID is gone and the port is released before starting a fresh daemon.
+async function waitForOrphanRelease(pid: number, port?: number): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const dead = !isProcessAlive(pid);
+    const portFree = port ? await isPortFree(port) : true;
+    if (dead && portFree) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (isProcessAlive(pid)) {
+    throw new DuetError(
+      `The orphaned Duet daemon (${pid}) did not exit after a forced terminate. Stop it manually and retry.`,
+      "SERVICE_START_FAILED",
+    );
+  }
+}
 
 function usage(): void {
   console.log(`Usage:
@@ -175,13 +211,17 @@ async function serviceCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
   const force = takeFlag(args, "--force");
   if (args.length) throw new DuetError("Invalid service command.", "INVALID_ARGUMENT");
+  const config = await loadConfig();
+  const preferredPort = Number(
+    process.env.DUET_PORT ?? config.service.port ?? 0,
+  ) || undefined;
   if (action === "start") {
     const info = await ensureService();
     console.log(`Duet service running: PID ${info.pid}, port ${info.port}`);
     return;
   }
   if (action === "status") {
-    const info = await readServiceInfo();
+    const info = (await recoverServiceInfo(preferredPort)) ?? await readServiceInfo();
     if (!info || !(await probeService(info))) {
       console.log("Duet service is stopped.");
       return;
@@ -190,7 +230,7 @@ async function serviceCommand(args: string[]): Promise<void> {
     return;
   }
   if (action === "stop" || action === "restart") {
-    const info = await readServiceInfo();
+    const info = (await recoverServiceInfo(preferredPort)) ?? await readServiceInfo();
     if (info && (await probeService(info))) {
       try {
         const client = await DuetClient.connect(false);
@@ -224,6 +264,38 @@ async function serviceCommand(args: string[]): Promise<void> {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline && (await probeService(info))) {
         await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } else {
+      const owner = await readServiceLockOwner();
+      // owner.pid is read from on-disk JSON; coerce to a real pid before it can
+      // reach verifyServiceProcess (a shell call) or terminateProcessTree.
+      const ownerPid = Number(owner?.pid);
+      if (
+        owner &&
+        Number.isInteger(ownerPid) &&
+        ownerPid > 0 &&
+        owner.startedAt &&
+        owner.commandHash &&
+        (await verifyServiceProcess({
+          instanceId: "lock-owner",
+          pid: ownerPid,
+          processStartedAt: owner.startedAt,
+          commandHash: owner.commandHash,
+          port: preferredPort ?? 0,
+          apiVersion: "v1",
+          startedAt: owner.startedAt,
+        }))
+      ) {
+        if (!force) {
+          throw new DuetError(
+            `A live Duet daemon (${ownerPid}) exists but service discovery is missing. Re-run with --force to terminate and recover.`,
+            "SERVICE_ORPHANED",
+          );
+        }
+        terminateProcessTree(ownerPid);
+        // Block until the process is gone and the port is released so the
+        // restart below does not race the dying daemon for the port.
+        await waitForOrphanRelease(ownerPid, preferredPort);
       }
     }
     await clearServiceInfo();

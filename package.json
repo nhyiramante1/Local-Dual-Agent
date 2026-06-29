@@ -18,7 +18,7 @@
     "service": "tsx src/duetd.ts",
     "test": "tsx --test tests/**/*.test.ts",
     "test:dashboard": "tsx --test tests/browser/**/*.smoke.ts",
-    "up": "node dist/cli.js service stop 2>nul & npm run build && node dist/cli.js service start && node dist/cli.js dashboard --phone"
+    "up": "npm run build && node dist/cli.js service restart --force && node dist/cli.js dashboard --phone"
   },
   "engines": {
     "node": ">=24 <25"

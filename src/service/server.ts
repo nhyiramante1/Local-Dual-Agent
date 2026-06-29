@@ -8,6 +8,7 @@ import { ActivityManager, type LongRunningCommand } from "../application/activit
 import { ApplicationCommands } from "../application/commands.js";
 import { approvalBinding } from "../application/integrity.js";
 import { ChatActivityManager } from "../chat/activity.js";
+import { ConsultationActivityManager } from "../chat/consultation.js";
 import {
   ChatEngine,
   defaultManagerBudget,
@@ -46,8 +47,17 @@ interface ServerOptions {
   managerBudget?: ManagerBudget;
   managerToolRuntime?: Partial<ManagerToolRuntimeOptions>;
   managerProvider?: ManagerProviderName;
+  managerProviders?: ManagerProviderInfo[];
   dashboardPublicHost?: string;
   dashboardAccessToken?: string;
+}
+
+export interface ManagerProviderInfo {
+  id: ManagerProviderName;
+  label: string;
+  available: boolean;
+  nativeToolCalling: boolean;
+  latency: "fast" | "balanced" | "slow";
 }
 
 interface JsonBody {
@@ -60,6 +70,15 @@ const terminalOperations = new Set([
   "cancelled",
   "interrupted",
 ]);
+
+const defaultManagerProviderInfos: ManagerProviderInfo[] = [
+  { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+  { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+  { id: "glm", label: "GLM", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "groq", label: "Groq", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "gemini", label: "Gemini", available: false, nativeToolCalling: true, latency: "fast" },
+  { id: "openai", label: "OpenAI", available: false, nativeToolCalling: true, latency: "balanced" },
+];
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -158,6 +177,7 @@ export class DuetService {
   readonly app: ApplicationCommands;
   readonly activities: ActivityManager;
   readonly chat: ChatActivityManager;
+  readonly consultation: ConsultationActivityManager;
   private readonly dashboardJs: string;
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
@@ -195,6 +215,12 @@ export class DuetService {
         options.config?.aliases ?? {},
         options.managerToolRuntime ?? options.config?.manager,
       ),
+      options.instanceId,
+    );
+    this.consultation = new ConsultationActivityManager(
+      options.store,
+      chatProviders,
+      options.managerBudget ?? defaultManagerBudget,
       options.instanceId,
     );
     // Marks interrupted operations (run + manager_turn) from prior instances.
@@ -251,6 +277,7 @@ export class DuetService {
       this.activeStreams === 0 &&
       !this.activities.hasActiveOperations() &&
       !this.chat.hasActiveOperations() &&
+      !this.consultation.hasActiveOperations() &&
       Date.now() - this.lastRequestAt >= this.idleTimeoutMs
     ) {
       this.options.onStop?.();
@@ -386,12 +413,22 @@ export class DuetService {
       const chatRoute = url.pathname.startsWith("/api/v1/chat/");
       const approveRoute = /^\/api\/v1\/runs\/[^/]+\/approve$/.test(url.pathname);
       const deleteRunRoute = request.method === "DELETE" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname);
+      const discardRunRoute = request.method === "POST" && /^\/api\/v1\/runs\/[^/]+\/discard$/.test(url.pathname);
+      const cancelActiveRoute = request.method === "POST" && url.pathname === "/api/v1/service/cancel-active";
+      // Scoped stop for a single manager/consultation turn (the chat composer's
+      // Stop button). Unlike cancel-active it never touches run operations.
+      const cancelOperationRoute =
+        request.method === "POST" &&
+        /^\/api\/v1\/operations\/[^/]+\/cancel$/.test(url.pathname);
       if (
         credential === "session" &&
         request.method !== "GET" &&
         !chatRoute &&
         !approveRoute &&
-        !deleteRunRoute
+        !deleteRunRoute &&
+        !discardRunRoute &&
+        !cancelActiveRoute &&
+        !cancelOperationRoute
       ) {
         this.send(
           response,
@@ -465,7 +502,10 @@ export class DuetService {
       if (request.method === "POST") {
         const bodyText = await readBody(request);
         const body = bodyText ? (JSON.parse(bodyText) as JsonBody) : {};
-        const validAgents = new Set<ManagerProviderName>(["claude", "codex", "openai", "groq", "gemini"]);
+        const validAgents = new Set<ManagerProviderName>(
+          (this.options.managerProviders ?? defaultManagerProviderInfos)
+            .map((provider) => provider.id),
+        );
         const defaultAgent: ManagerProviderName =
           this.options.managerProvider ?? "codex";
         const interfaceAgent: ManagerProviderName | undefined =
@@ -476,7 +516,7 @@ export class DuetService {
               : undefined;
         if (!interfaceAgent) {
           throw new DuetError(
-            "interfaceAgent must be 'claude', 'codex', 'openai', 'groq', or 'gemini'.",
+            `interfaceAgent must be one of: ${Array.from(validAgents).join(", ")}.`,
             "INVALID_ARGUMENT",
           );
         }
@@ -506,6 +546,26 @@ export class DuetService {
         return;
       }
       throw new DuetError("Not found.", "NOT_FOUND");
+    }
+    if (route === "/chat/shared-context") {
+      // Shared manager memory (provider-health/cooldown notes) scoped to a run,
+      // exposed independently of conversation detail so the dashboard can show a
+      // rate-limited/misconfigured provider even before the first turn exists.
+      if (request.method !== "GET") {
+        throw new DuetError("Not found.", "NOT_FOUND");
+      }
+      const runId = url.searchParams.get("runId") ?? undefined;
+      this.send(
+        response,
+        200,
+        apiSuccess(requestId, {
+          sharedContext: this.options.store.listManagerSharedContext({
+            runId,
+            limit: 10,
+          }),
+        }),
+      );
+      return;
     }
     const proposalPrepareMatch =
       /^\/chat\/conversations\/([^/]+)\/proposals\/([^/]+)\/prepare$/.exec(
@@ -625,6 +685,33 @@ export class DuetService {
           // instruction and re-trigger spurious create_plan proposals.
           command = { kind: "plan", repoPath: parsed.repoPath, goal: parsed.goal, lead: parsed.lead, config: cfg };
         }
+        if (proposal.action === "agent_consultation") {
+          const parsed = JSON.parse(proposal.commandJson) as {
+            question: string;
+            agents: ("claude" | "codex")[];
+            repoPath?: string;
+            profile?: "cheap" | "balanced" | "reasoning" | "max";
+            maxRuntimeSeconds?: number;
+          };
+          const operation = this.consultation.submit({
+            conversationId,
+            proposalId,
+            question: parsed.question,
+            agents: parsed.agents,
+            repoPath: parsed.repoPath,
+            profile: parsed.profile,
+            maxRuntimeSeconds:
+              typeof parsed.maxRuntimeSeconds === "number" ? parsed.maxRuntimeSeconds : 90,
+            inputHash: hash(proposal.commandJson),
+          });
+          try {
+            this.options.store.markProposalStarted(conversationId, proposalId, operation.id);
+          } catch (err) {
+            this.consultation.cancelActive(operation.id);
+            throw err;
+          }
+          return { status: 202, data: operation };
+        }
         if (command === null) {
           throw new DuetError("Unexpected null command for proposal action.", "INTERNAL_ERROR");
         }
@@ -681,16 +768,21 @@ export class DuetService {
         if (request.method !== "GET") {
           throw new DuetError("Not found.", "NOT_FOUND");
         }
+        const conversation = this.options.store.getConversation(conversationId);
         this.send(
           response,
           200,
           apiSuccess(requestId, {
-            conversation: this.options.store.getConversation(conversationId),
+            conversation,
             turns: this.options.store.listConversationTurns(conversationId, {
               limit: 200,
             }),
             proposals: this.options.store.listProposals(conversationId),
             proposalHistory: this.options.store.listProposalsHistory(conversationId),
+            sharedContext: this.options.store.listManagerSharedContext({
+              runId: conversation.runId,
+              limit: 10,
+            }),
           }),
         );
         return;
@@ -730,6 +822,7 @@ export class DuetService {
         status: "ok",
         instanceId: this.options.instanceId,
         activeOperations: this.options.store.listActiveOperations().length,
+        managerProviders: this.options.managerProviders ?? defaultManagerProviderInfos,
       }));
       return;
     }
@@ -750,6 +843,53 @@ export class DuetService {
       this.send(response, 200, apiSuccess(requestId, { ticket }));
       return;
     }
+    if (request.method === "POST" && route === "/service/cancel-active") {
+      const active = this.options.store.listActiveOperations();
+      const chatLikeOps = active.filter(
+        (operation) =>
+          operation.kind === "manager_turn" || operation.kind === "consultation",
+      );
+      // Abort live turns and let their run() promise write the terminal status
+      // (and append the cancellation turn) so the UI never sees "cancelled"
+      // before the backend has finished. Only finalize operations that have no
+      // live promise (orphans, e.g. after a crash) directly here.
+      const chatAborted =
+        this.chat.cancelActive() + this.consultation.cancelActive();
+      for (const operation of chatLikeOps) {
+        if (
+          this.chat.isActive(operation.id) ||
+          this.consultation.isActive(operation.id)
+        ) {
+          continue;
+        }
+        this.options.store.updateOperation(operation.id, {
+          status: "cancelled",
+          errorJson: JSON.stringify({
+            code: "CANCELLED",
+            message: "Cancellation requested.",
+          }),
+          finishedAt: new Date().toISOString(),
+        });
+      }
+      const chatCancelled = Math.max(chatLikeOps.length, chatAborted);
+      let runCancelRequested = 0;
+      for (const runId of new Set(
+        active
+          .filter((operation) =>
+            operation.kind !== "manager_turn" && operation.kind !== "consultation")
+          .map((operation) => operation.runId)
+          .filter(Boolean),
+      )) {
+        runCancelRequested += 1;
+        await this.app.cancel(runId!);
+      }
+      this.send(response, 202, apiSuccess(requestId, {
+        cancellationRequested: chatCancelled > 0 || runCancelRequested > 0,
+        chatCancellationRequested: chatCancelled,
+        runCancellationRequested: runCancelRequested,
+      }));
+      return;
+    }
     if (request.method === "POST" && route === "/service/stop") {
       const body = JSON.parse((await readBody(request)) || "{}") as {
         force?: boolean;
@@ -759,10 +899,11 @@ export class DuetService {
         throw new DuetError("Active operations prevent graceful shutdown.", "SERVICE_BUSY");
       }
       if (active.length > 0) {
-        const chatCancelled = this.chat.cancelActive();
+        const chatCancelled = this.chat.cancelActive() + this.consultation.cancelActive();
         for (const runId of new Set(
           active
-            .filter((operation) => operation.kind !== "manager_turn")
+            .filter((operation) =>
+              operation.kind !== "manager_turn" && operation.kind !== "consultation")
             .map((operation) => operation.runId)
             .filter(Boolean),
         )) {
@@ -779,12 +920,27 @@ export class DuetService {
       setTimeout(() => this.options.onStop?.(), 10);
       return;
     }
+    const operationCancelMatch = /^\/operations\/([^/]+)\/cancel$/.exec(route);
+    if (request.method === "POST" && operationCancelMatch) {
+      const operationId = decodeURIComponent(operationCancelMatch[1]);
+      // Scoped to the manager/consultation turn only — runs are never cancelled
+      // here, so a chat Stop click cannot abort background planner/execution work.
+      const cancelled =
+        this.chat.cancelActive(operationId) +
+        this.consultation.cancelActive(operationId);
+      this.send(response, 202, apiSuccess(requestId, {
+        cancellationRequested: cancelled > 0,
+      }));
+      return;
+    }
     if (request.method === "GET" && route.startsWith("/operations/")) {
-      this.send(
-        response,
-        200,
-        apiSuccess(requestId, this.activities.get(decodeURIComponent(route.slice(12)))),
-      );
+      const operationId = decodeURIComponent(route.slice(12));
+      const operation = this.activities.get(operationId);
+      // Attach transient manager-turn activity (which tool is running) so the
+      // dashboard can show live progress while the turn is in flight.
+      const activity = this.chat.getActivity(operationId);
+      const payload = operation && activity ? { ...operation, activity } : operation;
+      this.send(response, 200, apiSuccess(requestId, payload));
       return;
     }
     if (request.method === "GET" && route.startsWith("/artifacts/")) {
@@ -978,6 +1134,7 @@ export class DuetService {
       const run = this.options.store.getRun(runId);
       const versionIndependentCancel =
         suffix === "/cancel" ||
+        suffix === "/discard" ||
         suffix === "/approve" ||
         /^\/tasks\/[^/]+\/cancel$/.test(suffix);
       if (
@@ -985,6 +1142,38 @@ export class DuetService {
         Number(body.expectedVersion) !== (run.version ?? 1)
       ) {
         throw new DuetError("Run version changed.", "VERSION_CONFLICT");
+      }
+      if (suffix === "/discard") {
+        // Targeted "close" for a pending run: cancel + delete in one atomic
+        // step (mutate wraps this in a transaction). Only safe when the run has
+        // no active work and no on-disk worktrees/branches; otherwise the CLI
+        // cancel/cleanup path must run first so nothing is orphaned.
+        const active = this.options.store
+          .listActiveOperations()
+          .find((operation) => operation.runId === runId);
+        if (active) {
+          throw new DuetError(
+            `Run ${runId} has active operation ${active.id}; stop it before discarding.`,
+            "RUN_ACTIVITY_ACTIVE",
+          );
+        }
+        const hasOnDisk = this.options.store
+          .listTasks(runId)
+          .some((task) => task.worktreePath || task.branch);
+        if (hasOnDisk) {
+          throw new DuetError(
+            `Run ${runId} has worktrees or branches on disk. Use \`duet cleanup ${runId}\` first.`,
+            "RUN_NOT_DISCARDABLE",
+          );
+        }
+        if (!["failed", "cancelled", "merged", "cleaned_up"].includes(run.status)) {
+          this.options.store.updateRun(runId, {
+            status: "cancelled",
+            cancellationRequested: true,
+          });
+        }
+        this.options.store.deleteRun(runId);
+        return { status: 200, data: { discarded: runId } };
       }
       if (suffix === "/action-ticket") {
         const action =

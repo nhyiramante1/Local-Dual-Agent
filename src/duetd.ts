@@ -45,7 +45,7 @@ import {
 } from "./service/discovery.js";
 import { probeService } from "./service/client.js";
 import { serviceLog } from "./service/logger.js";
-import { DuetService } from "./service/server.js";
+import { DuetService, type ManagerProviderInfo } from "./service/server.js";
 
 const versionError = nodeVersionError(process.versions.node);
 if (versionError) throw new Error(versionError);
@@ -96,34 +96,83 @@ async function main(): Promise<void> {
       claude: new ClaudeAdapter(),
       codex: new CodexAdapter(),
     };
+    const managerProviderInfos: ManagerProviderInfo[] = [
+      { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+    ];
+    const addOpenAiCompatibleProvider = (input: {
+      id: ManagerProviderName;
+      label: string;
+      apiKey?: string;
+      model: string;
+      baseUrl?: string;
+      nativeToolCalling?: boolean;
+      latency?: ManagerProviderInfo["latency"];
+    }) => {
+      if (input.apiKey) {
+        chatProviders[input.id] = new OpenAIManagerAdapter(
+          input.apiKey,
+          input.model,
+          input.baseUrl,
+          input.id,
+        );
+      }
+      managerProviderInfos.push({
+        id: input.id,
+        label: input.label,
+        available: !!input.apiKey,
+        nativeToolCalling: input.nativeToolCalling !== false,
+        latency: input.latency ?? "fast",
+      });
+    };
+    const firstEnvValue = (names: string[]): string | undefined => {
+      for (const name of names) {
+        const value = process.env[name];
+        if (value) return value;
+      }
+      return undefined;
+    };
     // OpenAI-compatible manager identities. Each is constructed when its key is
     // present so the UI can switch between them per-conversation, independent of
     // which one is the configured default. Models/base URLs are overridable via
     // env so a new free model can be swapped without code changes.
     const groqKey = process.env.GROQ_API_KEY;
-    if (groqKey) {
-      chatProviders.groq = new OpenAIManagerAdapter(
-        groqKey,
-        process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
-        process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1",
-      );
-    }
+    addOpenAiCompatibleProvider({
+      id: "groq",
+      label: "Groq",
+      apiKey: groqKey,
+      model: process.env.GROQ_MODEL ?? config.manager.groqModel,
+      baseUrl: process.env.GROQ_BASE_URL ?? config.manager.groqBaseUrl,
+    });
     const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-    if (geminiKey) {
-      chatProviders.gemini = new OpenAIManagerAdapter(
-        geminiKey,
-        process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
-        process.env.GEMINI_BASE_URL ??
-          "https://generativelanguage.googleapis.com/v1beta/openai/",
-      );
-    }
+    addOpenAiCompatibleProvider({
+      id: "gemini",
+      label: "Gemini",
+      apiKey: geminiKey,
+      model: process.env.GEMINI_MODEL ?? config.manager.geminiModel,
+      baseUrl: process.env.GEMINI_BASE_URL ?? config.manager.geminiBaseUrl,
+    });
     const openaiKey = process.env.OPENAI_API_KEY;
-    if (openaiKey) {
-      chatProviders.openai = new OpenAIManagerAdapter(
-        openaiKey,
-        config.manager.openaiModel,
-        config.manager.openaiBaseUrl,
-      );
+    addOpenAiCompatibleProvider({
+      id: "openai",
+      label: "OpenAI",
+      apiKey: openaiKey,
+      model: config.manager.openaiModel,
+      baseUrl: config.manager.openaiBaseUrl,
+      latency: "balanced",
+    });
+    for (const [id, profile] of Object.entries(config.manager.providers)) {
+      const model = profile.modelEnv ? (process.env[profile.modelEnv] ?? profile.model) : profile.model;
+      const baseUrl = profile.baseUrlEnv ? (process.env[profile.baseUrlEnv] ?? profile.baseUrl) : profile.baseUrl;
+      addOpenAiCompatibleProvider({
+        id,
+        label: profile.label,
+        apiKey: firstEnvValue(profile.apiKeyEnvs),
+        model,
+        baseUrl,
+        nativeToolCalling: profile.nativeToolCalling,
+        latency: "fast",
+      });
     }
     // Resolve the effective default voice. If the configured default has no
     // constructed adapter (e.g. provider="groq" but no GROQ_API_KEY), fall back
@@ -132,11 +181,13 @@ async function main(): Promise<void> {
     // working fallback always exists. Order prefers OpenAI-compatible voices.
     const configuredProvider = config.manager.provider;
     const fallbackOrder: ManagerProviderName[] = [
+      "glm",
       "groq",
       "gemini",
       "openai",
       "codex",
       "claude",
+      ...Object.keys(config.manager.providers),
     ];
     const effectiveProvider: ManagerProviderName = chatProviders[configuredProvider]
       ? configuredProvider
@@ -159,6 +210,7 @@ async function main(): Promise<void> {
       managerBudget,
       managerToolRuntime: config.manager,
       managerProvider: effectiveProvider,
+      managerProviders: managerProviderInfos,
       dashboardPublicHost:
         process.env.DUET_PUBLIC_HOST ?? config.dashboard.publicHost,
       dashboardAccessToken,

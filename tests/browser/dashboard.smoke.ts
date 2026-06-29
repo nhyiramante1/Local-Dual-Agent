@@ -9,6 +9,7 @@ import { chromium, type Browser, type Page } from "@playwright/test";
 
 import type {
   ProviderName,
+  ManagerProviderName,
   RunRecord,
   TaskRecord,
 } from "../../src/core/domain.js";
@@ -19,6 +20,7 @@ import {
   type ManagerBudget,
 } from "../../src/chat/engine.js";
 import { DuetService } from "../../src/service/server.js";
+import type { ManagerProviderInfo } from "../../src/service/server.js";
 import { runCommand } from "../../src/process/run-command.js";
 
 const SECRET = "dashboard-smoke-secret";
@@ -140,7 +142,12 @@ async function gitInit(dir: string): Promise<void> {
 }
 
 async function startHarness(
-  options: { managerBudget?: ManagerBudget; gitRepo?: boolean } = {},
+  options: {
+    managerBudget?: ManagerBudget;
+    gitRepo?: boolean;
+    managerProvider?: ManagerProviderName;
+    managerProviders?: ManagerProviderInfo[];
+  } = {},
 ): Promise<Harness> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-dash-smoke-"));
   const repoA = path.join(directory, "repo-a");
@@ -157,9 +164,17 @@ async function startHarness(
   let gate: Gate | null = null;
   const provider: ProviderAdapter = {
     name: "codex" as ProviderName,
-    async run() {
+    async run(turn) {
       calls.n += 1;
-      if (gate) await gate.promise;
+      while (gate) {
+        if (turn.shouldCancel?.()) {
+          throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+        }
+        await Promise.race([
+          gate.promise,
+          new Promise((resolve) => setTimeout(resolve, 10)),
+        ]);
+      }
       return {
         provider: "codex",
         sessionId: "sess-smoke",
@@ -239,6 +254,22 @@ async function startHarness(
     tier: "fingerprint",
     expiresAt: "2030-01-01T00:00:00.000Z",
   });
+  store.createProposal({
+    id: "proposal-consultation",
+    conversationId: convA.id,
+    turnId: managerTurn.id,
+    action: "agent_consultation",
+    summary: "Ask Claude and Codex whether the plan is safe.",
+    commandCli: "Agent consultation consent request (execution is deferred in Phase 7A).",
+    commandJson: JSON.stringify({
+      action: "agent_consultation",
+      agents: ["claude", "codex"],
+      mode: "independent",
+      profile: "cheap",
+    }),
+    tier: "ordinary",
+    expiresAt: "2030-01-01T00:00:00.000Z",
+  });
 
   store.createRun(runRecord("run-b", "Refactor logging", repoB), [
     taskRecord("run-b", "task-b1", "Introduce logger"),
@@ -252,6 +283,8 @@ async function startHarness(
     idleTimeoutMs: 600_000,
     chatProviders: { claude: provider, codex: provider },
     managerBudget: options.managerBudget,
+    managerProvider: options.managerProvider,
+    managerProviders: options.managerProviders,
   });
   const port = await service.listen();
   const base = `http://127.0.0.1:${port}`;
@@ -324,6 +357,18 @@ async function waitForChatEnabled(page: Page): Promise<void> {
     assert.equal(await page.locator("#chat-input").isEnabled(), true);
     assert.equal(await page.locator("#chat-send").isEnabled(), true);
   });
+}
+
+async function chooseManager(page: Page, agent: string): Promise<void> {
+  const target = page.locator(`#chat-${agent}`);
+  if (await target.isVisible().catch(() => false)) {
+    await target.click();
+    return;
+  }
+  const current = (await page.locator("#chat-provider-current").textContent()) ?? "";
+  if (current.toLowerCase().includes(agent.toLowerCase())) return;
+  await page.locator("#chat-provider-current").click();
+  await target.click();
 }
 
 function trackConsole(page: Page): string[] {
@@ -417,6 +462,77 @@ test("loads Run A panels and chat with no console errors", async () => {
   }
 });
 
+test("shared manager context tab shows provider health notes", async () => {
+  const h = await startHarness();
+  try {
+    h.store.addManagerSharedContext({
+      runId: "run-a",
+      kind: "provider_health",
+      provider: "groq",
+      content: "Groq is rate limited. Try Gemini.",
+    });
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await page.locator('[data-section="memory"]').click();
+      await waitForText(page, "#manager-memory", "provider health");
+      await waitForText(page, "#manager-memory", "Groq is rate limited");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard renders dynamic manager provider buttons", async () => {
+  const h = await startHarness({
+    managerProviders: [
+      { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "glm", label: "GLM", available: true, nativeToolCalling: true, latency: "fast" },
+    ],
+  });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await page.locator("#chat-provider-current").click();
+      await waitForText(page, "#manager-voices", "GLM");
+      await waitForText(page, "#manager-voices", "fast");
+      assert.equal(await page.locator('#manager-voices [data-agent="glm"]').count(), 1);
+      await chooseManager(page, "glm");
+      await page.locator("#chat-provider-current").click();
+      assert.equal(await page.locator('#manager-voices [data-agent="glm"]').count(), 0);
+      assert.ok(await page.locator('#manager-voices [data-agent="codex"]').count() > 0);
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dashboard skips unavailable default manager providers", async () => {
+  const h = await startHarness({
+    managerProvider: "glm",
+    managerProviders: [
+      { id: "glm", label: "GLM", available: false, nativeToolCalling: true, latency: "fast" },
+      { id: "groq", label: "Groq", available: true, nativeToolCalling: true, latency: "fast" },
+      { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+    ],
+  });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await waitForText(page, "#chat-provider-current", "Groq");
+      await waitForText(page, "#chat-turns", "No global conversation yet");
+      await page.locator("#chat-provider-current").click();
+      await page.locator("#chat-glm").click();
+      await waitForText(page, "#chat-status", "GLM is not configured");
+      await waitForText(page, "#chat-provider-current", "Groq");
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("switching A -> B -> A clears stale state and does not duplicate events", async () => {
   const h = await startHarness();
   try {
@@ -447,8 +563,8 @@ test("switching Manager voice preserves the selected run", async () => {
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
-      await page.locator("#chat-claude").click();
-      await waitForClass(page, "#chat-claude", /active/);
+      await chooseManager(page, "claude");
+      await waitForText(page, "#chat-provider-current", "Claude");
       await waitForClass(page, `#runs button[data-id="run-a"]`, /sel/);
       await waitForText(page, "#summary", "Add a healthz endpoint");
     });
@@ -469,6 +585,69 @@ test("seeded XSS turn renders as text, not executed HTML", async () => {
         await page.evaluate(() => (window as unknown as { __xss?: number }).__xss),
         undefined,
       );
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("tool trace renders compact statuses and folder-first search details", async () => {
+  const h = await startHarness();
+  try {
+    const conversation = h.store.getConversation("conv-a");
+    h.store.appendConversationTurn({
+      conversationId: conversation.id,
+      role: "manager",
+      interfaceAgent: "codex",
+      content: "I found likely game-related items in Downloads.",
+      usageJson: JSON.stringify({
+        toolRuntime: true,
+        toolTrace: [
+          {
+            name: "search_files",
+            ok: true,
+            elapsedMs: 12,
+            arguments: {
+              path: "C:\\Users\\nhyir\\Downloads",
+              kind: "file",
+              namePattern: "*.exe",
+            },
+            result: {
+              matchCount: 2,
+              entriesScanned: 741,
+              folderMatches: [
+                { path: "C:\\Users\\nhyir\\Downloads\\Grand Theft Auto V Enhanced", matchCount: 1 },
+              ],
+              matches: [
+                { path: "C:\\Users\\nhyir\\Downloads\\Grand Theft Auto V Enhanced\\Redistributables\\Rockstar-Games-Launcher.exe", type: "file" },
+              ],
+            },
+          },
+          {
+            name: "check_path",
+            ok: false,
+            elapsedMs: 1,
+            arguments: {
+              path: "C:\\missing",
+            },
+            result: {
+              code: "PATH_NOT_FOUND",
+              message: "Path does not exist.",
+            },
+          },
+        ],
+      }),
+    });
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "I found likely game-related items in Downloads.");
+      await waitForText(page, "#chat-turns", "2 matches");
+      await waitForText(page, "#chat-turns", "path not found");
+      await waitForText(page, "#chat-turns", "Path does not exist.");
+      await page.locator(".tool-trace-details summary").first().click();
+      await waitForText(page, "#chat-turns", "top folders");
+      await waitForText(page, "#chat-turns", "Grand Theft Auto V Enhanced");
     });
   } finally {
     await h.cleanup();
@@ -514,6 +693,15 @@ test("proposal cards render safely and copy the exact CLI command", async () => 
         ),
         "duet retry run-a task-a1",
       );
+
+      const consultation = '[data-proposal-id="proposal-consultation"]';
+      await waitForText(page, consultation, "agent consultation");
+      await waitForText(page, consultation, "read-only");
+      await waitForText(page, consultation, "their replies appear here in the chat");
+      // Executable now: the consent card has a one-click Start affordance and no
+      // fingerprint readiness step.
+      assert.equal(await page.locator(`${consultation} [data-proposal-start]`).count(), 1);
+      assert.equal(await page.locator(`${consultation} [data-proposal-prepare]`).count(), 0);
       assert.deepEqual(errors, []);
     });
   } finally {
@@ -689,13 +877,13 @@ test("run-scoped manager empty state shows planning status", async () => {
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
-      await page.locator("#chat-groq").click();
+      await chooseManager(page, "claude");
       await waitForText(page, "#chat-turns", "claude is planning");
       await waitForText(page, "#chat-turns", "Watch the Timeline");
 
       h.store.updateRun("run-a", { status: "awaiting_plan_approval", error: null });
       await selectRun(page, "run-a");
-      await page.locator("#chat-groq").click();
+      await chooseManager(page, "claude");
       await waitForText(page, "#chat-turns", "Plan ready for approval");
       await waitForText(page, "#chat-turns", "Review the Plan panel");
     });
@@ -804,6 +992,7 @@ test("sending shows pending, disables input, then renders the reply after releas
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       h.arm();
       await page.locator("#chat-input").fill("status please");
@@ -811,10 +1000,43 @@ test("sending shows pending, disables input, then renders the reply after releas
       await waitForText(page, "#chat-turns", "status please");
       await assertEventually(async () => {
         assert.equal(await page.locator("#chat-input").isDisabled(), true);
-        assert.equal(await page.locator("#chat-send").isDisabled(), true);
       });
       h.release();
       await waitForText(page, "#chat-turns", "manager reply from stub");
+      await assertEventually(async () => {
+        assert.equal(await page.locator("#chat-input").isEnabled(), true);
+        assert.equal(await page.locator("#chat-send").isEnabled(), true);
+      });
+    });
+  } finally {
+    h.release();
+    await h.cleanup();
+  }
+});
+
+test("stop button cancels an active manager turn", async () => {
+  const h = await startHarness({ gitRepo: true });
+  try {
+    await withPage(async (page) => {
+      await open(page, h);
+      await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
+      await waitForChatEnabled(page);
+      h.arm();
+      await page.locator("#chat-input").fill("please keep searching");
+      await page.locator("#chat-send").click();
+      await waitForText(page, "#chat-turns", "please keep searching");
+      await assertEventually(async () => {
+        assert.equal(h.store.listActiveOperations().length > 0, true);
+      });
+      // The composer Stop is scoped to the current manager turn: it hits the
+      // per-operation cancel route, not the global cancel-active.
+      const cancelResponse = page.waitForResponse((response) =>
+        /\/operations\/[^/]+\/cancel$/.test(response.url()) && response.request().method() === "POST",
+      );
+      await page.locator("#chat-send").click();
+      await cancelResponse;
+      h.release();
       await assertEventually(async () => {
         assert.equal(await page.locator("#chat-input").isEnabled(), true);
       });
@@ -831,14 +1053,15 @@ test("input stays disabled while a turn is pending even when switching run/voice
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       h.arm();
       await page.locator("#chat-input").fill("hold please");
-      await page.locator("#chat-send").click();
+      await page.locator("#chat-input").press("Enter");
       await assertEventually(async () => {
         assert.equal(await page.locator("#chat-input").isDisabled(), true);
       });
-      await page.locator("#chat-claude").click();
+      await chooseManager(page, "claude");
       assert.equal(await page.locator("#chat-input").isDisabled(), true);
       await selectRun(page, "run-b");
       assert.equal(await page.locator("#chat-input").isDisabled(), true);
@@ -900,10 +1123,11 @@ test("action-like text stays chat and does not mutate the run", async () => {
     await withPage(async (page) => {
       await open(page, h);
       await selectRun(page, "run-a");
+      await waitForText(page, "#chat-turns", "What is happening?");
       await waitForChatEnabled(page);
       const before = h.store.getRun("run-a").version;
       await page.locator("#chat-input").fill("/approve plan");
-      await page.locator("#chat-send").click();
+      await page.locator("#chat-input").press("Enter");
       await waitForText(page, "#chat-turns", "/approve plan");
       await waitForText(page, "#chat-turns", "manager reply from stub");
       assert.equal(h.store.isApproved("run-a", "plan"), false);
@@ -914,7 +1138,7 @@ test("action-like text stays chat and does not mutate the run", async () => {
   }
 });
 
-test("budget exceeded renders a safe visible error", async () => {
+test("budget exceeded renders a safe visible limit message", async () => {
   const h = await startHarness({
     managerBudget: { ...defaultManagerBudget, maxTurnsPerDay: 0 },
   });
@@ -926,6 +1150,7 @@ test("budget exceeded renders a safe visible error", async () => {
       await page.locator("#chat-input").fill("anything");
       await page.locator("#chat-send").click();
       await waitForText(page, "#chat-status", /BUDGET_EXCEEDED|budget|turn limit/i);
+      assert.match((await page.locator("#chat-status").getAttribute("class")) ?? "", /muted/);
       assert.equal(h.calls.n, 0);
     });
   } finally {

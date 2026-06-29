@@ -4,11 +4,13 @@ import path from "node:path";
 
 import crossSpawn from "cross-spawn";
 
+import { loadConfig } from "../config.js";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import { appRoot, duetDataRoot } from "../paths.js";
 import {
   loadOrCreateServiceSecret,
+  recoverServiceInfo,
   readServiceInfo,
   type ServiceInfo,
 } from "./discovery.js";
@@ -69,8 +71,14 @@ async function serviceCommand(): Promise<{ command: string; args: string[] }> {
 }
 
 export async function ensureService(): Promise<ServiceInfo> {
+  const config = await loadConfig();
+  const preferredPort = Number(
+    process.env.DUET_PORT ?? config.service.port ?? 0,
+  ) || undefined;
   let info = await readServiceInfo();
   if (info && (await probeService(info))) return info;
+  const recovered = await recoverServiceInfo(preferredPort);
+  if (recovered) return recovered;
   const command = await serviceCommand();
   const child = crossSpawn(command.command, command.args, {
     cwd: appRoot(),
@@ -85,6 +93,8 @@ export async function ensureService(): Promise<ServiceInfo> {
     await new Promise((resolve) => setTimeout(resolve, 100));
     info = await readServiceInfo();
     if (info && (await probeService(info))) return info;
+    const repaired = await recoverServiceInfo(preferredPort);
+    if (repaired) return repaired;
   }
   throw new DuetError("Duet service did not start.", "SERVICE_START_FAILED");
 }

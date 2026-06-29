@@ -13,7 +13,7 @@ import type {
 import { isOpenAiCompatibleManager } from "../core/domain.js";
 import type { DuetConfig } from "../config.js";
 import { DuetError } from "../core/errors.js";
-import type { ProviderAdapter } from "../providers/adapter.js";
+import type { AgentToolStep, ProviderAdapter } from "../providers/adapter.js";
 import type { Store } from "../persistence/store.js";
 import {
   assertFingerprintUnchanged,
@@ -34,12 +34,11 @@ import { serviceLog } from "../service/logger.js";
 import {
   executeManagerTool,
   managerToolDefinitions,
-  serializeToolExecutions,
   type ManagerToolExecution,
 } from "./tools.js";
 
-// Phrases a weaker manager model uses when it narrates an intent to propose but
-// forgets to emit the duet-proposal block. Used to trigger a single backstop retry.
+// Detects whether the previous legacy manager turn offered a plan so a follow-up
+// user affirmation can synthesize the proposal the model omitted.
 const INTENT_TO_PROPOSE_RE =
   /\b(?:I (?:will |can |'ll |would )?propose|propose (?:the|a|this|an)\b|here is (?:the |a |my )?(?:proposal|plan)|a proposal can be|propose the following)/i;
 
@@ -55,9 +54,7 @@ export const defaultManagerBudget: ManagerBudget = {
 };
 
 export type ChatProviders = Record<ProviderName, ProviderAdapter> & {
-  openai?: ProviderAdapter;
-  groq?: ProviderAdapter;
-  gemini?: ProviderAdapter;
+  [provider: string]: ProviderAdapter | undefined;
 };
 
 export type ManagerToolRuntimeOptions = Pick<
@@ -70,6 +67,26 @@ export type ManagerToolRuntimeOptions = Pick<
   | "maxToolCallsPerTurn"
 >;
 
+// Live progress for a manager turn, surfaced to the dashboard while the turn
+// runs so the operator can see it is working and what it is doing.
+//
+// A tool call emits twice: once at `phase: "tool"` (the call is starting, with
+// arguments) and once at `phase: "tool-result"` (it finished, with ok/elapsed
+// and a compact result). That lets the dashboard render a true live tool
+// timeline — the actual call and its result as they happen — rather than only a
+// "Searching files…" liveness hint.
+export interface ManagerActivity {
+  phase: "thinking" | "tool" | "tool-result" | "summarizing";
+  tool?: string;
+  step: number;
+  ok?: boolean;
+  elapsedMs?: number;
+  arguments?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+export type ManagerActivityListener = (activity: ManagerActivity) => void;
+
 const defaultToolRuntimeOptions: ManagerToolRuntimeOptions = {
   nativeToolCalling: true,
   actionMode: "recommended",
@@ -79,8 +96,145 @@ const defaultToolRuntimeOptions: ManagerToolRuntimeOptions = {
   maxToolCallsPerTurn: 5,
 };
 
+interface StoredToolTrace {
+  name: string;
+  ok: boolean;
+  elapsedMs: number;
+  arguments?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function quoted(value: string | undefined): string | undefined {
+  return value ? `"${value}"` : undefined;
+}
+
+function safeJsonObject(json: string | undefined): Record<string, unknown> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedText(value: unknown, limit = 240): unknown {
+  return typeof value === "string" && value.length > limit
+    ? `${value.slice(0, limit)}...`
+    : value;
+}
+
+function summarizeSearchHit(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  return {
+    path: boundedText(item.path, 500),
+    type: item.type,
+    line: item.line,
+    snippet: boundedText(item.snippet),
+  };
+}
+
+function summarizeFolderHit(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  return {
+    path: boundedText(item.path, 500),
+    matchCount: item.matchCount,
+  };
+}
+
+function summarizeToolArguments(name: string, argumentsJson?: string): Record<string, unknown> | undefined {
+  const args = safeJsonObject(argumentsJson);
+  if (!args) return undefined;
+  if (name === "search_files") {
+    return {
+      path: boundedText(args.path),
+      namePattern: boundedText(args.namePattern),
+      contentPattern: args.contentPattern ? "[content search]" : undefined,
+      kind: args.kind,
+      maxResults: args.maxResults,
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(args)
+      .slice(0, 8)
+      .map(([key, value]) => [key, boundedText(value)]),
+  );
+}
+
+function summarizeToolResult(name: string, result: unknown): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const record = result as Record<string, unknown>;
+  if (name === "search_files") {
+    const matches = Array.isArray(record.matches)
+      ? record.matches.slice(0, 5).map((match) => {
+          return summarizeSearchHit(match);
+        })
+      : undefined;
+    const folderMatches = Array.isArray(record.folderMatches)
+      ? record.folderMatches.slice(0, 5).map((match) => {
+          return summarizeFolderHit(match);
+        })
+      : undefined;
+    return {
+      root: boundedText(record.root, 500),
+      namePattern: boundedText(record.namePattern),
+      contentPattern: record.contentPattern ? "[content search]" : undefined,
+      kind: record.kind,
+      entriesScanned: record.entriesScanned,
+      truncated: record.truncated,
+      matched: record.matched,
+      evidenceKind: record.evidenceKind,
+      bestMatch: summarizeSearchHit(record.bestMatch),
+      bestFolderMatch: summarizeFolderHit(record.bestFolderMatch),
+      matchCount: record.matchCount,
+      folderMatches,
+      matches,
+    };
+  }
+  if (name === "check_path" || name === "check_git_repo" || name === "resolve_alias") {
+    return Object.fromEntries(
+      Object.entries(record)
+        .slice(0, 10)
+        .map(([key, value]) => [key, boundedText(value, 500)]),
+    );
+  }
+  return undefined;
+}
+
+function storedToolTrace(executions: ManagerToolExecution[]): StoredToolTrace[] {
+  return executions.map((execution) => ({
+    name: execution.name,
+    ok: execution.ok,
+    elapsedMs: execution.elapsedMs,
+    arguments: summarizeToolArguments(execution.name, execution.argumentsJson),
+    result: summarizeToolResult(execution.name, execution.result),
+  }));
+}
+
 function oneDayAgo(): string {
   return new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
+}
+
+function daysFromNow(days: number): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString();
 }
 
 /**
@@ -177,6 +331,7 @@ export class ChatEngine {
     conversationId: string,
     operationId: string,
     shouldCancel?: () => boolean,
+    onActivity?: ManagerActivityListener,
   ): Promise<ConversationTurnRecord> {
     const conversation = this.store.getConversation(conversationId);
     const provider = conversation.interfaceAgent;
@@ -204,8 +359,12 @@ export class ChatEngine {
         cwd,
         before,
         shouldCancel,
+        onActivity,
       );
     }
+    // Non-tool providers do a single reasoning pass — report it so the operator
+    // sees the turn is alive even without tool steps.
+    onActivity?.({ phase: "thinking", step: 1 });
     let result: AgentResult | undefined;
     try {
       result = await adapter.run({
@@ -222,6 +381,7 @@ export class ChatEngine {
             : isOpenAiCompatibleManager(provider)
               ? this.budget.openaiMaxUsdPerTurn
               : undefined,
+        profile: provider === "claude" || provider === "codex" ? "cheap" : undefined,
         shouldCancel,
       });
       if (shouldCancel?.()) {
@@ -336,6 +496,20 @@ export class ChatEngine {
           tier: synthesized.tier,
           expiresAt: synthesized.expiresAt,
         });
+        this.store.addManagerSharedContext({
+          runId: synthesized.runId ?? conversation.runId,
+          kind: "handoff",
+          provider,
+          conversationId,
+          turnId: turn.id,
+          content: `Created ${synthesized.action} suggestion card: ${synthesized.summary}`,
+          metadataJson: JSON.stringify({
+            action: synthesized.action,
+            runId: synthesized.runId,
+            taskId: synthesized.taskId,
+          }),
+          expiresAt: synthesized.expiresAt,
+        });
       }
       return turn;
     });
@@ -362,10 +536,8 @@ export class ChatEngine {
     cwd: string,
     before: Awaited<ReturnType<typeof fingerprintRepository>> | undefined,
     shouldCancel?: () => boolean,
+    onActivity?: ManagerActivityListener,
   ): Promise<ConversationTurnRecord> {
-    let first: AgentResult | undefined;
-    let final: AgentResult | undefined;
-    let executions: ManagerToolExecution[] = [];
     // Consultation is a paid capability; only expose its tool when enabled for
     // this manager profile. Other tools are always available to a capable model.
     const tools = this.toolRuntime.supportsAgentConsultation
@@ -374,71 +546,115 @@ export class ChatEngine {
           (tool) => tool.name !== "request_agent_consultation",
         );
     const timeoutMs = this.toolRuntimeTimeoutMs();
+    const executions: ManagerToolExecution[] = [];
+    const responses: AgentResult[] = [];
+    const priorSteps: AgentToolStep[] = [];
+    // maxToolCallsPerTurn is a GLOBAL budget across loop iterations. It also
+    // bounds iterations, since every iteration that continues the loop must
+    // consume at least one call.
+    let budgetRemaining = Math.max(0, this.toolRuntime.maxToolCallsPerTurn);
+    let activityStep = 0;
+    const emit = (activity: Omit<ManagerActivity, "step">): void => {
+      onActivity?.({ ...activity, step: ++activityStep });
+    };
+    let result: AgentResult | undefined;
     try {
       const prompt = this.toolContextBuilder(conversation).prompt;
-      first = await adapter.run({
-        cwd,
-        prompt,
-        mode: "read-only",
-        timeoutMs,
-        maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
-        shouldCancel,
-        tools,
-      });
-      if (shouldCancel?.()) {
-        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
-      }
-      const toolCalls = (first.toolCalls ?? []).slice(
-        0,
-        this.toolRuntime.maxToolCallsPerTurn,
-      );
-      executions = await this.executeToolCalls(toolCalls, conversation);
-      if ((first.toolCalls?.length ?? 0) > toolCalls.length) {
-        executions.push({
-          name: "tool_runtime",
-          ok: false,
-          elapsedMs: 0,
-          result: {
-            code: "TOOL_CALL_LIMIT_EXCEEDED",
-            message: `Only ${this.toolRuntime.maxToolCallsPerTurn} tool calls are allowed per manager turn.`,
-          },
-        });
-      }
-      if (executions.length > 0 && this.toolRuntime.supportsMultiStepToolLoop) {
-        final = await adapter.run({
+      // Bounded native tool loop. Each pass offers the tools; the model either
+      // requests calls (which we execute and replay as real tool messages) or
+      // answers in text (which ends the turn). With the loop disabled, this runs
+      // exactly one tool round followed by one tool-free summarization pass.
+      while (true) {
+        emit({ phase: "thinking" });
+        const response = await adapter.run({
           cwd,
-          prompt:
-            prompt +
-            "\n\n## Duet Tool Results\n" +
-            "These are trusted backend tool results. Explain them naturally. If a proposal was created, mention it briefly; do not output JSON blocks.\n" +
-            serializeToolExecutions(executions),
+          prompt,
           mode: "read-only",
           timeoutMs,
           maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
           shouldCancel,
+          tools,
+          priorSteps: priorSteps.length ? [...priorSteps] : undefined,
         });
-      } else {
-        final = first;
+        responses.push(response);
+        if (shouldCancel?.()) {
+          throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+        }
+        const requested = response.toolCalls ?? [];
+        if (requested.length === 0) {
+          // Model answered in text — the turn is complete.
+          result = response;
+          break;
+        }
+        const allowed = requested.slice(0, budgetRemaining);
+        const stepExecutions = await this.executeToolCalls(allowed, conversation, emit);
+        executions.push(...stepExecutions);
+        budgetRemaining -= allowed.length;
+        if (requested.length > allowed.length) {
+          executions.push({
+            name: "tool_runtime",
+            ok: false,
+            elapsedMs: 0,
+            result: {
+              code: "TOOL_CALL_LIMIT_EXCEEDED",
+              message: `Only ${this.toolRuntime.maxToolCallsPerTurn} tool calls are allowed per manager turn.`,
+            },
+          });
+        }
+        priorSteps.push({
+          assistantToolCalls: allowed,
+          assistantText: response.finalText || undefined,
+          results: allowed.map((call, index) => ({
+            toolCallId: call.id,
+            name: call.name,
+            resultJson: JSON.stringify(stepExecutions[index]?.result ?? {}),
+          })),
+        });
+        if (!this.toolRuntime.supportsMultiStepToolLoop) {
+          // Legacy single-step: run exactly one tool round, then stop. The
+          // response that carried the tool calls is the turn's result (its text,
+          // or a fallback summary of what the tools did).
+          result = response;
+          break;
+        }
+        if (budgetRemaining <= 0) {
+          // Loop enabled but the call budget is spent mid-loop: one final
+          // tool-free pass so the model writes a closing message over the
+          // results instead of being cut off after a bare tool call.
+          emit({ phase: "summarizing" });
+          const summary = await adapter.run({
+            cwd,
+            prompt,
+            mode: "read-only",
+            timeoutMs,
+            maxBudgetUsd: this.budget.openaiMaxUsdPerTurn,
+            shouldCancel,
+            priorSteps: [...priorSteps],
+          });
+          responses.push(summary);
+          result = summary;
+          break;
+        }
+        // Otherwise loop again with tools and the replayed steps.
       }
       if (shouldCancel?.()) {
         throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
       }
     } finally {
-      if (before && (first || final)) {
+      if (before && responses.length > 0) {
         const after = await fingerprintRepository(cwd);
         assertFingerprintUnchanged(before, after);
       }
     }
-    const result = final ?? first;
     if (!result) throw new DuetError("Provider returned no result.", "MANAGER_TURN_FAILED");
-    const usage = this.combineUsage(first, final);
+    const usage = this.combineUsage(responses);
     return this.store.transaction(() => {
       const turn = this.store.appendConversationTurn({
         conversationId: conversation.id,
         role: "manager",
         interfaceAgent: conversation.interfaceAgent,
         content:
-          result.finalText.trim() ||
+          stripMalformedProposalArtifacts(result.finalText.trim()) ||
           this.fallbackToolResponse(executions),
         providerSessionId: result.sessionId,
         usageJson: JSON.stringify({
@@ -450,10 +666,20 @@ export class ChatEngine {
             ok: execution.ok,
             elapsedMs: execution.elapsedMs,
           })),
+          toolTrace: storedToolTrace(executions),
         }),
         operationId,
       });
       for (const execution of executions) {
+        if (
+          execution.ok &&
+          execution.name === "check_git_repo" &&
+          typeof (execution.result as { path?: unknown }).path === "string" &&
+          (execution.result as { isGitRepo?: unknown }).isGitRepo === true
+        ) {
+          const repoPath = (execution.result as { path: string }).path;
+          this.addConfirmedRepoNote(conversation, turn, repoPath);
+        }
         if (!execution.proposal) continue;
         this.store.createProposal({
           id: randomUUID(),
@@ -468,51 +694,116 @@ export class ChatEngine {
           tier: execution.proposal.tier,
           expiresAt: execution.proposal.expiresAt,
         });
+        this.store.addManagerSharedContext({
+          runId: execution.proposal.runId ?? conversation.runId,
+          kind: "handoff",
+          provider: conversation.interfaceAgent,
+          conversationId: conversation.id,
+          turnId: turn.id,
+          content: `Created ${execution.proposal.action} suggestion card: ${execution.proposal.summary}`,
+          metadataJson: JSON.stringify({
+            action: execution.proposal.action,
+            runId: execution.proposal.runId,
+            taskId: execution.proposal.taskId,
+          }),
+          expiresAt: execution.proposal.expiresAt,
+        });
       }
       return turn;
+    });
+  }
+
+  private addConfirmedRepoNote(
+    conversation: ConversationRecord,
+    turn: ConversationTurnRecord,
+    repoPath: string,
+  ): void {
+    const metadata = { tool: "check_git_repo", path: repoPath };
+    this.store.addManagerSharedContext({
+      runId: conversation.runId,
+      kind: "note",
+      provider: conversation.interfaceAgent,
+      conversationId: conversation.id,
+      turnId: turn.id,
+      content: `Found git repository at ${repoPath}.`,
+      metadataJson: JSON.stringify(metadata),
+      expiresAt: daysFromNow(30),
     });
   }
 
   private async executeToolCalls(
     toolCalls: ManagerToolCall[],
     conversation: ConversationRecord,
+    emit?: (activity: Omit<ManagerActivity, "step">) => void,
   ): Promise<ManagerToolExecution[]> {
     const executions: ManagerToolExecution[] = [];
     for (const call of toolCalls) {
-      executions.push(
-        await executeManagerTool({
-          name: call.name,
-          argumentsJson: call.argumentsJson,
-          store: this.store,
-          conversation,
-          configAliases: this.configAliases,
-        }),
-      );
+      emit?.({
+        phase: "tool",
+        tool: call.name,
+        arguments: summarizeToolArguments(call.name, call.argumentsJson),
+      });
+      const execution = await executeManagerTool({
+        name: call.name,
+        argumentsJson: call.argumentsJson,
+        store: this.store,
+        conversation,
+        configAliases: this.configAliases,
+      });
+      executions.push({ ...execution, argumentsJson: call.argumentsJson });
+      // Post-completion frame: the actual result, live, with the same compact
+      // shape the completed turn persists in usageJson.toolTrace.
+      emit?.({
+        phase: "tool-result",
+        tool: execution.name,
+        ok: execution.ok,
+        elapsedMs: execution.elapsedMs,
+        arguments: summarizeToolArguments(call.name, call.argumentsJson),
+        result: summarizeToolResult(execution.name, execution.result),
+      });
     }
     return executions;
   }
 
-  private combineUsage(
-    first: AgentResult | undefined,
-    final: AgentResult | undefined,
-  ): AgentResult["usage"] {
-    if (!first) {
-      return final?.usage ?? { inputTokens: 0, outputTokens: 0, costKnown: false };
+  private combineUsage(responses: AgentResult[]): AgentResult["usage"] {
+    if (responses.length === 0) {
+      return { inputTokens: 0, outputTokens: 0, costKnown: false };
     }
-    if (!final || first === final) return first.usage;
+    if (responses.length === 1) return responses[0].usage;
+    let anyCostKnown = false;
+    let anyCostUsd = false;
+    const totals = responses.reduce(
+      (acc, response) => {
+        const usage = response.usage;
+        anyCostKnown ||= usage.costKnown === true;
+        anyCostUsd ||= usage.costUsd !== undefined;
+        return {
+          inputTokens: acc.inputTokens + (usage.inputTokens ?? 0),
+          cachedInputTokens: acc.cachedInputTokens + (usage.cachedInputTokens ?? 0),
+          outputTokens: acc.outputTokens + (usage.outputTokens ?? 0),
+          reasoningOutputTokens:
+            acc.reasoningOutputTokens + (usage.reasoningOutputTokens ?? 0),
+          costUsd: acc.costUsd + (usage.costUsd ?? 0),
+          // costKnown is true only if EVERY pass reported known cost.
+          costKnown: acc.costKnown && usage.costKnown === true,
+        };
+      },
+      {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        costUsd: 0,
+        costKnown: true,
+      },
+    );
     return {
-      inputTokens: (first.usage.inputTokens ?? 0) + (final.usage.inputTokens ?? 0),
-      cachedInputTokens:
-        (first.usage.cachedInputTokens ?? 0) + (final.usage.cachedInputTokens ?? 0),
-      outputTokens: (first.usage.outputTokens ?? 0) + (final.usage.outputTokens ?? 0),
-      reasoningOutputTokens:
-        (first.usage.reasoningOutputTokens ?? 0) +
-        (final.usage.reasoningOutputTokens ?? 0),
-      costKnown: first.usage.costKnown && final.usage.costKnown,
-      costUsd:
-        first.usage.costUsd !== undefined || final.usage.costUsd !== undefined
-          ? (first.usage.costUsd ?? 0) + (final.usage.costUsd ?? 0)
-          : undefined,
+      inputTokens: totals.inputTokens,
+      cachedInputTokens: totals.cachedInputTokens,
+      outputTokens: totals.outputTokens,
+      reasoningOutputTokens: totals.reasoningOutputTokens,
+      costKnown: anyCostKnown ? totals.costKnown : false,
+      costUsd: anyCostUsd ? totals.costUsd : undefined,
     };
   }
 
@@ -528,17 +819,135 @@ export class ChatEngine {
     }
   }
 
+  private fallbackSearchResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const root = asString(result.root);
+    const namePattern = asString(result.namePattern);
+    const contentPattern = asString(result.contentPattern);
+    const target = quoted(namePattern ?? contentPattern);
+    const matchCount = asNumber(result.matchCount) ?? 0;
+    const matched = result.matched === true;
+    const matches = Array.isArray(result.matches)
+      ? result.matches
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    const folderMatches = Array.isArray(result.folderMatches)
+      ? result.folderMatches
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    const bestFolderMatch = asRecord(result.bestFolderMatch);
+    const bestMatch = asRecord(result.bestMatch);
+    const strongestFolder = asString(bestFolderMatch?.path) ?? asString(folderMatches[0]?.path);
+    const strongestMatch = bestMatch && asString(bestMatch.path)
+      ? bestMatch
+      : matches.find((item) => asString(item.path));
+    const strongestMatchPath = asString(strongestMatch?.path);
+    const strongestType = strongestMatch?.type === "dir" ? "folder" : "file";
+    if (!matched && folderMatches.length === 0) {
+      if (target && root) return `I didn't find any matches for ${target} under ${root}.`;
+      if (target) return `I didn't find any matches for ${target}.`;
+      return "I didn't find a matching file or folder in the searched location.";
+    }
+    if (strongestFolder) {
+      if (matchCount <= 1) return `I found a matching folder at ${strongestFolder}.`;
+      return `I found ${matchCount} matching items. The strongest folder match is ${strongestFolder}.`;
+    }
+    if (strongestMatchPath) {
+      if (matchCount <= 1) return `I found a matching ${strongestType} at ${strongestMatchPath}.`;
+      return `I found ${matchCount} matching ${strongestType}s. The strongest match is ${strongestMatchPath}.`;
+    }
+    return "I searched and included the strongest matches below.";
+  }
+
+  private fallbackCheckGitRepoResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const repoPath = asString(result.path);
+    const exists = result.exists === true;
+    const isGitRepo = result.isGitRepo === true;
+    if (repoPath && isGitRepo) return `I confirmed ${repoPath} is a Git repository.`;
+    if (repoPath && !exists) return `I couldn't find ${repoPath}.`;
+    if (repoPath) return `${repoPath} exists, but it doesn't look like a Git repository.`;
+    return undefined;
+  }
+
+  private fallbackCheckPathResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const candidate = asString(result.path);
+    if (!candidate) return undefined;
+    if (result.exists !== true) return `I couldn't find ${candidate}.`;
+    if (result.isDirectory === true) return `I confirmed ${candidate} exists and is a folder.`;
+    if (result.isFile === true) return `I confirmed ${candidate} exists and is a file.`;
+    return `I confirmed ${candidate} exists.`;
+  }
+
+  private fallbackResolveAliasResponse(execution: ManagerToolExecution): string | undefined {
+    const result = asRecord(execution.result);
+    if (!result) return undefined;
+    const name = asString(result.name);
+    const repoPath = asString(result.repoPath);
+    if (name && repoPath) return `I resolved alias ${quoted(name)} to ${repoPath}.`;
+    if (name) return `I couldn't resolve alias ${quoted(name)}.`;
+    return undefined;
+  }
+
+  // Among successful search_files executions, pick the strongest evidence rather
+  // than the first attempt: a model often runs a broad/empty search before a
+  // narrower one that actually matches. Score by match strength; ties break to
+  // the later execution so the freshest strong result wins.
+  private strongestSearchExecution(
+    executions: ManagerToolExecution[],
+  ): ManagerToolExecution | undefined {
+    let best: { execution: ManagerToolExecution; score: number } | undefined;
+    for (const execution of executions) {
+      if (execution.name !== "search_files" || !execution.ok) continue;
+      const result = asRecord(execution.result);
+      const matchCount = asNumber(result?.matchCount) ?? 0;
+      const folderMatches = Array.isArray(result?.folderMatches)
+        ? result!.folderMatches.length
+        : 0;
+      const matched = result?.matched === true || matchCount > 0 || folderMatches > 0;
+      const score = matched ? Math.max(matchCount, folderMatches, 1) : 0;
+      // `>=` lets a later execution of equal strength supersede an earlier one.
+      if (!best || score >= best.score) best = { execution, score };
+    }
+    return best?.execution;
+  }
+
+  private fallbackToolSummary(executions: ManagerToolExecution[]): string | undefined {
+    const search = this.strongestSearchExecution(executions);
+    if (search) return this.fallbackSearchResponse(search);
+    const repo = executions.find((execution) => execution.name === "check_git_repo" && execution.ok);
+    if (repo) return this.fallbackCheckGitRepoResponse(repo);
+    const path = executions.find((execution) => execution.name === "check_path" && execution.ok);
+    if (path) return this.fallbackCheckPathResponse(path);
+    const alias = executions.find((execution) => execution.name === "resolve_alias" && execution.ok);
+    if (alias) return this.fallbackResolveAliasResponse(alias);
+    return undefined;
+  }
+
   private fallbackToolResponse(executions: ManagerToolExecution[]): string {
-    if (executions.length === 0) return "I checked the available Duet context.";
+    if (executions.length === 0) return "I looked into it.";
     const proposal = executions.find((execution) => execution.proposal);
     if (proposal?.proposal) {
       return `I created a ${proposal.proposal.action} suggestion card.`;
     }
+    // Lead with successful evidence. A later tool call may have failed (e.g. a
+    // malformed second search), but when the substantive read-only tools
+    // succeeded the answer must reflect that — and stay consistent with the
+    // trace, which hides a failed search when a successful one exists. Only
+    // report a failure when nothing substantive succeeded.
+    const synthesized = this.fallbackToolSummary(executions);
+    if (synthesized) return synthesized;
     const failed = executions.find((execution) => !execution.ok);
     if (failed) {
       return `I tried to use ${failed.name}, but it failed.`;
     }
-    return "I checked the requested Duet context.";
+    return "I looked into it and included the tool results below.";
   }
 
 }

@@ -26,6 +26,7 @@ export const dashboardHtml = `<!doctype html>
         <button class="aside-rail-btn" data-section="artifacts" title="Artifacts">&#9671;</button>
         <button class="aside-rail-btn" data-section="conflicts" title="Conflicts">&#9651;</button>
         <button class="aside-rail-btn" data-section="diff" title="Diff">&#177;</button>
+        <button class="aside-rail-btn" data-section="memory" title="Manager memory">&#128214;</button>
       </div>
       <div class="aside-inner">
         <div id="summary"><p class="muted aside-hint">Select a run.</p></div>
@@ -62,6 +63,10 @@ export const dashboardHtml = `<!doctype html>
           <div class="aside-sec-head"><h2>Diff</h2></div>
           <pre id="diff"></pre>
         </div>
+        <div class="aside-section" id="aside-sec-memory">
+          <div class="aside-sec-head"><h2>Manager Memory</h2></div>
+          <div id="manager-memory"></div>
+        </div>
       </div>
     </aside>
     <section>
@@ -72,12 +77,7 @@ export const dashboardHtml = `<!doctype html>
             <div class="chat-title"><b>Manager</b><span id="chat-conn" class="conn" title="Live updates">connecting</span></div>
           </div>
           <div class="chat-tools">
-            <div class="chat-agents" role="group" aria-label="Manager voice">
-              <button id="chat-codex" type="button" data-agent="codex">Codex</button>
-              <button id="chat-claude" type="button" data-agent="claude">Claude</button>
-              <button id="chat-groq" type="button" data-agent="groq">Groq</button>
-              <button id="chat-gemini" type="button" data-agent="gemini">Gemini</button>
-            </div>
+            <div id="manager-voices" class="chat-agents" role="group" aria-label="Manager voice"></div>
             <button id="chat-clear" type="button" class="chat-clear" title="Start a fresh manager thread for the current run and voice">Clear context</button>
           </div>
         </div>
@@ -85,7 +85,7 @@ export const dashboardHtml = `<!doctype html>
         <div id="chat-turns" class="chat-turns" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
           <textarea id="chat-input" rows="1" maxlength="20000" placeholder="Ask the Manager&#x2026; (Enter sends, Shift+Enter for newline)" disabled></textarea>
-          <button id="chat-send" type="submit" disabled aria-label="Send">
+          <button id="chat-send" type="button" disabled aria-label="Send" title="Send">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
         </form>
@@ -241,17 +241,27 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .conn-bad{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
 .conn-muted{color:var(--muted);border-color:var(--line);background:var(--hover)}
 .error-banner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c53030;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;max-width:480px;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.25)}
-.chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.chat-head{display:flex;align-items:center;justify-content:space-between;gap:14px}
 #chat-status{display:none}
 .chat-head p{margin:3px 0 0}
-.chat-tools{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0}
+.chat-tools{display:flex;flex-direction:row;align-items:center;gap:10px;flex-shrink:0}
 .chat-clear{width:auto;margin:0;padding:4px 12px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--muted);font-size:12px;font-weight:500;text-align:center}
 .chat-clear:hover:not(:disabled){background:var(--line);color:var(--text);border-color:var(--line-2)}
-/* ── provider segmented toggle ── */
-.chat-agents{display:inline-flex;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px;flex-shrink:0}
-.chat-agents button{width:auto;margin:0;padding:4px 13px;border-radius:999px;border:1px solid transparent;background:transparent;font-size:12px;font-weight:500;color:var(--muted);text-align:center;transition:background .12s,color .12s,border-color .12s}
-.chat-agents button:hover:not(:disabled){background:var(--line);color:var(--text);border-color:transparent}
-.chat-agents button.active{background:var(--accent);color:#fff;border-color:transparent}
+/* ── provider ribbon ── */
+.chat-agents{position:relative;display:inline-flex;align-items:flex-end;flex-direction:column;gap:6px;flex-shrink:0}
+.chat-agents button{width:auto;margin:0;border-radius:999px;font-size:12px;font-weight:600;text-align:center;transition:background .12s,color .12s,border-color .12s,box-shadow .12s}
+.provider-current{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid var(--acc-bd);background:var(--acc-bg);color:var(--accent)}
+.provider-current:hover{border-color:var(--accent);box-shadow:0 0 0 3px var(--acc-bg)}
+.provider-current-label{color:var(--text)}
+.provider-chevron{font-size:10px;color:var(--muted)}
+.provider-menu{position:absolute;top:calc(100% + 6px);right:0;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;max-width:min(520px,calc(100vw - 36px));padding:5px;border:1px solid var(--line);background:var(--surface-2);border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.16);z-index:20}
+.provider-choice{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid transparent;background:transparent;color:var(--muted)}
+.provider-choice:hover:not(:disabled){background:var(--line);color:var(--text)}
+.provider-choice.active{background:var(--accent);color:#fff}
+.provider-choice.unavailable{opacity:.62;border-color:var(--line)}
+.provider-latency{font-size:9px;text-transform:uppercase;letter-spacing:.04em;border:1px solid var(--line-2);border-radius:999px;padding:1px 5px;color:var(--muted);background:var(--surface)}
+.provider-latency.fast{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}
+.provider-latency.slow{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}
 /* ── bubble turn list ── */
 .chat-turns{display:flex;flex-direction:column;gap:8px;flex:1;overflow-y:auto;padding:4px 2px;min-height:60px}
 .chat-turn{max-width:88%}
@@ -274,6 +284,21 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .chat-turn .body hr{border:none;border-top:1px solid var(--line);margin:10px 0}
 .chat-turn .body strong{font-weight:600;color:var(--text)}
 .chat-turn .body em{font-style:italic;color:var(--muted)}
+.tool-trace{display:flex;flex-direction:column;gap:5px;margin:6px 0 4px}
+.tool-trace-row{border:1px solid var(--line);background:var(--surface-2);border-radius:8px;padding:6px 8px;color:var(--muted);font-size:11px;line-height:1.45}
+.tool-trace-row b{color:var(--text)}
+.tool-trace-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.tool-trace-status{display:inline-flex;align-items:center;border-radius:999px;border:1px solid var(--line);padding:1px 6px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:#eef2ff;color:#3550b8}
+.tool-trace-status.ok{background:#edf8f1;color:#1c7f4a}
+.tool-trace-status.info{background:#eef2ff;color:#3550b8}
+.tool-trace-status.warn{background:#fff6e7;color:#9a5b00}
+.tool-trace-status.fail{background:#fff0f0;color:#b42318}
+.tool-trace-meta{color:var(--muted)}
+.tool-trace-note{margin-top:4px}
+.tool-trace-details{margin-top:5px}
+.tool-trace-details summary{cursor:pointer;color:var(--accent);font-size:11px;user-select:none}
+.tool-trace-details[open] summary{margin-bottom:4px}
+.tool-trace-row .tool-path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text)}
 .turn-copy-row{display:flex;justify-content:flex-end;margin-top:4px}.chat-turn.user .turn-copy-row{justify-content:flex-end}.chat-turn.manager .turn-copy-row{justify-content:flex-start}
 .turn-copy-btn{background:none;border:none;padding:3px 5px;border-radius:5px;cursor:pointer;color:var(--faint);display:flex;align-items:center;gap:4px;font-size:11px;transition:color .12s,background .12s;width:auto;margin:0}
 .turn-copy-btn:hover{color:var(--accent);background:var(--acc-bg)}
@@ -300,16 +325,31 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .proposal-confirm{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:8px}
 .proposal-confirm input{color:var(--text);background:var(--surface-2);border:1px solid var(--line-2);border-radius:7px;padding:7px 9px;font:inherit}
 .proposal-confirm button{width:auto;margin:0;padding:7px 10px;text-align:center}
-/* ── proposal history ── */
-.proposal-history{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
-.proposal-history summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px}.proposal-history summary::before{content:"\\25B8";font-size:10px;transition:transform .15s}.proposal-history[open] summary::before{transform:rotate(90deg)}
-.proposal-history summary::-webkit-details-marker{display:none}
-.proposal-history-item{display:flex;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--line);font-size:12px}
-.proposal-history-item:last-child{border-bottom:none}
-.proposal-history-item .phi-action{font-weight:600}
-.proposal-history-item .phi-op{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 .run-progress-state{align-self:flex-start;max-width:560px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:14px 16px;margin:12px 2px}
 .run-progress-title{font-weight:650;font-size:15px;margin-bottom:5px}
+.plan-dismiss{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;float:right;border:1px solid var(--line);border-radius:999px;background:var(--surface-2);color:var(--muted,#888);cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:8px}
+.plan-dismiss:hover{color:var(--text,#eee);background:var(--line)}
+.chat-turn.working{opacity:.85}
+.activity-stack{display:flex;flex-direction:column;gap:4px}
+.activity-current{color:var(--text);font-size:12px}
+.activity-secondary{color:var(--muted);font-size:11px}
+.activity-trail{display:flex;flex-wrap:wrap;gap:6px}
+.activity-chip{display:inline-flex;align-items:center;border-radius:999px;border:1px solid var(--line-2);padding:2px 7px;font-size:10px;color:var(--muted);background:var(--surface-2)}
+.chat-turn.soft .body{color:var(--text,#ddd)}
+.note.soft{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#999);background:var(--surface-2,#222);border:1px solid var(--line,#333);border-radius:6px;padding:1px 6px;margin-bottom:6px}
+.provider-advice{margin-top:8px;font-size:12px;color:var(--muted)}
+.memory-summary{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.memory-pill{border:1px solid var(--line-2);border-radius:999px;padding:3px 8px;background:var(--surface-2);font-size:11px;color:var(--muted)}
+.memory-pill.provider_health{border-color:var(--warn);color:var(--text)}
+.memory-item{border:1px solid var(--line);border-radius:9px;background:var(--surface);padding:8px 9px;margin-bottom:7px;font-size:12px;color:var(--muted)}
+.memory-item b{color:var(--text)}
+.memory-item.provider_health{border-color:var(--warn-bd);background:var(--warn-bg)}
+.memory-time{display:block;color:var(--faint);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px}
+.working-dots{display:inline-flex;gap:4px;align-items:center;height:14px}
+.working-dots span{width:6px;height:6px;border-radius:50%;background:var(--muted,#888);display:inline-block;animation:working-bounce 1.2s infinite ease-in-out both}
+.working-dots span:nth-child(2){animation-delay:.16s}
+.working-dots span:nth-child(3){animation-delay:.32s}
+@keyframes working-bounce{0%,80%,100%{transform:scale(.5);opacity:.4}40%{transform:scale(1);opacity:1}}
 .chat-form{display:grid;grid-template-columns:1fr 96px;gap:8px;align-items:stretch}
 .chat-form textarea{resize:vertical;min-height:74px;color:var(--text);background:#0e1217;border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;font:inherit}
 .chat-form textarea:focus{outline:none;border-color:var(--accent)}
@@ -328,8 +368,6 @@ pre{white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--line
 .approval-task-list{margin:4px 0 0 18px;padding:0;font-size:12px}
 .approval-hash-label{font-size:12px;margin-top:4px}
 code.inline-code{display:inline;padding:2px 5px}
-.phi-op.ok{color:var(--ok)}
-.phi-op.bad{color:var(--bad)}
 /* ── pill chat input ── */
 .chat-form{display:flex;align-items:flex-end;gap:8px;background:var(--surface-2);border:1px solid var(--line-2);border-radius:24px;padding:6px 6px 6px 14px;transition:border-color .15s}
 .chat-form:focus-within{border-color:var(--accent)}
@@ -339,6 +377,8 @@ code.inline-code{display:inline;padding:2px 5px}
 #chat-send:disabled{opacity:.4;cursor:not-allowed}
 #chat-send:not(:disabled):hover{opacity:.82}
 #chat-send svg{pointer-events:none}
+#chat-send.stop-mode{background:var(--text)}
+#chat-send.stop-mode svg{width:14px;height:14px}
 /* ── responsive: phone (bottom tab bar + section drawer, chat as home) ── */
 @media(max-width:760px){
   header{padding:10px 14px}
@@ -364,8 +404,8 @@ code.inline-code{display:inline;padding:2px 5px}
   .chat-head>div:first-child{display:none}
   #chat-status{display:none}
   .chat-tools{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;width:100%}
-  .chat-agents{flex:1;justify-content:space-between}
-  .chat-agents button{flex:1}
+  .chat-agents{flex:1;align-items:flex-start}
+  .provider-menu{justify-content:flex-start;width:100%}
   .chat-clear{width:auto;flex-shrink:0}
   .chat-turn{max-width:92%}
   .chat-turn.manager{max-width:100%;padding:4px 14px}
@@ -390,11 +430,23 @@ const chat = {
   agent: DEFAULT_MANAGER_PROVIDER,
   conversations: new Map(),
   activeOperation: null,
+  activityRetained: false,
+  activityDisplayUntil: 0,
+  lastShownToolStep: 0,
   polling: null,
   pendingTurn: null,
   planOperations: new Map(),
-  statusError: null
+  activeActivity: null,
+  activeActivityRaw: null,
+  activityHideTimer: null,
+  statusError: null,
+  sharedContext: []
 };
+let managerProviderMenuOpen = false;
+let managerProviders = [
+  { id: "codex", label: "Codex", available: true, latency: "slow" },
+  { id: "claude", label: "Claude", available: true, latency: "slow" }
+];
 let eventStream = null;
 let eventRunId = null;
 let eventCursor = 0;
@@ -470,6 +522,7 @@ function reauth() {
   return reauthInFlight;
 }
 function esc(value){const d=document.createElement("div");d.textContent=String(value??"");return d.innerHTML.replaceAll('"',"&quot;").replaceAll("'","&#39;")}
+function titleCase(value){const s=String(value||"");return s.charAt(0).toUpperCase()+s.slice(1)}
 function statusClass(value){const s=String(value??"").toLowerCase();
   if(s.includes("conflict")||s.includes("blocked")||s.includes("attention"))return"s-conflict";
   if(s.includes("fail"))return"s-failed";
@@ -515,8 +568,15 @@ async function authenticate() {
 async function loadRuns(options = {}) {
   const runs=await api("/runs");
   const deletable = new Set(["failed","cancelled","merged","cleaned_up"]);
+  // Pending runs (a plan was created but execution never started, so there are
+  // no worktrees) can be closed in one click: the backend cancels + deletes.
+  const discardable = new Set(["awaiting_plan_approval","approved"]);
   q("runs").innerHTML=runs.map(r=>{
-    const del=deletable.has(r.status)?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>':"";
+    const del=deletable.has(r.status)
+      ?'<button class="run-delete-btn" data-delete-run="'+esc(r.id)+'" title="Delete run" aria-label="Delete">&#10005;</button>'
+      :discardable.has(r.status)
+        ?'<button class="run-delete-btn" data-discard-run="'+esc(r.id)+'" title="Close run (cancel and remove)" aria-label="Close run">&#10005;</button>'
+        :"";
     return '<div class="run-row"><button data-id="'+esc(r.id)+'" class="run-btn'+(r.id===selected?" sel":"")+'"><span class="run-goal">'+esc(r.goal)+'</span><span class="run-meta">'+badge(r.status)+'<span class="run-id">'+esc(r.id.slice(0,8))+'</span></span></button>'+del+'</div>';
   }).join("")||'<span class="empty">No runs yet.</span>';
   q("runs").querySelectorAll(".run-btn").forEach(b=>b.onclick=()=>selectRun(b.dataset.id));
@@ -526,6 +586,15 @@ async function loadRuns(options = {}) {
     try{
       await api("/runs/"+encodeURIComponent(b.dataset.deleteRun),{method:"DELETE"});
       if(selected===b.dataset.deleteRun){selected=null;}
+      await loadRuns();
+    }catch(err){showError(err.message);}
+  });
+  q("runs").querySelectorAll("[data-discard-run]").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    if(!confirm("Close this run? It will be cancelled and removed. This cannot be undone."))return;
+    try{
+      await api("/runs/"+encodeURIComponent(b.dataset.discardRun)+"/discard",{method:"POST",idempotencyKey:requestKey("dashboard-discard-run"),body:{}});
+      if(selected===b.dataset.discardRun){selected=null;}
       await loadRuns();
     }catch(err){showError(err.message);}
   });
@@ -603,6 +672,128 @@ function renderPendingTurn() {
     +'<div class="body">'+visibleText(pending.content, 4000)+'</div>'
     +'</div></div>';
 }
+function managerActivityLabel(activity) {
+  if (!activity) return "Working…";
+  if (activity.phase === "tool" || activity.phase === "tool-result") {
+    const map = {
+      list_runs: "Reviewing runs", inspect_run: "Inspecting a run",
+      check_path: "Checking a path", check_git_repo: "Checking the git repo",
+      resolve_alias: "Resolving an alias", search_files: "Searching files",
+      create_plan_proposal: "Preparing a plan suggestion",
+      set_strategy_proposal: "Preparing a strategy suggestion",
+      set_alias_proposal: "Preparing an alias suggestion",
+      request_agent_consultation: "Preparing a consultation"
+    };
+    const base = map[activity.tool] || ("Using " + activity.tool);
+    const args = compactToolArgs(activity.arguments);
+    // A "tool-result" frame is the completed call, so no trailing ellipsis.
+    return base + args + (activity.phase === "tool" ? "…" : "");
+  }
+  if (activity.phase === "summarizing") return "Writing the answer…";
+  return "Thinking…";
+}
+function renderActivityTrail(activity) {
+  const history = Array.isArray(activity?.history) ? activity.history : [];
+  const tools = history
+    .filter(item => item && item.phase === "tool" && item.tool)
+    .filter((item, index, list) => index === 0 || list[index - 1].tool !== item.tool);
+  if (tools.length <= 1) return "";
+  const priorTools = tools.slice(0, -1).slice(-3);
+  if (!priorTools.length) return "";
+  const chips = priorTools
+    .map(item => '<span class="activity-chip">'+esc(managerActivityLabel(item).replace(/Ã¢â‚¬Â¦|â€¦/g, ""))+'</span>')
+    .join("");
+  return '<div class="activity-trail">' + chips + '</div>';
+}
+function activeOperationMatchesCurrentView() {
+  const op = chat.activeOperation;
+  if (!op) return false;
+  const cid = currentConversationId();
+  return Boolean(cid && op.conversationId === cid);
+}
+function renderManagerWorking() {
+  if (!activeOperationMatchesCurrentView()) return "";
+  const rawActivity = chat.activeActivityRaw || chat.activeActivity;
+  const latestTool = latestToolActivity(rawActivity);
+  const primaryActivity = latestTool || chat.activeActivity;
+  const label = managerActivityLabel(primaryActivity);
+  // When the latest frame is a completed tool call, show its result live (the
+  // actual call/result timeline, not just a "working" hint).
+  const resultLine =
+    primaryActivity && primaryActivity.phase === "tool-result"
+      ? (function () {
+          const status = toolTraceStatus(primaryActivity);
+          const summary = compactToolResultSummary(primaryActivity);
+          return '<span class="activity-secondary"><span class="tool-trace-status '+esc(status.tone)+'">'+esc(status.label)+'</span>'+(summary ? ' '+summary : '')+'</span>';
+        })()
+      : "";
+  const secondary =
+    rawActivity &&
+    latestTool &&
+    rawActivity.phase === "summarizing"
+      ? '<span class="activity-secondary">'+esc(managerActivityLabel(rawActivity))+'</span>'
+      : "";
+  const trail = renderActivityTrail(rawActivity);
+  return '<div class="chat-turn manager working" id="manager-working"><div class="manager-avatar"></div>'
+    +'<div class="turn-content"><div class="meta"><b>Manager: '+esc(chat.agent)+'</b>'+badge("working")
+    +'<span class="when">live</span></div>'
+    +'<div class="body"><span class="working-dots"><span></span><span></span><span></span></span><span class="activity-stack"><span class="activity-current">'+esc(label)+'</span>'+resultLine+secondary+trail+'</span></div></div></div>';
+}
+function updateManagerWorking() {
+  const host = q("chat-turns");
+  if (!host) return;
+  const existing = document.getElementById("manager-working");
+  const html = renderManagerWorking();
+  if (!html) { if (existing) existing.remove(); return; }
+  if (existing) { existing.outerHTML = html; }
+  else { host.insertAdjacentHTML("beforeend", html); host.scrollTop = host.scrollHeight; }
+}
+function isToolActivity(item) {
+  return Boolean(item && (item.phase === "tool" || item.phase === "tool-result") && item.tool);
+}
+function latestToolActivity(activity) {
+  const history = Array.isArray(activity?.history) ? activity.history : [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (isToolActivity(history[i])) return history[i];
+  }
+  return isToolActivity(activity) ? activity : null;
+}
+function chooseVisibleActivity(activity) {
+  if (!activity) return null;
+  const now = Date.now();
+  const latestTool = latestToolActivity(activity);
+  if (latestTool && Number(latestTool.step) > Number(chat.lastShownToolStep || 0)) {
+    chat.lastShownToolStep = Number(latestTool.step);
+    chat.activityDisplayUntil = now + 900;
+    return latestTool;
+  }
+  if (now < Number(chat.activityDisplayUntil || 0) && latestTool) {
+    return latestTool;
+  }
+  return activity;
+}
+function clearWorkingBubbleNow() {
+  if (chat.activityHideTimer) {
+    clearTimeout(chat.activityHideTimer);
+    chat.activityHideTimer = null;
+  }
+  chat.activityRetained = false;
+  chat.activityDisplayUntil = 0;
+  chat.lastShownToolStep = 0;
+  chat.activeActivity = null;
+  chat.activeActivityRaw = null;
+  if (chat.activeOperation) chat.activeOperation = null;
+  const working = document.getElementById("manager-working");
+  if (working) working.remove();
+}
+function scheduleWorkingBubbleClear(delayMs = 900) {
+  if (chat.activityHideTimer) clearTimeout(chat.activityHideTimer);
+  chat.activityRetained = true;
+  chat.activityHideTimer = setTimeout(() => {
+    chat.activityHideTimer = null;
+    clearWorkingBubbleNow();
+  }, delayMs);
+}
 function renderRunProgressEmptyState() {
   if (!selected || !selectedRunDetail) return "";
   const status = String(selectedRunDetail.status || "");
@@ -617,6 +808,75 @@ function renderRunProgressEmptyState() {
 }
 function currentConversationId() {
   return currentConversation()?.id || null;
+}
+function renderSharedContext(items) {
+  const host = q("manager-memory");
+  if (!host) return;
+  const visible = (items || []).slice(0, 8);
+  if (!visible.length) {
+    host.innerHTML = '<span class="empty">No shared manager notes yet.</span>';
+    return;
+  }
+  const counts = visible.reduce((acc, item) => {
+    const kind = item.kind || "note";
+    acc[kind] = (acc[kind] || 0) + 1;
+    return acc;
+  }, {});
+  host.innerHTML = '<div class="memory-summary">'
+    + Object.keys(counts).map(kind => '<span class="memory-pill '+esc(kind)+'">'+esc(kind.replaceAll("_", " "))+' '+esc(counts[kind])+'</span>').join("")
+    + '</div>'
+    + visible.map(item => {
+      const when = item.createdAt ? new Date(item.createdAt) : null;
+      const ts = when && !isNaN(when.getTime()) ? '<span class="memory-time">'+esc(when.toLocaleString())+'</span>' : "";
+      return '<div class="memory-item '+esc(item.kind || "note")+'">'
+        + '<b>'+esc((item.provider || "shared") + " · " + (item.kind || "note").replaceAll("_", " "))+'</b>'
+        + '<div>'+visibleText(item.content || "", 500)+'</div>'
+        + ts
+        + '</div>';
+    }).join("");
+}
+function managerProviderById(id) {
+  return managerProviders.find((provider) => provider.id === id) || null;
+}
+function firstAvailableManagerProvider() {
+  return managerProviders.find((provider) => provider.available) || null;
+}
+function normalizeSelectedManagerProvider() {
+  const current = managerProviderById(chat.agent);
+  if (current?.available) return;
+  const fallback = firstAvailableManagerProvider();
+  if (fallback) chat.agent = fallback.id;
+}
+function renderManagerProviders() {
+  const host = q("manager-voices");
+  if (!host) return;
+  const current = managerProviders.find((provider) => provider.id === chat.agent)
+    || { id: chat.agent, label: chat.agent, available: true, latency: "balanced" };
+  const choices = managerProviderMenuOpen
+    ? managerProviders.filter((provider) => provider.id !== current.id)
+    : [];
+  const latencyLabel = current.latency ? '<span class="provider-latency '+esc(current.latency)+'">'+esc(current.latency)+'</span>' : "";
+  host.classList.toggle("open", managerProviderMenuOpen);
+  host.innerHTML =
+    '<button id="chat-provider-current" class="provider-current" type="button" data-provider-menu-toggle="1" aria-expanded="'+(managerProviderMenuOpen ? "true" : "false")+'" title="Choose manager provider">'
+      +'<span class="provider-current-label">'+esc(current.label)+'</span>'
+      +latencyLabel
+      +'<span class="provider-chevron">'+(managerProviderMenuOpen ? "▲" : "▼")+'</span>'
+    +'</button>'
+    +'<div class="provider-menu" '+(managerProviderMenuOpen && choices.length ? "" : "hidden")+'>'
+    +choices.map((provider) =>
+      '<button id="chat-'+esc(provider.id)+'" class="provider-choice'+(provider.available ? "" : " unavailable")+'" type="button" data-agent="'+esc(provider.id)+'" title="'+esc(provider.available ? provider.label : provider.label+" is not configured")+'">'
+        +'<span>'+esc(provider.label)+(provider.available ? "" : " *")+'</span>'
+        +(provider.latency ? '<span class="provider-latency '+esc(provider.latency)+'">'+esc(provider.latency)+'</span>' : "")
+      +'</button>'
+    ).join("")
+    +'</div>';
+  updateAgentButtons();
+}
+function updateAgentButtons() {
+  for (const button of document.querySelectorAll("[data-agent]")) {
+    button.classList.toggle("active", button.dataset.agent === chat.agent);
+  }
 }
 function renderPlanOperationNotices() {
   const conversationId = currentConversationId();
@@ -641,8 +901,15 @@ function renderPlanOperationNotices() {
       ? '<div class="proposal-actions"><button type="button" data-plan-open="'+esc(item.runId)+'">Open run</button><button type="button" data-plan-show="'+esc(item.operationId)+'" data-run-id="'+esc(item.runId)+'">Show plan here</button></div>'
       : "";
     const plan = item.planHtml ? '<div class="proposal-copy">Plan</div>'+item.planHtml : "";
+    // Terminal notices (failed/succeeded/stopped) can be cleared by the operator;
+    // a running planner has no X so it is not dismissed mid-flight.
+    const isTerminal = item.status === "failed" || item.status === "succeeded"
+      || item.status === "cancelled" || item.status === "interrupted";
+    const dismissX = isTerminal
+      ? '<button type="button" class="plan-dismiss" title="Dismiss" aria-label="Dismiss" data-plan-dismiss="'+esc(item.operationId)+'">&#x2715;</button>'
+      : "";
     return '<div class="run-progress-state" data-plan-operation="'+esc(item.operationId)+'">'
-      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+'</div>'
+      +'<div class="run-progress-title">'+esc(title)+' '+badge(item.status || "running")+dismissX+'</div>'
       +'<div class="kv">'+body+'</div>'
       +(item.runId ? '<div class="kv">run <b>'+esc(item.runId)+'</b></div>' : "")
       +actions
@@ -670,10 +937,11 @@ function isCurrentConversation(conversation) {
   );
 }
 function chatIsBusyForCurrentView() {
-  return Boolean(chat.activeOperation || chat.pendingTurn);
+  return Boolean((chat.activeOperation && !chat.activityRetained) || chat.pendingTurn);
 }
 async function loadChat() {
   clearTimeout(chat.polling);
+  normalizeSelectedManagerProvider();
   renderChatShell();
   q("chat-turns").innerHTML = '<span class="empty">Loading '+esc(chat.agent)+' manager conversation&#x2026;</span>';
   setChatEnabled(false);
@@ -686,6 +954,17 @@ async function loadChat() {
     }
     const conversation = currentConversation();
     if (!conversation) {
+      // No conversation yet, but provider-health/cooldown notes still matter —
+      // this is exactly when the operator needs to know a provider is rate
+      // limited or misconfigured. Fetch shared context independently.
+      try {
+        const params = selected ? "?runId="+encodeURIComponent(selected) : "";
+        const data = await api("/chat/shared-context"+params);
+        chat.sharedContext = data.sharedContext || [];
+      } catch {
+        chat.sharedContext = [];
+      }
+      renderSharedContext(chat.sharedContext);
       const scope = selected ? esc(chat.agent)+" manager" : "global";
       q("chat-turns").innerHTML=(renderPendingTurn() || renderRunProgressEmptyState() || '<span class="empty">No '+scope+' conversation yet. Send a message to start one.</span>');
       setChatEnabled(!chatIsBusyForCurrentView());
@@ -693,6 +972,7 @@ async function loadChat() {
     }
     await refreshConversation(conversation.id);
   } catch(error) {
+    q("chat-turns").innerHTML = '<span class="empty">Could not load '+esc(chat.agent)+' manager conversation: '+esc(error.message)+'</span>';
     showError(error.message);
     setChatEnabled(!chatIsBusyForCurrentView());
   }
@@ -745,34 +1025,89 @@ async function refreshConversation(conversationId) {
   const data = await api("/chat/conversations/"+encodeURIComponent(conversationId));
   rememberConversation(data.conversation);
   if (!isCurrentConversation(data.conversation)) return data;
+  chat.sharedContext = data.sharedContext || [];
+  renderSharedContext(chat.sharedContext);
   renderTurns(data.turns, data.proposals || [], data.proposalHistory || []);
   const failed = [...data.turns].reverse().find(turn => turn.role === "manager" && turn.status === "failed");
-  const failure = failedTurnMessage(failed);
-  if (failure) setChatStatus(failure, true);
+  const failure = failedTurnStatus(failed);
+  if (failure) {
+    chat.statusError = {
+      conversationId: data.conversation.id,
+      message: failure.message,
+      soft: failure.soft,
+    };
+    setChatStatus(failure.message, !failure.soft);
+  }
   else if (chat.statusError && chat.statusError.conversationId === data.conversation.id) {
-    setChatStatus(chat.statusError.message, true);
+    setChatStatus(chat.statusError.message, !chat.statusError.soft);
   }
   else setChatStatus("Ready. Manager voice: "+data.conversation.interfaceAgent+".");
   setChatEnabled(!chatIsBusyForCurrentView());
   return data;
 }
 function renderChatShell() {
-  q("chat-codex").classList.toggle("active", chat.agent === "codex");
-  q("chat-claude").classList.toggle("active", chat.agent === "claude");
-  const groqBtn = q("chat-groq");
-  if (groqBtn) groqBtn.classList.toggle("active", chat.agent === "groq");
-  const geminiBtn = q("chat-gemini");
-  if (geminiBtn) geminiBtn.classList.toggle("active", chat.agent === "gemini");
+  renderManagerProviders();
   setChatEnabled(!chatIsBusyForCurrentView());
 }
+function composerSendIcon() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+}
+function composerStopIcon() {
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+}
+function updateComposerAction() {
+  const button = q("chat-send");
+  const input = q("chat-input");
+  const busy = chatIsBusyForCurrentView();
+  const cancellable = Boolean(chat.activeOperation);
+  button.classList.toggle("stop-mode", busy);
+  button.setAttribute("aria-label", busy ? "Stop" : "Send");
+  button.title = busy ? "Stop active work" : "Send";
+  button.innerHTML = busy ? composerStopIcon() : composerSendIcon();
+  button.disabled = busy ? !cancellable : input.disabled;
+}
 function setChatStatus(message, bad=false) {
+  const cid = currentConversationId();
+  if (
+    /^Ready\./.test(String(message)) &&
+    chat.statusError &&
+    chat.statusError.conversationId === cid
+  ) {
+    message = chat.statusError.message;
+    bad = !chat.statusError.soft;
+  }
   q("chat-status").className = bad ? "bad" : "muted";
   q("chat-status").textContent = message;
 }
 function setChatEnabled(enabled) {
   q("chat-input").disabled = !enabled;
-  q("chat-send").disabled = !enabled;
   q("chat-clear").disabled = !enabled;
+  updateComposerAction();
+}
+async function stopActiveWork() {
+  // The composer Stop button is scoped to the current manager turn — it cancels
+  // only that operation, never background runs. (Global stop lives elsewhere.)
+  const op = chat.activeOperation;
+  if (!op) {
+    setChatStatus("Nothing is running right now.");
+    setChatEnabled(!chatIsBusyForCurrentView());
+    return;
+  }
+  const result = await api("/operations/"+encodeURIComponent(op.id)+"/cancel", {
+    method: "POST",
+    idempotencyKey: requestKey("dashboard-cancel-operation"),
+    body: {}
+  });
+  if (result.cancellationRequested) {
+    setChatStatus("Stop requested. The manager turn is being cancelled.");
+    chat.pendingTurn = null;
+    setChatEnabled(false);
+  } else {
+    setChatStatus("Nothing is running right now.");
+    setChatEnabled(!chatIsBusyForCurrentView());
+  }
+  const conv = currentConversation();
+  if (conv) refreshConversation(conv.id).catch(() => {});
 }
 function showError(message) {
   let banner = document.getElementById("error-banner");
@@ -831,9 +1166,114 @@ function renderMarkdown(text) {
   flushList();
   return html;
 }
+function parseUsageJson(turn) {
+  if (!turn || !turn.usageJson) return null;
+  try { return JSON.parse(turn.usageJson); }
+  catch { return null; }
+}
+function compactToolArgs(args) {
+  if (!args || typeof args !== "object") return "";
+  const bits = [];
+  if (args.namePattern) bits.push('name "'+String(args.namePattern)+'"');
+  if (args.kind) bits.push("kind "+String(args.kind));
+  if (args.path) bits.push("path "+String(args.path));
+  if (args.contentPattern) bits.push(String(args.contentPattern));
+  return bits.length ? " ("+bits.map(esc).join(", ")+")" : "";
+}
+function toolTraceName(trace) {
+  return String(trace?.name || trace?.tool || "tool");
+}
+function toolTraceArguments(trace) {
+  return trace?.arguments || trace?.args || null;
+}
+function toolTraceStatus(trace) {
+  const result = trace && trace.result;
+  if (trace?.ok === false) {
+    const code = typeof result?.code === "string" ? result.code : "";
+    return { label: code ? code.replaceAll("_", " ").toLowerCase() : "failed", tone: "fail" };
+  }
+  if (toolTraceName(trace) === "search_files") {
+    const count = Number(result?.matchCount);
+    if (Number.isFinite(count)) {
+      if (count === 0) return { label: "0 matches", tone: "warn" };
+      if (count === 1) return { label: "1 match", tone: "ok" };
+      return { label: count + " matches", tone: "ok" };
+    }
+  }
+  if (typeof result?.code === "string" && result.code !== "OK") {
+    return { label: result.code.replaceAll("_", " ").toLowerCase(), tone: "info" };
+  }
+  return { label: "ok", tone: "ok" };
+}
+function compactToolResultSummary(trace) {
+  const result = trace && trace.result;
+  if (!result || typeof result !== "object") return "";
+  if (toolTraceName(trace) === "search_files") {
+    const count = Number.isFinite(Number(result.matchCount)) ? Number(result.matchCount) : 0;
+    const scanned = Number.isFinite(Number(result.entriesScanned)) ? " scanned "+Number(result.entriesScanned) : "";
+    const truncated = result.truncated ? " truncated" : "";
+    return '<span>'+esc(count+" match"+(count===1?"":"es")+scanned+truncated)+'</span>';
+  }
+  if (typeof result.message === "string" && result.message) {
+    const code = typeof result.code === "string" ? result.code.replaceAll("_", " ").toLowerCase()+": " : "";
+    return '<span>'+esc(code + result.message)+'</span>';
+  }
+  if (result.path) return '<span class="tool-path">'+esc(String(result.path))+'</span>';
+  if (result.repoPath) return '<span class="tool-path">'+esc(String(result.repoPath))+'</span>';
+  return "";
+}
+function compactToolResultDetails(trace) {
+  const result = trace && trace.result;
+  if (!result || typeof result !== "object") return "";
+  if (toolTraceName(trace) === "search_files") {
+    const folders = Array.isArray(result.folderMatches) ? result.folderMatches.filter(m => m && m.path).slice(0, 3) : [];
+    const matches = Array.isArray(result.matches) ? result.matches.filter(m => m && m.path).slice(0, 3) : [];
+    const folderPaths = folders.length
+      ? '<div><b>top folders</b><br>'+folders.map(m => '<span class="tool-path">'+esc(String(m.path))+'</span>').join("<br>")+'</div>'
+      : "";
+    const paths = matches.length
+      ? '<div><b>sample files</b><br>'+matches.map(m => '<span class="tool-path">'+esc(String(m.path))+'</span>').join("<br>")+'</div>'
+      : "";
+    return folderPaths + paths;
+  }
+  return "";
+}
+function visibleToolTraceItems(trace) {
+  if (!Array.isArray(trace) || !trace.length) return [];
+  const hasSuccessfulSearch = trace.some((item) =>
+    toolTraceName(item) === "search_files" &&
+    item?.ok !== false &&
+    Number(item?.result?.matchCount) > 0
+  );
+  return trace.filter((item) => {
+    if (toolTraceName(item) !== "search_files") return true;
+    if (item?.ok === false && hasSuccessfulSearch) return false;
+    return true;
+  });
+}
+function renderToolTrace(turn) {
+  const usage = parseUsageJson(turn);
+  const trace = visibleToolTraceItems(Array.isArray(usage?.toolTrace) ? usage.toolTrace : []);
+  if (!trace.length) return "";
+  return '<div class="tool-trace">'
+    + trace.slice(0, 6).map(item => {
+      const name = toolTraceName(item);
+      const status = toolTraceStatus(item);
+      const elapsed = Number.isFinite(Number(item.elapsedMs)) ? " · "+Number(item.elapsedMs)+"ms" : "";
+      const args = compactToolArgs(toolTraceArguments(item));
+      const summary = compactToolResultSummary(item);
+      const details = compactToolResultDetails(item);
+      return '<div class="tool-trace-row">'
+        +'<div class="tool-trace-head"><b>'+esc(name)+'</b><span class="tool-trace-status '+esc(status.tone)+'">'+esc(status.label)+'</span><span class="tool-trace-meta">'+esc(elapsed)+(args || "")+'</span></div>'
+        +(summary ? '<div class="tool-trace-note">'+summary+'</div>' : '')
+        +(details ? '<details class="tool-trace-details"><summary>Show details</summary><div class="tool-trace-note">'+details+'</div></details>' : '')
+        +'</div>';
+    }).join("")
+    + '</div>';
+}
 function renderTurns(turns, proposals = [], proposalHistory = []) {
   if (!turns.length) {
-    q("chat-turns").innerHTML=renderPendingTurn() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
+    q("chat-turns").innerHTML=renderPendingTurn() + renderManagerWorking() + renderPlanOperationNotices() || '<span class="empty">No turns yet.</span>';
     return;
   }
   const proposalsByTurn = new Map();
@@ -843,18 +1283,28 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     proposalsByTurn.set(proposal.turnId, list);
   }
   const turnsHtml = turns.map(turn => {
+    // Consultation replies are stored as manager turns with a usage marker; show
+    // them as "Consultation · Claude" rather than as the manager voice.
+    const isConsult = turn.role === "manager" && Boolean(parseUsageJson(turn)?.consultation);
     const who = turn.role === "manager"
-      ? "Manager: "+(turn.interfaceAgent || chat.agent)
+      ? (isConsult
+          ? "Consultation · "+titleCase(turn.interfaceAgent || "agent")
+          : "Manager: "+(turn.interfaceAgent || chat.agent))
       : (turn.role === "user" ? "You" : turn.role);
     const failed = turn.status === "failed";
+    // "Soft" failures (rate limit, budget) are expected throttling, not errors -
+    // render them as a calm informational bubble rather than a red error.
+    let soft = false;
     let note = "";
     let body;
     if (failed && turn.errorJson) {
       let code = "error", message = turn.errorJson;
       try { const parsed = JSON.parse(turn.errorJson); code = parsed.code || code; message = parsed.message || message; }
       catch { /* fall back to the raw, bounded error text */ }
-      note = '<div class="note">'+esc(code)+'</div>';
-      body = visibleText(message, 4000);
+      soft = isSoftFailureCode(code);
+      const noteLabel = soft ? failureNoteLabel(code) : code;
+      note = '<div class="note'+(soft?' soft':'')+'">'+esc(noteLabel)+'</div>';
+      body = visibleText(message, 4000) + providerSwitchAdvice(code, turn.interfaceAgent || chat.agent);
     } else {
       body = turn.role === "manager"
         ? renderMarkdown(turn.content || "")
@@ -863,56 +1313,23 @@ function renderTurns(turns, proposals = [], proposalHistory = []) {
     const when = turn.createdAt ? new Date(turn.createdAt) : null;
     const ts = when && !isNaN(when.getTime()) ? '<span class="when">'+esc(when.toLocaleTimeString())+'</span>' : "";
     const cards = (proposalsByTurn.get(turn.id) || []).map(renderProposalCard).join("");
-    const meta = '<div class="meta"><b>'+esc(who)+'</b>'+badge(turn.status)+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
+    const statusBadge = soft ? '' : badge(turn.status);
+    const meta = '<div class="meta"><b>'+esc(who)+'</b>'+statusBadge+'<span>#'+esc(turn.seq)+'</span>'+ts+'</div>';
     const copyIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
     const copyBtn = '<div class="turn-copy-row"><button class="turn-copy-btn" data-turn-copy="'+esc(turn.content||'')+'">'+copyIcon+'</button></div>';
-    const inner = meta+note+'<div class="body">'+body+'</div>'+(!failed ? copyBtn : '')+cards;
+    const stateClass = failed ? (soft ? " soft" : " failed") : "";
+    const toolTrace = turn.role === "manager" ? renderToolTrace(turn) : "";
+    const inner = meta+note+'<div class="body">'+body+'</div>'+toolTrace+((!failed||soft) ? copyBtn : '')+cards;
     if (turn.role === "manager") {
-      return '<div class="chat-turn manager'+(failed?" failed":"")+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
+      return '<div class="chat-turn manager'+stateClass+'"><div class="manager-avatar"></div><div class="turn-content">'+inner+'</div></div>';
     }
-    return '<div class="chat-turn '+esc(turn.role)+(failed?" failed":"")+'">'+inner+'</div>';
+    return '<div class="chat-turn '+esc(turn.role)+stateClass+'">'+inner+'</div>';
   }).join("");
-  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderPlanOperationNotices() + renderProposalHistory(proposalHistory);
+  q("chat-turns").innerHTML = turnsHtml + renderPendingTurn() + renderManagerWorking() + renderPlanOperationNotices();
   q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
-  enrichHistoryOutcomes().catch(() => {});
 }
 function actionLabel(action) {
   return String(action || "").replaceAll("_", " ");
-}
-function renderProposalHistory(proposals) {
-  const inactive = proposals.filter(p => p.status !== 'proposed');
-  if (!inactive.length) return '';
-  const items = inactive.map(p => {
-    const opLink = p.operationId
-      ? ' <span class="phi-op" data-phi-operation="'+esc(p.operationId)+'">\\u2192 op '+esc(p.operationId.slice(0,8))+'</span>'
-      : '';
-    const when = p.createdAt ? new Date(p.createdAt) : null;
-    const ts = when && !isNaN(when.getTime()) ? '<span class="phi-op">'+esc(when.toLocaleTimeString())+'</span>' : '';
-    return '<div class="proposal-history-item">'
-      +'<span class="phi-action">'+esc(actionLabel(p.action))+'</span>'
-      +badge(p.status)
-      +opLink
-      +ts
-      +'</div>';
-  }).join('');
-  const count = inactive.length;
-  return '<details class="proposal-history"><summary>'+count+' past suggestion'+(count===1?'':'s')+'</summary>'+items+'</details>';
-}
-async function enrichHistoryOutcomes() {
-  const spans = q("chat-turns").querySelectorAll("[data-phi-operation]");
-  for (const span of spans) {
-    const opId = span.dataset.phiOperation;
-    if (!opId) continue;
-    try {
-      const op = await api("/operations/"+encodeURIComponent(opId));
-      if (!["queued","running"].includes(op.status)) {
-        span.textContent = "\\u2192 op "+opId.slice(0,8)+" "+op.status;
-        span.className = (op.status === "succeeded") ? "phi-op ok"
-          : (op.status === "failed" || op.status === "cancelled" || op.status === "interrupted") ? "phi-op bad"
-          : "phi-op";
-      }
-    } catch { /* operation not found or network error — leave label as-is */ }
-  }
 }
 function renderProposalCard(proposal) {
   if (proposal.action === "set_strategy") {
@@ -945,13 +1362,19 @@ function renderProposalCard(proposal) {
   if (proposal.action === "agent_consultation") {
     let meta = {};
     try { meta = JSON.parse(proposal.commandJson); } catch {}
+    const agentList = Array.isArray(meta.agents) ? meta.agents.join(", ") : "";
+    const repoRow = meta.repoPath
+      ? '<div class="proposal-kv"><b>Repo:</b> <span class="tool-path">'+esc(meta.repoPath)+'</span></div>'
+      : '';
     return '<div class="proposal-card" data-proposal-id="'+esc(proposal.id)+'" data-command="'+esc(proposal.commandCli)+'">'
-      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("consent")+'</div>'
+      +'<div class="proposal-title">Suggested action&nbsp;'+badge("agent consultation")+badge("read-only")+'</div>'
       +'<div class="muted">'+visibleText(proposal.summary, 600)+'</div>'
-      +'<div class="proposal-kv"><b>Agents:</b> '+visibleText((meta.agents||[]).join ? meta.agents.join(", ") : "", 200)+'</div>'
+      +'<div class="proposal-kv"><b>Agents:</b> '+esc(agentList)+'</div>'
+      +repoRow
       +'<div class="proposal-kv"><b>Profile:</b> '+esc(meta.profile||"balanced")+'&nbsp;&nbsp;<b>Mode:</b> '+esc(meta.mode||"independent")+'</div>'
-      +'<div class="proposal-copy">This records consent intent only. Asking Claude/Codex is deferred until the consultation executor is added.</div>'
-      +'<div class="proposal-actions"><button type="button" data-proposal-copy="'+esc(proposal.id)+'">Copy CLI</button><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
+      +'<div class="proposal-copy">Approve to ask the selected agent(s) read-only — their replies appear here in the chat. This spends Claude/Codex budget.</div>'
+      +'<div class="proposal-confirm"><input type="text" autocomplete="off" placeholder="Type start" aria-label="Type start to confirm" data-proposal-start-input="'+esc(proposal.id)+'"><button type="button" disabled data-proposal-start="'+esc(proposal.id)+'" data-proposal-action="agent_consultation" data-run-version="" data-task-version="">Start consultation</button></div>'
+      +'<div class="proposal-actions"><button type="button" data-proposal-dismiss="'+esc(proposal.id)+'">Dismiss</button></div>'
       +'</div>';
   }
   const target = proposal.taskId ? "task "+proposal.taskId : (proposal.runId ? "run "+proposal.runId : "current context");
@@ -1261,8 +1684,16 @@ q("chat-turns").addEventListener("click", async (event) => {
   const turnCopy = event.target.closest("[data-turn-copy]");
   const planOpen = event.target.closest("[data-plan-open]");
   const planShow = event.target.closest("[data-plan-show]");
-  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow) return;
+  const planDismiss = event.target.closest("[data-plan-dismiss]");
+  if (!prepare && !start && !copy && !dismiss && !approve && !turnCopy && !planOpen && !planShow && !planDismiss) return;
   try {
+    if (planDismiss) {
+      const operationId = planDismiss.dataset.planDismiss;
+      chat.planOperations.delete(operationId);
+      const node = q("chat-turns").querySelector('[data-plan-operation="'+CSS.escape(operationId)+'"]');
+      if (node) node.remove();
+      return;
+    }
     if (planOpen) {
       await selectRun(planOpen.dataset.planOpen);
       return;
@@ -1302,22 +1733,71 @@ q("chat-turns").addEventListener("input", (event) => {
   const button = card?.querySelector('[data-proposal-start="'+CSS.escape(input.dataset.proposalStartInput)+'"]');
   if (button) button.disabled = input.value.trim() !== "start";
 });
-function failedTurnMessage(turn) {
-  if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
+function isSoftFailureCode(code) {
+  return code === "RATE_LIMITED" || code === "BUDGET_EXCEEDED"
+    || code === "PROVIDER_AUTH_REQUIRED" || code === "PROVIDER_TOOL_CALL_FAILED"
+    || code === "PROVIDER_CONFIGURATION_ERROR" || code === "PROVIDER_BILLING_EXHAUSTED";
+}
+function failureNoteLabel(code) {
+  if (code === "RATE_LIMITED") return "rate limited";
+  if (code === "BUDGET_EXCEEDED") return "limit reached";
+  if (code === "PROVIDER_AUTH_REQUIRED") return "auth required";
+  if (code === "PROVIDER_TOOL_CALL_FAILED") return "tool call failed";
+  if (code === "PROVIDER_CONFIGURATION_ERROR") return "provider setup";
+  if (code === "PROVIDER_BILLING_EXHAUSTED") return "out of credits";
+  return code;
+}
+function providerSwitchAdvice(code, provider) {
+  if (!isSoftFailureCode(code) || code === "BUDGET_EXCEEDED") return "";
+  const preferredProvider = managerProviders.find((item) =>
+    item.available && item.id !== provider && item.id !== "codex" && item.id !== "claude"
+  ) ?? managerProviders.find((item) => item.available && item.id !== provider);
+  const preferred = preferredProvider?.label ?? "another manager";
+  return '<div class="provider-advice">No automatic retry was sent. You can switch managers and try '+esc(preferred)+'.</div>';
+}
+function parseFailureStatus(errorJson, fallback="Manager turn failed.") {
+  if (!errorJson) return null;
   try {
-    const parsed = JSON.parse(turn.errorJson);
-    return parsed.message || parsed.code || "Manager turn failed.";
+    const parsed = JSON.parse(errorJson);
+    const code = parsed.code || "error";
+    return {
+      message: parsed.message || code || fallback,
+      soft: isSoftFailureCode(code),
+    };
   } catch {
-    return turn.errorJson;
+    return { message: errorJson, soft: false };
   }
 }
+function failedTurnStatus(turn) {
+  if (!turn || turn.status !== "failed" || !turn.errorJson) return null;
+  return parseFailureStatus(turn.errorJson);
+}
 async function pollOperation(operationId, conversationId, label="Manager turn") {
+  if (chat.activityHideTimer) {
+    clearTimeout(chat.activityHideTimer);
+    chat.activityHideTimer = null;
+  }
+  chat.activityRetained = false;
+  chat.activityDisplayUntil = 0;
+  chat.lastShownToolStep = 0;
   chat.activeOperation = { id: operationId, conversationId };
+  chat.activeActivity = null;
+  chat.activeActivityRaw = null;
   setChatEnabled(false);
   setChatStatus(label+" running...");
+  // Show the working indicator immediately so fast turns still signal liveness.
+  updateManagerWorking();
   try {
     while (true) {
       const operation = await api("/operations/"+encodeURIComponent(operationId));
+      if (operation.activity) {
+        chat.activeActivityRaw = operation.activity || null;
+        chat.activeActivity = chooseVisibleActivity(operation.activity) || null;
+        updateManagerWorking();
+      }
+      if (["queued","running"].includes(operation.status)) {
+        // keep polling
+      }
       if (!["queued","running"].includes(operation.status)) {
         chat.pendingTurn = null;
         if (operation.status === "succeeded") {
@@ -1326,26 +1806,33 @@ async function pollOperation(operationId, conversationId, label="Manager turn") 
           if (currentConversation()?.id === conversationId) {
             setChatStatus("Ready. Manager voice: "+chat.agent+".");
           }
-        } else {
-          let message = label+" "+operation.status+".";
-          if (operation.errorJson) {
-            try { message += " " + JSON.parse(operation.errorJson).message; }
-            catch { message += " " + operation.errorJson; }
-          }
-          chat.statusError = { conversationId, message };
+        } else if (operation.status === "cancelled") {
+          const message = "Active work cancelled.";
+          chat.statusError = { conversationId, message, soft: true };
           await refreshConversation(conversationId);
-          if (currentConversation()?.id === conversationId) setChatStatus(message, true);
+          if (currentConversation()?.id === conversationId) setChatStatus(message, false);
+        } else {
+          const failure = parseFailureStatus(operation.errorJson, label+" "+operation.status+".");
+          const message = failure
+            ? (failure.soft ? failure.message : label+" "+operation.status+". "+failure.message)
+            : label+" "+operation.status+".";
+          chat.statusError = { conversationId, message, soft: Boolean(failure?.soft) };
+          await refreshConversation(conversationId);
+          if (currentConversation()?.id === conversationId) setChatStatus(message, !failure?.soft);
         }
         return;
       }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   } catch (error) {
     setChatStatus(error.message, true);
     refreshConversation(conversationId).catch(()=>{});
   } finally {
     chat.pendingTurn = null;
-    if (chat.activeOperation?.id === operationId) chat.activeOperation = null;
+    if (chat.activeOperation?.id === operationId) {
+      if (chat.activeActivity) scheduleWorkingBubbleClear();
+      else clearWorkingBubbleNow();
+    }
     setChatEnabled(!chatIsBusyForCurrentView());
   }
 }
@@ -1358,8 +1845,9 @@ async function sendChat(message) {
   });
   chat.activeOperation = { id: operation.id, conversationId: conversation.id };
   chat.pendingTurn = null;
+  const pollPromise = pollOperation(operation.id, conversation.id);
   await refreshConversation(conversation.id);
-  await pollOperation(operation.id, conversation.id);
+  await pollPromise;
 }
 q("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1381,12 +1869,7 @@ q("chat-form").addEventListener("submit", async (event) => {
   setChatEnabled(false);
   setChatStatus("Sending...");
   if (currentConversation()) {
-    const historyEl = q("chat-turns").querySelector(".proposal-history");
-    if (historyEl) {
-      historyEl.insertAdjacentHTML("beforebegin", renderPendingTurn());
-    } else {
-      q("chat-turns").insertAdjacentHTML("beforeend", renderPendingTurn());
-    }
+    q("chat-turns").insertAdjacentHTML("beforeend", renderPendingTurn());
     q("chat-turns").scrollTop = q("chat-turns").scrollHeight;
   } else {
     q("chat-turns").innerHTML = renderPendingTurn();
@@ -1414,23 +1897,34 @@ q("chat-input").addEventListener("keydown", (event) => {
 q("chat-input").addEventListener("input", function() {
   this.style.height = "auto";
   this.style.height = Math.min(this.scrollHeight, 160) + "px";
+  updateComposerAction();
 });
-q("chat-codex").onclick = async () => {
-  chat.agent = "codex";
-  await loadChat().catch(error => setChatStatus(error.message, true));
+q("chat-send").onclick = async () => {
+  if (chatIsBusyForCurrentView()) {
+    await stopActiveWork().catch(error => showError(error.message));
+    return;
+  }
+  if (q("chat-form").requestSubmit) q("chat-form").requestSubmit();
+  else q("chat-form").dispatchEvent(new Event("submit", { cancelable: true }));
 };
-q("chat-claude").onclick = async () => {
-  chat.agent = "claude";
+q("manager-voices").addEventListener("click", async (event) => {
+  const toggle = event.target.closest("[data-provider-menu-toggle]");
+  if (toggle) {
+    managerProviderMenuOpen = !managerProviderMenuOpen;
+    renderManagerProviders();
+    return;
+  }
+  const button = event.target.closest("[data-agent]");
+  if (!button) return;
+  const provider = managerProviderById(button.dataset.agent);
+  if (provider && !provider.available) {
+    setChatStatus(provider.label+" is not configured. Add its API key or choose another manager.");
+    return;
+  }
+  chat.agent = button.dataset.agent;
+  managerProviderMenuOpen = false;
   await loadChat().catch(error => setChatStatus(error.message, true));
-};
-q("chat-groq").onclick = async () => {
-  chat.agent = "groq";
-  await loadChat().catch(error => setChatStatus(error.message, true));
-};
-q("chat-gemini").onclick = async () => {
-  chat.agent = "gemini";
-  await loadChat().catch(error => setChatStatus(error.message, true));
-};
+});
 q("chat-clear").onclick = async () => {
   await clearChatContext().catch(error => showError(error.message));
 };
@@ -1538,9 +2032,6 @@ async function connectEvents() {
       }
     }
     if(item.type==="operation.updated" && item.operationId) {
-      if(q("chat-turns").querySelector('[data-phi-operation="'+CSS.escape(item.operationId)+'"]')) {
-        enrichHistoryOutcomes().catch(()=>{});
-      }
       const TERMINAL_OP = new Set(["succeeded","failed","cancelled","interrupted"]);
       if(chat.activeOperation && chat.activeOperation.id === item.operationId && item.payload && TERMINAL_OP.has(item.payload.status)) {
         refreshConversation(chat.activeOperation.conversationId).catch(()=>{});
@@ -1591,7 +2082,7 @@ function reloadOnce() {
 (function(){
   const toggleBtn=document.getElementById("sidebar-toggle");
   const mainEl=document.querySelector("main");
-  const sectionNames=["runs","tasks","timeline","verification","messages","artifacts","conflicts","diff"];
+  const sectionNames=["runs","tasks","timeline","verification","messages","artifacts","conflicts","diff","memory"];
   let activeSection=localStorage.getItem("duet-aside-section")||"runs";
   function setSection(name){
     activeSection=name;
@@ -1631,6 +2122,6 @@ function reloadOnce() {
 })();
 await authenticate();
 renderChatShell();
-try{const h=await api("/health");bootInstanceId=h.instanceId;q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
+try{const h=await api("/health");bootInstanceId=h.instanceId;if(Array.isArray(h.managerProviders)){managerProviders=h.managerProviders;normalizeSelectedManagerProvider();renderManagerProviders();}q("health").textContent="healthy - "+h.instanceId;q("health").className="pill ok";await loadRuns({selectCurrent:true});if(!selected){connectEvents();await loadChat();}}
 catch(error){q("health").textContent=error.message;q("health").className="pill bad"}
 `;

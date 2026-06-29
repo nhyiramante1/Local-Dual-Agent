@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -7,6 +7,7 @@ import test from "node:test";
 
 import type {
   DuetEvent,
+  ManagerProviderName,
   OperationRecord,
   ProviderName,
   RunRecord,
@@ -18,6 +19,7 @@ import type { AgentTurn, ProviderAdapter } from "../src/providers/adapter.js";
 import { defaultManagerBudget, type ManagerBudget } from "../src/chat/engine.js";
 import { dashboardHtml, dashboardJs } from "../src/dashboard/assets.js";
 import { DuetService } from "../src/service/server.js";
+import type { ManagerProviderInfo } from "../src/service/server.js";
 import { runCommand } from "../src/process/run-command.js";
 import { tryValidateAndSynthesize } from "../src/chat/proposals.js";
 import { buildManagerChatContext } from "../src/chat/context.js";
@@ -45,9 +47,16 @@ function deferred(): {
 
 async function startService(options: {
   fail?: boolean;
+  failError?: DuetError;
   text?: string;
   managerBudget?: ManagerBudget;
   onProviderRun?: (turn: AgentTurn) => Promise<void> | void;
+  managerProvider?: ManagerProviderName;
+  managerProviders?: ManagerProviderInfo[];
+  chatProviders?: Record<string, ProviderAdapter | undefined> & {
+    claude: ProviderAdapter;
+    codex: ProviderAdapter;
+  };
 } = {}): Promise<Harness> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-svc-"));
   const store = new Store(path.join(directory, "state.sqlite"));
@@ -58,7 +67,7 @@ async function startService(options: {
       calls.n += 1;
       await options.onProviderRun?.(turn);
       if (options.fail) {
-        throw new DuetError(`provider failed: ${"x".repeat(5_000)}`, "CODEX_FAILED");
+        throw options.failError ?? new DuetError(`provider failed: ${"x".repeat(5_000)}`, "CODEX_FAILED");
       }
       return {
         provider: "codex",
@@ -76,8 +85,10 @@ async function startService(options: {
     secret,
     instanceId: "chat-instance",
     idleTimeoutMs: 60_000,
-    chatProviders: { claude: provider, codex: provider },
+    chatProviders: options.chatProviders ?? { claude: provider, codex: provider },
     managerBudget: options.managerBudget,
+    managerProvider: options.managerProvider,
+    managerProviders: options.managerProviders,
   });
   const port = await service.listen();
   return {
@@ -1411,6 +1422,8 @@ test("budget cap blocks before the provider is called", async () => {
     const turns = h.store.listConversationTurns(conversationId);
     const manager = turns.find((t) => t.role === "manager");
     assert.equal(manager?.status, "failed");
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(notes.some((note) => note.kind === "provider_health"), false);
   } finally {
     await h.cleanup();
   }
@@ -1594,6 +1607,182 @@ test("provider failure stores a failed manager turn with bounded operation error
     assert.ok(manager?.errorJson);
   } finally {
     await h.cleanup();
+  }
+});
+
+test("provider auth failures are stored as soft auth-required turns and shared context", async () => {
+  const h = await startService({
+    fail: true,
+    failError: new DuetError(
+      "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+      "CODEX_FAILED",
+    ),
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "hi", "chatkey-auth-failed");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager?.errorJson);
+    assert.match(manager.errorJson, /PROVIDER_AUTH_REQUIRED/);
+    assert.match(manager.errorJson, /Codex is signed out/);
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(notes.some((note) => note.kind === "provider_health" && /Codex is signed out/.test(note.content)), true);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("provider tool-call generation failures are stored as soft shared provider health", async () => {
+  const h = await startService({
+    fail: true,
+    failError: new DuetError(
+      "The manager provider could not form a valid tool call. Try again or switch managers.",
+      "PROVIDER_TOOL_CALL_FAILED",
+    ),
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "search", "chatkey-toolcall-failed");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager?.errorJson);
+    assert.match(manager.errorJson, /PROVIDER_TOOL_CALL_FAILED/);
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(notes.some((note) => note.kind === "provider_health" && /valid tool call/.test(note.content)), true);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("provider context limit failures are stored as soft rate-limit guidance", async () => {
+  const h = await startService({
+    fail: true,
+    failError: new DuetError(
+      "The manager provider hit a context limit: 413 Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 9750, please reduce your message size and try again.",
+      "RATE_LIMITED",
+    ),
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "check again", "chatkey-context-limit");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager?.errorJson);
+    assert.match(manager.errorJson, /RATE_LIMITED/);
+    assert.match(manager.errorJson, /smaller manager context/);
+    assert.match(manager.errorJson, /requested 9750/);
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(
+      notes.some((note) => (
+        note.kind === "provider_health" &&
+        /smaller manager context/.test(note.content) &&
+        !note.expiresAt
+      )),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("provider cooldown preflight stores a soft turn without calling the provider", async () => {
+  const h = await startService();
+  try {
+    h.store.addManagerSharedContext({
+      kind: "provider_health",
+      provider: "codex",
+      content: "Codex is rate limited.",
+      metadataJson: JSON.stringify({ code: "RATE_LIMITED" }),
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "try now", "chatkey-cooldown");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    assert.equal(h.calls.n, 0);
+    const operation = h.store.getOperation(op.id);
+    assert.equal(operation.status, "failed");
+    assert.match(operation.errorJson ?? "", /RATE_LIMITED/);
+    assert.match(operation.errorJson ?? "", /No provider call was sent/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("dynamic manager providers can create conversations and run turns", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-glm-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const calls = { n: 0 };
+  const codexProvider: ProviderAdapter = {
+    name: "codex",
+    async run() {
+      throw new Error("codex should not run");
+    },
+  };
+  const glmProvider: ProviderAdapter = {
+    name: "glm",
+    supportsNativeToolCalling: true,
+    async run() {
+      calls.n += 1;
+      return {
+        provider: "glm",
+        sessionId: "glm-session",
+        finalText: "glm reply",
+        stdout: "",
+        stderr: "",
+        durationMs: 1,
+        usage: { inputTokens: 1, outputTokens: 1, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "chat-glm-instance",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: codexProvider, codex: codexProvider, glm: glmProvider },
+    managerProvider: "glm",
+    managerProviders: [
+      { id: "codex", label: "Codex", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "claude", label: "Claude", available: true, nativeToolCalling: false, latency: "slow" },
+      { id: "glm", label: "GLM", available: true, nativeToolCalling: true, latency: "fast" },
+    ],
+  });
+  const port = await service.listen();
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    const health = await fetch(`${base}/api/v1/health`, { headers: bearer() });
+    assert.equal(health.status, 200);
+    assert.match(await health.text(), /GLM/);
+    const conversationId = await createConversation(base, { interfaceAgent: "glm" });
+    const response = await postTurn(base, conversationId, "hi", "chatkey-glm");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await service.chat.wait(op.id);
+    assert.equal(calls.n, 1);
+    const manager = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(manager?.interfaceAgent, "glm");
+    assert.equal(manager?.content, "glm reply");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -1884,7 +2073,9 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /Show plan here/);
   assert.match(dashboardJs, /\/proposals\/"\+encodeURIComponent\(proposalId\)\+"\/dismiss/);
   assert.match(dashboardJs, /Copy CLI/);
-  assert.match(dashboardJs, /return Boolean\(chat\.activeOperation \|\| chat\.pendingTurn\)/);
+  assert.match(dashboardJs, /function chatIsBusyForCurrentView\(\)/);
+  assert.match(dashboardJs, /chat\.activeOperation && !chat\.activityRetained/);
+  assert.match(dashboardJs, /chat\.pendingTurn/);
   assert.match(dashboardJs, /loadRuns\(\{selectCurrent:true\}\)/);
   assert.doesNotMatch(dashboardJs, /if\(selected\) await selectRun\(selected\)/);
   assert.doesNotMatch(dashboardJs, /activeOperationId/);
@@ -1893,9 +2084,13 @@ test("dashboard manager chat asset stays read-only and chat-only", () => {
   assert.match(dashboardJs, /\/approve/);
   assert.match(dashboardJs, /approval-preview/);
   assert.match(dashboardJs, /data-proposal-approve/);
+  // The composer Stop button is scoped to the current manager turn — it cancels
+  // a single operation, never all active work, so it no longer hits cancel-active.
+  assert.match(dashboardJs, /\/operations\/"\+encodeURIComponent\(op\.id\)\+"\/cancel/);
+  assert.doesNotMatch(dashboardJs, /\/service\/cancel-active/);
   // direct run-mutation routes remain absent from the dashboard
   assert.doesNotMatch(dashboardJs, /\/merge/);
-  assert.doesNotMatch(dashboardJs, /\/cancel/);
+  assert.doesNotMatch(dashboardJs, /\/runs\/[^"]+\/cancel/);
   assert.doesNotMatch(dashboardJs, /\/resolve/);
   assert.doesNotMatch(dashboardJs, /\/cleanup/);
 });
@@ -2388,7 +2583,9 @@ test("openai native tool call creates a plan proposal without prose parsing", as
     supportsNativeToolCalling: true,
     async run(turn) {
       calls += 1;
-      if (turn.tools?.length) {
+      // First pass offers tools and requests a call; once the model sees the
+      // replayed tool result (priorSteps), it answers in text and ends the turn.
+      if (turn.tools?.length && !turn.priorSteps?.length) {
         sawTools = true;
         assert.ok(turn.tools.some((tool) => tool.name === "create_plan_proposal"));
         return {
@@ -2478,7 +2675,7 @@ test("gemini interface agent runs the native tool runtime and creates a plan pro
     name: "gemini" as const,
     supportsNativeToolCalling: true,
     async run(turn) {
-      if (turn.tools?.length) {
+      if (turn.tools?.length && !turn.priorSteps?.length) {
         sawTools = true;
         return {
           provider: "gemini",
@@ -2675,6 +2872,309 @@ test("openai tool runtime honors disabled consultation, single-step loop, and fa
     store.close();
     await rm(directory, { recursive: true, force: true });
     await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("openai tool runtime search fallback leads with the strongest exact folder match", async () => {
+  const searchRoot = await mkdtemp(path.join(os.tmpdir(), "duet-openai-tools-search-root-"));
+  const targetFolder = path.join(searchRoot, "Alpha Project");
+  await mkdir(targetFolder, { recursive: true });
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-openai-tools-search-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run() {
+      return {
+        provider: "openai",
+        sessionId: "search-fallback",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [{
+          id: "call-1",
+          name: "search_files",
+          argumentsJson: JSON.stringify({
+            path: searchRoot,
+            namePattern: "Alpha",
+            kind: "dir",
+            maxResults: 5,
+          }),
+        }],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "openai-tool-search-fallback-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: {
+      supportsMultiStepToolLoop: false,
+    },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "find alpha project", "openai-tool-search-fallback-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, `I found a matching folder at ${targetFolder}.`);
+    assert.deepEqual(store.listManagerSharedContext({ limit: 10 }), []);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(searchRoot, { recursive: true, force: true });
+  }
+});
+
+test("native tool runtime stores only deduped expiring notes for confirmed git repos", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-confirmed-repo-note-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-confirmed-repo-note-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run() {
+      return {
+        provider: "openai",
+        sessionId: "confirmed-repo-note",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [{
+          id: randomUUID(),
+          name: "check_git_repo",
+          argumentsJson: JSON.stringify({ path: repoPath }),
+        }],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "confirmed-repo-note-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: {
+      supportsMultiStepToolLoop: false,
+    },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    for (const key of ["confirmed-repo-note-1", "confirmed-repo-note-2"]) {
+      const response = await postTurn(base, conversationId, "check repo", key);
+      assert.equal(response.status, 202);
+      const op = ((await response.json()) as { data: { id: string } }).data;
+      await service.chat.wait(op.id);
+    }
+
+    const notes = store.listManagerSharedContext({ limit: 10 });
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].kind, "note");
+    assert.equal(notes[0].provider, "openai");
+    assert.match(notes[0].content, /Found git repository/);
+    assert.match(notes[0].content, new RegExp(repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.ok(notes[0].expiresAt, "confirmed repo notes should expire");
+    const metadata = JSON.parse(notes[0].metadataJson ?? "{}") as { tool?: string; path?: string };
+    assert.deepEqual(metadata, { tool: "check_git_repo", path: repoPath });
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("native tool loop chains multiple rounds and persists a later-round proposal", async () => {
+  const repoPath = await mkdtemp(path.join(os.tmpdir(), "duet-tool-loop-repo-"));
+  await git(repoPath, ["init", "--initial-branch=main"]);
+  await git(repoPath, ["config", "user.name", "Test"]);
+  await git(repoPath, ["config", "user.email", "test@example.invalid"]);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-tool-loop-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  const seenPriorStepCounts: number[] = [];
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      seenPriorStepCounts.push(turn.priorSteps?.length ?? 0);
+      // Round 1: read-only list_runs. Round 2 (after seeing the first result):
+      // create_plan_proposal. Round 3 (after two replayed steps): plain text.
+      const priorCount = turn.priorSteps?.length ?? 0;
+      if (priorCount === 0) {
+        return {
+          provider: "openai",
+          sessionId: "loop-1",
+          finalText: "Let me check the runs first.",
+          stdout: "",
+          stderr: "",
+          durationMs: 3,
+          model: "openai-compatible-test",
+          toolCalls: [{ id: "call-1", name: "list_runs", argumentsJson: "{}" }],
+          usage: { inputTokens: 5, outputTokens: 3, costKnown: false },
+        };
+      }
+      if (priorCount === 1) {
+        // The replayed step must carry the list_runs result back to the model.
+        assert.equal(turn.priorSteps?.[0]?.results[0]?.name, "list_runs");
+        return {
+          provider: "openai",
+          sessionId: "loop-2",
+          finalText: "Now I'll propose the plan.",
+          stdout: "",
+          stderr: "",
+          durationMs: 4,
+          model: "openai-compatible-test",
+          toolCalls: [{
+            id: "call-2",
+            name: "create_plan_proposal",
+            argumentsJson: JSON.stringify({ repoPath, goal: "Add a changelog", lead: "claude" }),
+          }],
+          usage: { inputTokens: 6, outputTokens: 4, costKnown: false },
+        };
+      }
+      return {
+        provider: "openai",
+        sessionId: "loop-3",
+        finalText: "I checked the runs and created a plan suggestion card.",
+        stdout: "",
+        stderr: "",
+        durationMs: 4,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 7, outputTokens: 5, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "tool-loop-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: true, maxToolCallsPerTurn: 5 },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "create a plan", "tool-loop-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    // Three model calls: two tool rounds plus the final text answer.
+    assert.equal(calls, 3);
+    assert.deepEqual(seenPriorStepCounts, [0, 1, 2]);
+    const proposals = store.listProposals(conversationId);
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0].action, "create_plan");
+    const managerTurn = store.listConversationTurns(conversationId).find((t) => t.role === "manager");
+    assert.equal(managerTurn?.content, "I checked the runs and created a plan suggestion card.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("native tool loop stops at the global call budget and writes a closing summary", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-tool-budget-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  let calls = 0;
+  let summaryHadNoTools = false;
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run(turn) {
+      calls += 1;
+      // The model keeps asking for read-only tools; only the tool-free
+      // summarization pass (no tools) produces the closing text.
+      if (turn.tools?.length) {
+        return {
+          provider: "openai",
+          sessionId: `budget-${calls}`,
+          finalText: "Checking again.",
+          stdout: "",
+          stderr: "",
+          durationMs: 2,
+          model: "openai-compatible-test",
+          toolCalls: [{ id: `call-${calls}`, name: "list_runs", argumentsJson: "{}" }],
+          usage: { inputTokens: 4, outputTokens: 2, costKnown: false },
+        };
+      }
+      summaryHadNoTools = true;
+      return {
+        provider: "openai",
+        sessionId: "budget-summary",
+        finalText: "I reviewed the available runs for you.",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        usage: { inputTokens: 5, outputTokens: 4, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "tool-budget-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: true, maxToolCallsPerTurn: 2 },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "show me the runs", "tool-budget-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    let attempts = 0;
+    while (attempts < 20) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!store.listActiveOperations().some((o) => o.id === op.id)) break;
+      attempts++;
+    }
+    // Budget 2 => two tool rounds, then one tool-free summary pass = 3 calls.
+    assert.equal(calls, 3);
+    assert.equal(summaryHadNoTools, true);
+    assert.equal(store.listProposals(conversationId).length, 0);
+    const managerTurn = store.listConversationTurns(conversationId).find((t) => t.role === "manager");
+    assert.equal(managerTurn?.content, "I reviewed the available runs for you.");
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -3133,5 +3633,268 @@ test("global chat context shows stored strategy in System Defaults", () => {
     );
   } finally {
     store.close();
+  }
+});
+
+function seedPendingRun(
+  store: Store,
+  runId: string,
+  status: RunRecord["status"],
+  task?: Partial<TaskRecord>,
+): void {
+  const stamp = "2026-06-01T00:00:00.000Z";
+  const run: RunRecord = {
+    id: runId,
+    repoPath: "/repo",
+    repoRoot: "/repo",
+    goal: "pending run",
+    status,
+    leadProvider: "claude",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: `duet/${runId}/integration`,
+    configJson: "{}",
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
+  const taskRecord: TaskRecord = {
+    runId,
+    id: `${runId}-task-1`,
+    ordinal: 0,
+    plan: {
+      id: `${runId}-task-1`,
+      title: "Task",
+      objective: "Do it",
+      acceptanceCriteria: ["done"],
+      allowedPaths: ["src/**"],
+      dependencies: [],
+    },
+    status: "pending",
+    provider: "claude",
+    reviewerProvider: "codex",
+    revisionCount: 0,
+    cancellationRequested: false,
+    createdAt: stamp,
+    updatedAt: stamp,
+    ...task,
+  };
+  store.createRun(run, [taskRecord]);
+}
+
+async function discardRun(
+  base: string,
+  runId: string,
+  headers: Record<string, string>,
+): Promise<Response> {
+  return await fetch(`${base}/api/v1/runs/${encodeURIComponent(runId)}/discard`, {
+    method: "POST",
+    headers: { ...headers, "idempotency-key": `discard-${runId}` },
+    body: "{}",
+  });
+}
+
+test("dashboard session can discard a pending run (cancel + delete)", async () => {
+  const h = await startService();
+  try {
+    seedPendingRun(h.store, "pending-1", "awaiting_plan_approval");
+    const cookie = await sessionCookie(h.base);
+    const response = await discardRun(h.base, "pending-1", {
+      cookie,
+      "content-type": "application/json",
+    });
+    assert.equal(response.status, 200);
+    const data = ((await response.json()) as { data: { discarded: string } }).data;
+    assert.equal(data.discarded, "pending-1");
+    assert.throws(
+      () => h.store.getRun("pending-1"),
+      (error) => error instanceof Error && "code" in error,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("discard refuses a run that has worktrees or branches on disk", async () => {
+  const h = await startService();
+  try {
+    seedPendingRun(h.store, "pending-2", "needs_attention", {
+      branch: "duet/pending-2/task/pending-2-task-1",
+      worktreePath: "/tmp/duet/pending-2",
+    });
+    const response = await discardRun(h.base, "pending-2", bearer());
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "RUN_NOT_DISCARDABLE");
+    assert.equal(h.store.getRun("pending-2").id, "pending-2");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("tool fallback leads with successful evidence when a sibling tool call failed", async () => {
+  const searchRoot = await mkdtemp(path.join(os.tmpdir(), "duet-fallback-mixed-root-"));
+  const targetFolder = path.join(searchRoot, "nhyira-os");
+  await mkdir(targetFolder, { recursive: true });
+  const directory = await mkdtemp(path.join(os.tmpdir(), "duet-chat-fallback-mixed-"));
+  const store = new Store(path.join(directory, "state.sqlite"));
+  const openaiProvider: ProviderAdapter = {
+    name: "openai" as const,
+    supportsNativeToolCalling: true,
+    async run() {
+      // Empty final text (model emitted only tool calls) so the backend
+      // fallback runs. One search succeeds; a second, malformed search fails.
+      return {
+        provider: "openai",
+        sessionId: "fallback-mixed",
+        finalText: "",
+        stdout: "",
+        stderr: "",
+        durationMs: 3,
+        model: "openai-compatible-test",
+        toolCalls: [
+          {
+            id: "call-ok",
+            name: "search_files",
+            argumentsJson: JSON.stringify({ path: searchRoot, namePattern: "nhyira", kind: "dir" }),
+          },
+          {
+            id: "call-bad",
+            name: "search_files",
+            argumentsJson: JSON.stringify({ path: searchRoot, kind: "dir" }),
+          },
+        ],
+        usage: { inputTokens: 9, outputTokens: 7, costKnown: false },
+      };
+    },
+  };
+  const service = new DuetService({
+    store,
+    secret,
+    instanceId: "fallback-mixed-test",
+    idleTimeoutMs: 60_000,
+    chatProviders: { claude: openaiProvider, codex: openaiProvider, openai: openaiProvider },
+    managerToolRuntime: { supportsMultiStepToolLoop: false },
+  });
+  const port = await service.listen();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const conversationId = await createConversation(base, { interfaceAgent: "openai" });
+    const response = await postTurn(base, conversationId, "report on nhyira-os", "fallback-mixed-turn-1");
+    assert.equal(response.status, 202);
+    const op = ((await response.json()) as { data: { id: string } }).data;
+    await service.chat.wait(op.id);
+    const managerTurn = store.listConversationTurns(conversationId).find((turn) => turn.role === "manager");
+    assert.equal(managerTurn?.content, `I found a matching folder at ${targetFolder}.`);
+    assert.doesNotMatch(managerTurn?.content ?? "", /failed/i);
+  } finally {
+    await service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(searchRoot, { recursive: true, force: true });
+  }
+});
+
+test("provider billing-exhausted failures are stored as soft, no-cooldown provider health", async () => {
+  const h = await startService({
+    fail: true,
+    failError: new DuetError(
+      "The manager provider is out of API credits or its billing is not set up. Add credits/billing for this provider, or switch managers.",
+      "PROVIDER_BILLING_EXHAUSTED",
+    ),
+  });
+  try {
+    const conversationId = await createConversation(h.base);
+    const response = await postTurn(h.base, conversationId, "check again", "chatkey-billing");
+    const op = ((await response.json()) as { data: OperationRecord }).data;
+    await h.service.chat.wait(op.id);
+
+    const manager = h.store
+      .listConversationTurns(conversationId)
+      .find((turn) => turn.role === "manager");
+    assert.ok(manager?.errorJson);
+    assert.equal(manager.status, "failed");
+    assert.match(manager.errorJson, /PROVIDER_BILLING_EXHAUSTED/);
+    assert.match(manager.errorJson, /out of API credits/);
+    // Not a transient rate limit — never tell the operator to retry shortly.
+    assert.doesNotMatch(manager.errorJson, /try again in a moment/i);
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(
+      notes.some((note) => (
+        note.kind === "provider_health" &&
+        /out of API credits/.test(note.content) &&
+        !note.expiresAt // billing has no time-based recovery; must not set a cooldown
+      )),
+      true,
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("approved consultation runs the agent read-only and appends a reply turn + note", async () => {
+  const h = await startService({ text: "Here is my read-only take on the repo." });
+  try {
+    const conversationId = await createConversation(h.base, { interfaceAgent: "codex" });
+    const turn = h.store.appendConversationTurn({
+      conversationId,
+      role: "manager",
+      interfaceAgent: "codex",
+      content: "I can ask an agent for help.",
+    });
+    const proposalId = randomUUID();
+    h.store.createProposal({
+      id: proposalId,
+      conversationId,
+      turnId: turn.id,
+      runId: undefined,
+      taskId: undefined,
+      action: "agent_consultation",
+      summary: "Ask Claude read-only.",
+      commandCli: "Read-only agent consultation.",
+      commandJson: JSON.stringify({
+        action: "agent_consultation",
+        question: "What should I focus on?",
+        agents: ["claude"],
+        mode: "independent",
+        profile: "balanced",
+        maxRuntimeSeconds: 30,
+      }),
+      tier: "ordinary",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+
+    const res = await fetch(
+      `${h.base}/api/v1/chat/conversations/${conversationId}/proposals/${proposalId}/start`,
+      {
+        method: "POST",
+        headers: { ...bearer(), "idempotency-key": "consult-start-1" },
+        body: JSON.stringify({ confirm: "start" }),
+      },
+    );
+    assert.equal(res.status, 202);
+    const op = ((await res.json()) as { data: OperationRecord }).data;
+    assert.equal(op.kind, "consultation");
+    await h.service.consultation.wait(op.id);
+
+    const turns = h.store.listConversationTurns(conversationId);
+    const consult = turns.find((t) => t.role === "manager" && t.interfaceAgent === "claude");
+    assert.ok(consult, "expected a Claude consultation turn");
+    assert.match(consult!.content, /read-only take/i);
+    const usage = JSON.parse(consult!.usageJson ?? "{}") as { consultation?: boolean; agent?: string };
+    assert.equal(usage.consultation, true);
+    assert.equal(usage.agent, "claude");
+
+    const notes = h.store.listManagerSharedContext({ limit: 10 });
+    assert.equal(
+      notes.some((n) => n.kind === "handoff" && n.provider === "claude" && /Consulted claude/.test(n.content)),
+      true,
+    );
+
+    assert.equal(h.store.getOperation(op.id).status, "succeeded");
+    assert.equal(h.store.getProposal(proposalId).status, "started");
+  } finally {
+    await h.cleanup();
   }
 });

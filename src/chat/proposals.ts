@@ -312,6 +312,11 @@ export function parseProposalBlock(text: string): ParseResult {
 }
 
 export function stripMalformedProposalArtifacts(text: string): string {
+  const toolCallIndex = text.search(/<tool_?call\b/i);
+  if (toolCallIndex >= 0) {
+    return text.slice(0, toolCallIndex).trimEnd();
+  }
+
   const fenceIndex = text.indexOf(FENCE_OPEN);
   if (fenceIndex >= 0) {
     return text.slice(0, fenceIndex).trimEnd();
@@ -511,7 +516,7 @@ export function tryValidateAndSynthesize(
       ? raw.agents.filter((agent): agent is ProviderName => VALID_LEADS.has(agent as ProviderName))
       : [];
     const uniqueAgents = [...new Set(agents)];
-    // Phase 7A only supports independent consultation; debate mode is deferred.
+    // Independent consultation only; debate mode is deferred.
     const mode = "independent";
     const profile: AgentProfile =
       raw.profile && VALID_PROFILES.has(raw.profile as AgentProfile)
@@ -520,6 +525,27 @@ export function tryValidateAndSynthesize(
     if (!question || uniqueAgents.length === 0) {
       if (diagnostics) diagnostics.reason = "agent_consultation needs a question and at least one agent.";
       return null;
+    }
+    // Optional repo grounding: resolve an alias or accept a full path, but it
+    // must be a real git repo on disk so the read-only consultation has
+    // something valid to inspect.
+    let repoPath: string | undefined;
+    const rawRepo = raw.repoPath?.trim();
+    if (rawRepo) {
+      let resolved = rawRepo;
+      if (looksLikeAlias(rawRepo)) {
+        const alias = resolveAlias(rawRepo, store, configAliases);
+        if (!alias) {
+          if (diagnostics) diagnostics.reason = `No alias named "${rawRepo}" exists. Provide a full path or omit repoPath.`;
+          return null;
+        }
+        resolved = alias.repoPath;
+      }
+      if (!existsSync(resolved) || !isGitRepo(resolved)) {
+        if (diagnostics) diagnostics.reason = `The path "${resolved}" is not a valid git repository. Omit repoPath for a general consultation.`;
+        return null;
+      }
+      repoPath = resolved;
     }
     const maxTurns =
       typeof raw.maxTurns === "number" && Number.isFinite(raw.maxTurns)
@@ -537,13 +563,14 @@ export function tryValidateAndSynthesize(
       profile,
       maxTurns,
       maxRuntimeSeconds,
+      ...(repoPath ? { repoPath } : {}),
     });
     const summary = raw.rationale
       ? raw.rationale.slice(0, 500)
       : `Ask ${uniqueAgents.join(" + ")} for a read-only ${mode} consultation.`;
     return {
       action: "agent_consultation",
-      commandCli: "Agent consultation consent request (execution is deferred in Phase 7A).",
+      commandCli: "Read-only agent consultation. Approve to ask the selected agents; their replies appear in the chat.",
       commandJson,
       tier: "ordinary",
       summary,
@@ -636,10 +663,7 @@ export function prepareProposalAction(
   }
 
   if (proposal.action === "agent_consultation") {
-    return unavailable(
-      prepared,
-      "Agent consultation execution is not available in Phase 7A.",
-    );
+    return prepared; // no run to check; availability is determined by expiry only
   }
 
   if (conversation.runId && proposal.runId !== conversation.runId) {
@@ -743,10 +767,9 @@ export function startProposalAction(
   }
 
   if (proposal.action === "agent_consultation") {
-    throw new DuetError(
-      "Agent consultation execution is not available in Phase 7A.",
-      "NOT_IMPLEMENTED",
-    );
+    // Dispatched by the server to the consultation runner, not as a
+    // LongRunningCommand (it returns chat turns, not a RunRecord).
+    return { proposal, command: null };
   }
   if (!proposal.runId) {
     throw new DuetError("Proposal is missing a run.", "INVALID_PROPOSAL");
