@@ -22,8 +22,20 @@ The app is now a local dual-agent orchestrator with:
 Manager Chat can currently:
 
 - Run globally (no run selected) or scoped to a selected run.
-- Use Codex, Claude, or any OpenAI-compatible endpoint (e.g. Groq) as the
-  manager voice — configured via `duet.toml` and `.env`.
+- Use any of six manager voices, switchable per conversation: GLM (default),
+  Groq, Gemini, OpenAI, Claude, or Codex. GLM/Groq/Gemini are native
+  OpenAI-compatible identities that enable automatically when their key is
+  present (`ZAI_API_KEY`/`GROQ_API_KEY`/`GEMINI_API_KEY`). Configured via
+  `duet.toml` and `.env`.
+- Request operator-approved, read-only consultations from Claude or Codex
+  (`request_agent_consultation`): a consent card is created, and on approval
+  each agent inspects the repository read-only and its reply appears inline.
+  Read-only repo access only — no shell, fingerprint-enforced.
+- Show a live working indicator during a manager turn with the actual tool call
+  and its result (not just a spinner), plus a Stop button scoped to that turn
+  (cancels the in-flight provider request without touching background runs).
+- Surface shared manager memory (provider-health / cooldown notes) even before
+  the first conversation turn exists.
 - Summarize run, task, event, verification, and usage state.
 - Recommend provider and profile strategy based on current usage and
   availability (prefer_claude, prefer_codex, balanced, both_limited).
@@ -88,8 +100,12 @@ The product direction is now explicitly manager-first:
 - Natural language should be the first interaction path, with visible controls
   as backup.
 - Claude and Codex remain worker and reviewer agents.
-- OpenAI or ChatGPT-backed manager behavior should become the default manager
-  lane when supported local integration paths allow it.
+- An OpenAI-compatible manager lane should be the default so dashboard chat does
+  not consume Claude/Codex worker quota. This is now realized: the shipped
+  default is **GLM** (native tool calling, low cost). It was briefly defaulted to
+  Groq, but groq/llama models frequently fail to form valid tool calls
+  ("could not form a valid tool call"), so GLM is the reliable default. Gemini is
+  a good secondary; real OpenAI/ChatGPT remains a future option.
 - Codex manager and Claude manager remain selectable fallback lanes.
 - The manager should suggest provider choices per stage and per run profile, and
   the human approves before those choices take effect.
@@ -195,7 +211,45 @@ These are architectural recommendations, not yet-completed implementation:
     removed.
   - Dropped stray `mkdir(codexHomePath())` startup side-effect from `duetd.ts`.
 
+- **Live Timeline + Consultation + Provider Control** (`feature/live-timeline`,
+  PR #23, merged):
+  - Read-only agent consultation runner (`ConsultationActivityManager`): manager
+    proposes `request_agent_consultation`, operator approves, Claude/Codex answer
+    read-only (fingerprint-enforced), replies appear inline as manager turns.
+  - Native OpenAI-compatible manager identities (groq, gemini, glm) split out;
+    manager voice switchable per conversation across all six providers.
+  - Live tool timeline: `ManagerActivity` carries `tool` + `tool-result` frames
+    (args/ok/elapsed/result); dashboard shows the live call and result.
+  - Cancellation correctness: `shouldCancel` wired into the OpenAI-compatible
+    adapter (aborts the in-flight HTTP request, ~200ms), and `cancelActive` is
+    abort-only so the run promise owns the terminal write (no UI/backend race).
+  - Composer Stop scoped to the current manager turn via
+    `POST /operations/:id/cancel` (never cancels background runs).
+  - `GET /chat/shared-context` exposes provider-health notes before the first
+    turn; orphan-recovery restart waits for PID/port release before relaunch.
+  - Default manager set to GLM (was groq) for reliable tool calling.
+
 ## Recommended Next Planning Targets
+
+### Phase 7B: Manager tool-call reliability (highest value)
+
+groq/llama models frequently return `PROVIDER_TOOL_CALL_FAILED`; today the turn
+dies with no retry. Add a one-shot retry on that code, and/or transparent
+failover to a reliable tool-calling provider (GLM/Gemini) with a visible note.
+Defaulting to GLM mitigates but does not solve this for groq users.
+
+### Phase 7C: Live timeline depth
+
+The live `tool`/`tool-result` data now exists but the dashboard renders only a
+one-line working bubble. Render a real expanding per-call timeline, and consider
+moving `/operations/:id` from 100ms polling to SSE streaming.
+
+### Phase 7D: Consultation depth
+
+Add debate mode (currently independent-only; `maxTurns` is vestigial), fix the
+provider-lock coordination gap (a consultation and a manager turn can run in the
+same conversation concurrently), and surface estimated consultation cost on the
+consent card before approval.
 
 ### Phase 6C: Extension Points
 
@@ -231,7 +285,14 @@ npm run test:dashboard
 ## Planning Advice
 
 Start future branches from updated `main`, not old stacked feature branches.
-At the time of this note, `main` contains work through Phase 5H and phone
-dashboard access (PRs #16–#19 all merged). The current in-progress branch is
-`feature/improving-general-feel` (see In Progress above). Start the next phase
-from `main` after it merges.
+At the time of this note, `main` contains work through the Mobile/Conversational
+Manager pass and the Live Timeline + Consultation + Provider Control work
+(PR #23, merged). There is no in-progress feature branch. Start the next phase
+(Phase 7B tool-call reliability is the recommended first target) from `main`.
+
+Note on provider auth: Duet keeps an isolated Codex credential store
+(`<repo>/.duet/codex-home`), not your normal `~/.codex` — re-auth with
+`node dist/cli.js auth codex`. The Claude manager uses the `claude` CLI's
+headless token; a 401 means re-login with `claude` then `/login`. Verify with
+`node dist/cli.js doctor --live` (its auth line can read PASS while the live
+probe FAILS — trust the probe).
