@@ -238,9 +238,9 @@ function daysFromNow(days: number): string {
 }
 
 /**
- * Runs a single read-only manager turn. The manager answers from assembled
- * context only; in Phase 5A it has no execution or proposal path. Budget is
- * checked BEFORE any provider call so an over-cap turn never spends quota.
+ * Runs a manager turn. The manager answers from assembled context and may use
+ * read-only tools and create proposal cards; it never mutates the repo directly.
+ * Budget is checked BEFORE any provider call so an over-cap turn never spends quota.
  */
 export class ChatEngine {
   private readonly cwdFor: (conversation: ConversationRecord) => string;

@@ -30,9 +30,12 @@ commands = [
 CI = "true"
 
 [manager]
-# Which provider voices the manager: openai | claude | codex.
-# Set to "openai" and export OPENAI_API_KEY to avoid consuming Claude/Codex worker quota.
-provider = "codex"
+# Which voice the manager uses: glm | groq | gemini | openai | claude | codex.
+# glm/groq/gemini are native OpenAI-compatible identities — each enables when its
+# API key is set (ZAI_API_KEY / GROQ_API_KEY / GEMINI_API_KEY) and avoids using
+# Claude/Codex worker quota for ordinary chat. groq/llama models often fail to
+# form valid tool calls, so glm is the recommended default.
+provider = "glm"
 # OpenAI model used when provider = "openai".
 openai_model = "gpt-4o-mini"
 # Per-turn and daily OpenAI spend caps (USD).

@@ -149,7 +149,7 @@ const ACTION_SPECS: Readonly<Record<ProposalAction, ActionSpec>> = {
   agent_consultation: {
     tier: "ordinary",
     requiresTask: false,
-    cli: () => "duet consultation request (dashboard consent only; execution deferred)",
+    cli: () => "Read-only agent consultation. Approve to ask the selected agents; their replies appear in the chat.",
     jsonFields: () => ({ action: "agent_consultation" }),
   },
   execute_run: {
@@ -901,8 +901,8 @@ function commandForProposal(proposal: ManagerActionProposal): LongRunningCommand
   }
   if (proposal.action === "agent_consultation") {
     throw new DuetError(
-      "agent_consultation execution is deferred in Phase 7A.",
-      "NOT_IMPLEMENTED",
+      "agent_consultation proposals are dispatched by the server, not commandForProposal.",
+      "INVALID_PROPOSAL",
     );
   }
   if (!proposal.runId) {
