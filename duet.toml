@@ -35,7 +35,9 @@ CI = "true"
 # its API key is present (GROQ_API_KEY / GEMINI_API_KEY). These defaults favor
 # low-cost structured tool calls; env vars still override them.
 # The dashboard can switch between configured manager providers per conversation.
-provider = "groq"
+# GLM is the default: it reliably forms native tool calls, whereas groq/llama
+# models often emit malformed tool-call payloads ("could not form a valid tool call").
+provider = "glm"
 groq_model = "openai/gpt-oss-120b"
 groq_base_url = "https://api.groq.com/openai/v1"
 gemini_model = "gemini-3.1-flash-lite"
@@ -88,4 +90,4 @@ port = 58208
 [dashboard]
 persistent_access = true
 # Set this only if you want a fixed LAN/public host for phone access.
-public_host = "153.106.86.65"
+public_host = "100.117.137.4"
