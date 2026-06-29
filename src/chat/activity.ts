@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { OperationRecord } from "../core/domain.js";
 import { DuetError } from "../core/errors.js";
 import type { Store } from "../persistence/store.js";
+import { ConversationActivityLock } from "./conversation-lock.js";
 import type { ChatEngine, ManagerActivity } from "./engine.js";
 
 const operationErrorMessageLimit = 500;
@@ -129,6 +130,9 @@ export class ChatActivityManager {
     private readonly store: Store,
     private readonly engine: ChatEngine,
     private readonly serviceInstanceId: string,
+    // Shared with the consultation runner so the two never run concurrently in
+    // one conversation. Defaults to a private lock for standalone construction.
+    private readonly conversationLock: ConversationActivityLock = new ConversationActivityLock(),
   ) {}
 
   hasActiveOperations(): boolean {
@@ -192,9 +196,9 @@ export class ChatActivityManager {
     inputHash: string;
   }): OperationRecord {
     const conversation = this.store.getConversation(input.conversationId);
-    if (this.activeConversations.has(input.conversationId)) {
+    if (this.conversationLock.isBusy(input.conversationId)) {
       throw new DuetError(
-        `Conversation ${input.conversationId} already has an active manager turn.`,
+        `Conversation ${input.conversationId} already has active work (a manager turn or consultation is running).`,
         "CHAT_TURN_ACTIVE",
       );
     }
@@ -223,6 +227,7 @@ export class ChatActivityManager {
       return op;
     });
     const controller = new AbortController();
+    this.conversationLock.acquire(input.conversationId);
     this.activeConversations.set(input.conversationId, operation.id);
     this.activeProviders.set(conversation.interfaceAgent, operation.id);
     const promise = this.run(
@@ -231,6 +236,7 @@ export class ChatActivityManager {
       controller,
     ).finally(() => {
       this.activities.delete(operation.id);
+      this.conversationLock.release(input.conversationId);
       if (this.activeConversations.get(input.conversationId) === operation.id) {
         this.activeConversations.delete(input.conversationId);
       }

@@ -216,75 +216,90 @@ export class OpenAIManagerAdapter implements ProviderAdapter {
     cancelPoll?.unref?.();
     let completion: Awaited<ReturnType<typeof this.client.chat.completions.create>>;
     const hasTools = !!turn.tools?.length;
+    // Retry once on a malformed tool-call generation. groq/llama models reject
+    // their own tool calls stochastically ("could not form a valid tool call");
+    // a second attempt at temperature 0 usually succeeds, so a single retry
+    // avoids surfacing PROVIDER_TOOL_CALL_FAILED for a transient hiccup.
+    const maxAttempts = hasTools ? 2 : 1;
     try {
-      completion = await this.client.chat.completions.create(
-        {
-          model: this.model,
-          // The whole bounded context is the system prompt so the rules and the
-          // proposal format carry more weight than they would as a user turn.
-          // A trailing user turn is REQUIRED: Gemini's OpenAI-compat layer maps
-          // `system` -> systemInstruction, so a system-only request leaves
-          // `contents` empty and 400s ("contents is not specified"). The context
-          // already embeds the conversation; this nudges a reply to it.
-          // Prior tool-loop steps (if any) are replayed between the nudge and now
-          // so the model can chain tools with real tool-result messages.
-          messages: [
-            { role: "system", content: turn.prompt },
-            { role: "user", content: "Reply directly to the operator's latest message above. Do not restate or quote it back — open with your answer." },
-            ...(turn.priorSteps?.length ? replaySteps(turn.priorSteps) : []),
-          ],
-          tools: hasTools ? serializeTools(turn.tools!) : undefined,
-          tool_choice: hasTools ? "auto" : undefined,
-          // Disable parallel tool calls: llama/Groq models generate malformed
-          // JSON when they attempt multiple concurrent tool calls.
-          ...(hasTools ? { parallel_tool_calls: false } : {}),
-          // Low temperature: the manager's job is reliable instruction-following
-          // (especially emitting the exact duet-proposal block). High temperature
-          // makes weaker models narrate "I will propose..." instead of emitting.
-          temperature: 0.2,
-        },
-        { signal: controller.signal },
-      );
-    } catch (error) {
-      // A cancel-driven abort surfaces as CANCELLED so the engine treats it as a
-      // stop, not a provider failure. A timeout abort falls through to the
-      // generic handling below.
-      if (controller.signal.aborted && turn.shouldCancel?.()) {
-        throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+      for (let attempt = 1; ; attempt++) {
+        try {
+          completion = await this.client.chat.completions.create(
+            {
+              model: this.model,
+              // The whole bounded context is the system prompt so the rules and the
+              // proposal format carry more weight than they would as a user turn.
+              // A trailing user turn is REQUIRED: Gemini's OpenAI-compat layer maps
+              // `system` -> systemInstruction, so a system-only request leaves
+              // `contents` empty and 400s ("contents is not specified"). The context
+              // already embeds the conversation; this nudges a reply to it.
+              // Prior tool-loop steps (if any) are replayed between the nudge and now
+              // so the model can chain tools with real tool-result messages.
+              messages: [
+                { role: "system", content: turn.prompt },
+                { role: "user", content: "Reply directly to the operator's latest message above. Do not restate or quote it back — open with your answer." },
+                ...(turn.priorSteps?.length ? replaySteps(turn.priorSteps) : []),
+              ],
+              tools: hasTools ? serializeTools(turn.tools!) : undefined,
+              tool_choice: hasTools ? "auto" : undefined,
+              // Disable parallel tool calls: llama/Groq models generate malformed
+              // JSON when they attempt multiple concurrent tool calls.
+              ...(hasTools ? { parallel_tool_calls: false } : {}),
+              // Low temperature: the manager's job is reliable instruction-following
+              // (especially emitting the exact duet-proposal block). High temperature
+              // makes weaker models narrate "I will propose..." instead of emitting.
+              // Drop to 0 on a retry so the re-attempted tool call is as
+              // deterministic as possible.
+              temperature: attempt > 1 ? 0 : 0.2,
+            },
+            { signal: controller.signal },
+          );
+          break;
+        } catch (error) {
+          // A cancel-driven abort surfaces as CANCELLED so the engine treats it as a
+          // stop, not a provider failure. A timeout abort falls through to the
+          // generic handling below.
+          if (controller.signal.aborted && turn.shouldCancel?.()) {
+            throw new DuetError("Manager chat turn cancelled.", "CANCELLED");
+          }
+          if (attempt < maxAttempts && isToolCallGenerationFailure(error)) {
+            continue;
+          }
+          if (isContextLimit(error)) {
+            throw new DuetError(
+              contextLimitMessage(error),
+              "RATE_LIMITED",
+            );
+          }
+          if (isBillingExhausted(error)) {
+            throw new DuetError(
+              "The manager provider is out of API credits or its billing is not set up. Add credits/billing for this provider, or switch managers.",
+              "PROVIDER_BILLING_EXHAUSTED",
+            );
+          }
+          if (isRateLimit(error)) {
+            const seconds = retryAfterSeconds(error);
+            const when = seconds ? ` You can try again in about ${seconds}s.` : " Try again in a moment.";
+            throw new DuetError(
+              `The manager model is rate limited right now.${when}`,
+              "RATE_LIMITED",
+            );
+          }
+          if (isToolCallGenerationFailure(error)) {
+            throw new DuetError(
+              "The manager provider could not form a valid tool call. Try again or switch managers.",
+              "PROVIDER_TOOL_CALL_FAILED",
+            );
+          }
+          if (isProviderConfigurationError(error)) {
+            throw new DuetError(
+              "The manager provider is not configured for this model or API key. Check the model, base URL, billing, or key, or switch managers.",
+              "PROVIDER_CONFIGURATION_ERROR",
+            );
+          }
+          throw error;
+        }
       }
-      if (isContextLimit(error)) {
-        throw new DuetError(
-          contextLimitMessage(error),
-          "RATE_LIMITED",
-        );
-      }
-      if (isBillingExhausted(error)) {
-        throw new DuetError(
-          "The manager provider is out of API credits or its billing is not set up. Add credits/billing for this provider, or switch managers.",
-          "PROVIDER_BILLING_EXHAUSTED",
-        );
-      }
-      if (isRateLimit(error)) {
-        const seconds = retryAfterSeconds(error);
-        const when = seconds ? ` You can try again in about ${seconds}s.` : " Try again in a moment.";
-        throw new DuetError(
-          `The manager model is rate limited right now.${when}`,
-          "RATE_LIMITED",
-        );
-      }
-      if (isToolCallGenerationFailure(error)) {
-        throw new DuetError(
-          "The manager provider could not form a valid tool call. Try again or switch managers.",
-          "PROVIDER_TOOL_CALL_FAILED",
-        );
-      }
-      if (isProviderConfigurationError(error)) {
-        throw new DuetError(
-          "The manager provider is not configured for this model or API key. Check the model, base URL, billing, or key, or switch managers.",
-          "PROVIDER_CONFIGURATION_ERROR",
-        );
-      }
-      throw error;
     } finally {
       clearTimeout(timer);
       if (cancelPoll) clearInterval(cancelPoll);

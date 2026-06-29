@@ -355,7 +355,7 @@ export function buildManagerChatContext(
       "- create_plan_proposal — only when the operator clearly asks to start/create a plan, or confirms a plan you just offered.",
       "- set_strategy_proposal, set_alias_proposal — only when the operator asks to set a strategy or save an alias.",
       ...(options.supportsAgentConsultation
-        ? ["- request_agent_consultation — creates a consent card to ask Claude/Codex (paid). Not executed yet."]
+        ? ["- request_agent_consultation — creates a consent card to ask Claude/Codex (paid). On approval each agent answers read-only and its reply appears in the chat."]
         : []),
       "",
       "When a tool fails (e.g. path is not a git repo), explain the failure plainly and suggest the next step — do not retry blindly or invent state.",
