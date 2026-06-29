@@ -69,6 +69,15 @@ test("two non-overlapping tasks run concurrently and integrate deterministically
   let activeWorkers = 0;
   let maximumWorkers = 0;
   let sequence = 0;
+  // Force the two workers to overlap deterministically instead of relying on
+  // wall-clock sleeps. The git/worktree setup each task performs before the stub
+  // runs has unbounded latency under CPU load, so fixed sleeps could fail to
+  // overlap and make maximumWorkers read 1 (a flaky "expected 2, got 1").
+  const expectedConcurrentWorkers = 2;
+  let releaseWorkerBarrier: () => void = () => {};
+  const bothWorkersActive = new Promise<void>((resolve) => {
+    releaseWorkerBarrier = resolve;
+  });
 
   class StubAdapter implements ProviderAdapter {
     constructor(readonly name: ProviderName) {}
@@ -80,9 +89,20 @@ test("two non-overlapping tasks run concurrently and integrate deterministically
       if (worker) {
         activeWorkers += 1;
         maximumWorkers = Math.max(maximumWorkers, activeWorkers);
+        if (activeWorkers >= expectedConcurrentWorkers) releaseWorkerBarrier();
       }
       try {
-        await new Promise((resolve) => setTimeout(resolve, worker ? 500 : 15));
+        if (worker) {
+          // Block until both workers are concurrently active, with a generous
+          // timeout so a genuine single-worker regression fails the assertion
+          // instead of hanging.
+          await Promise.race([
+            bothWorkersActive,
+            new Promise((resolve) => setTimeout(resolve, 2_000)),
+          ]);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
         sequence += 1;
         if (turn.prompt.includes("planning lead")) {
           return result(
