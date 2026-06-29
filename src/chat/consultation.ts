@@ -13,6 +13,7 @@ import {
   fingerprintRepository,
 } from "../git/repository.js";
 import type { Store } from "../persistence/store.js";
+import { ConversationActivityLock } from "./conversation-lock.js";
 import type { ChatProviders } from "./engine.js";
 import { stripMalformedProposalArtifacts } from "./proposals.js";
 
@@ -51,6 +52,9 @@ export class ConsultationActivityManager {
     private readonly providers: ChatProviders,
     private readonly budget: ManagerBudget,
     private readonly serviceInstanceId: string,
+    // Shared with the manager-turn runner so the two never run concurrently in
+    // one conversation. Defaults to a private lock for standalone construction.
+    private readonly conversationLock: ConversationActivityLock = new ConversationActivityLock(),
   ) {}
 
   hasActiveOperations(): boolean {
@@ -80,9 +84,9 @@ export class ConsultationActivityManager {
 
   submit(input: ConsultationInput): OperationRecord {
     const conversation = this.store.getConversation(input.conversationId);
-    if (this.activeConversations.has(input.conversationId)) {
+    if (this.conversationLock.isBusy(input.conversationId)) {
       throw new DuetError(
-        `Conversation ${input.conversationId} already has an active consultation.`,
+        `Conversation ${input.conversationId} already has active work (a manager turn or consultation is running).`,
         "CHAT_TURN_ACTIVE",
       );
     }
@@ -97,9 +101,11 @@ export class ConsultationActivityManager {
     };
     this.store.createOperation(operation);
     const controller = new AbortController();
+    this.conversationLock.acquire(input.conversationId);
     this.activeConversations.set(input.conversationId, operation.id);
     const promise = this.run(operation.id, input, controller).finally(() => {
       this.activities.delete(operation.id);
+      this.conversationLock.release(input.conversationId);
       if (this.activeConversations.get(input.conversationId) === operation.id) {
         this.activeConversations.delete(input.conversationId);
       }

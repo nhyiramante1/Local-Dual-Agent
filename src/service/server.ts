@@ -9,6 +9,7 @@ import { ApplicationCommands } from "../application/commands.js";
 import { approvalBinding } from "../application/integrity.js";
 import { ChatActivityManager } from "../chat/activity.js";
 import { ConsultationActivityManager } from "../chat/consultation.js";
+import { ConversationActivityLock } from "../chat/conversation-lock.js";
 import {
   ChatEngine,
   defaultManagerBudget,
@@ -204,6 +205,9 @@ export class DuetService {
       claude: new ClaudeAdapter(),
       codex: new CodexAdapter(),
     };
+    // One lock shared by both runners so a manager turn and a consultation can
+    // never be active in the same conversation at the same time.
+    const conversationLock = new ConversationActivityLock();
     this.chat = new ChatActivityManager(
       options.store,
       new ChatEngine(
@@ -216,12 +220,14 @@ export class DuetService {
         options.managerToolRuntime ?? options.config?.manager,
       ),
       options.instanceId,
+      conversationLock,
     );
     this.consultation = new ConsultationActivityManager(
       options.store,
       chatProviders,
       options.managerBudget ?? defaultManagerBudget,
       options.instanceId,
+      conversationLock,
     );
     // Marks interrupted operations (run + manager_turn) from prior instances.
     this.activities.recoverInterrupted();

@@ -48,3 +48,7 @@ export function artifactsRoot(): string {
 export function verificationRoot(): string {
   return path.join(duetDataRoot(), "verification");
 }
+
+export function verificationCacheRoot(): string {
+  return process.env.DUET_VERIFICATION_CACHE ?? path.join(duetDataRoot(), "verification-cache");
+}
